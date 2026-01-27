@@ -58,6 +58,77 @@ mcp = FastMCP(
 
 
 # =============================================================================
+# v9b: Constitutional Principles for Critic
+# =============================================================================
+
+CONSTITUTIONAL_PRINCIPLES = [
+    {
+        "principle": "Identify unstated assumptions",
+        "focus": "Implicit requirements, hidden dependencies, unverified preconditions",
+        "question": "What must be true for this to work that isn't explicitly stated?"
+    },
+    {
+        "principle": "Check boundary conditions",
+        "focus": "Empty inputs, null values, extreme sizes, negative numbers",
+        "question": "What happens at the edges of valid input ranges?"
+    },
+    {
+        "principle": "Verify causation vs correlation",
+        "focus": "Logical reasoning, cause-effect chains, spurious relationships",
+        "question": "Does X actually cause Y, or are they merely correlated?"
+    },
+    {
+        "principle": "Question unstated dependencies",
+        "focus": "Libraries, services, configurations, external state",
+        "question": "What external systems/state does this rely on?"
+    },
+    {
+        "principle": "Consider failure modes",
+        "focus": "Error handling, timeouts, partial failures, rollback",
+        "question": "What happens when this fails? Is recovery possible?"
+    }
+]
+
+
+# =============================================================================
+# v10b: Critic Ensemble Personas
+# =============================================================================
+
+CRITIC_PERSONAS = [
+    {
+        "name": "Strict Skeptic",
+        "instruction": "Find any reason to reject this hypothesis. Assume it's flawed until proven otherwise. Be harsh but fair.",
+        "focus_areas": ["logical fallacies", "unsupported claims", "wishful thinking"]
+    },
+    {
+        "name": "Pragmatic Engineer",
+        "instruction": "Will this work in production? Consider scale, maintenance, edge cases, and operational complexity.",
+        "focus_areas": ["scalability", "maintainability", "error handling", "performance"]
+    },
+    {
+        "name": "Domain Expert",
+        "instruction": "Does this align with established patterns and scientific principles? Check against known laws and best practices.",
+        "focus_areas": ["pattern adherence", "principle alignment", "industry standards"]
+    }
+]
+
+AGGREGATION_GUIDANCE = "Run critique with each persona. For final severity: use MAX severity if any persona finds a critical flaw, otherwise AVERAGE across personas."
+
+
+# =============================================================================
+# v10a: Negation Detection Helper
+# =============================================================================
+
+NEGATION_PATTERNS = {'not', "n't", 'never', 'prohibit', 'avoid', 'without', 'disable', 'prevent', 'forbid', 'cannot', "won't", "shouldn't", "mustn't"}
+
+
+def detect_negation(text: str) -> set:
+    """Detect negation patterns in text for v10a NLI MVP."""
+    text_lower = text.lower()
+    return {p for p in NEGATION_PATTERNS if p in text_lower}
+
+
+# =============================================================================
 # Sampling Helper - Communicates with the Host LLM (Antigravity IDE)
 # =============================================================================
 
@@ -573,7 +644,7 @@ async def store_expansion(
             hyp_emb = get_embedding(hypothesis_text)
             cur.execute(
                 """
-                SELECT id, law_name, scientific_weight, 1 - (embedding <=> %s::vector) as similarity
+                SELECT id, law_name, definition, scientific_weight, 1 - (embedding <=> %s::vector) as similarity
                 FROM scientific_laws WHERE embedding IS NOT NULL
                 ORDER BY embedding <=> %s::vector LIMIT 1
                 """,
@@ -583,7 +654,16 @@ async def store_expansion(
             
             # Calculate Bayesian scores
             if law:
+                # v10a: Negation detection MVP - detect contradiction between hypothesis and law
+                hyp_negations = detect_negation(hypothesis_text)
+                law_negations = detect_negation(law["definition"]) if "definition" in law else set()
+                
+                # If one has negation and other doesn't, they may contradict
+                negation_asymmetry = bool(hyp_negations) != bool(law_negations)
+                negation_penalty = 0.2 if negation_asymmetry else 0.0
+                
                 prior = (float(law["scientific_weight"]) * 0.6) + (float(law["similarity"]) * 0.4)
+                prior = max(0.1, prior - negation_penalty)  # v10a: Apply negation penalty
                 supporting_law = [law["id"]]
                 law_name = law["law_name"]
             else:
@@ -714,7 +794,12 @@ async def prepare_critique(node_id: str) -> dict[str, Any]:
                 "posterior": float(node["posterior_score"]) if node["posterior_score"] else None
             },
             "supporting_laws": laws_text,
-            "instructions": "Challenge this hypothesis: What could be wrong? What would make it STRONGER? Generate critique with counterargument and severity_score (0.0-1.0). Balance criticism with constructive improvement. Call store_critique(node_id=..., counterargument=..., severity_score=..., logical_flaws='flaw1, flaw2', edge_cases='case1, case2')."
+            "instructions": "Challenge this hypothesis: What could be wrong? What would make it STRONGER? Generate critique with counterargument and severity_score (0.0-1.0). Balance criticism with constructive improvement. Call store_critique(node_id=..., counterargument=..., severity_score=..., logical_flaws='flaw1, flaw2', edge_cases='case1, case2').",
+            # v9b: Constitutional Principles for structured critique
+            "constitutional_principles": CONSTITUTIONAL_PRINCIPLES,
+            # v10b: Critic Ensemble Personas
+            "critic_personas": CRITIC_PERSONAS,
+            "aggregation_guidance": AGGREGATION_GUIDANCE
         }
         
     except Exception as e:
@@ -732,7 +817,9 @@ async def store_critique(
     counterargument: str,
     severity_score: float,
     logical_flaws: str = "",
-    edge_cases: str = ""
+    edge_cases: str = "",
+    major_flaws: str = "",  # v9a: Major flaws that invalidate hypothesis
+    minor_flaws: str = ""   # v9a: Minor concerns worth noting
 ) -> dict[str, Any]:
     """
     Store critique results and update node likelihood.
@@ -745,6 +832,8 @@ async def store_critique(
         severity_score: Impact score 0.0-1.0 (higher = more severe critique)
         logical_flaws: Comma or newline separated list of flaws (optional)
         edge_cases: Comma or newline separated list of edge cases (optional)
+        major_flaws: v9a - Major issues that would invalidate the hypothesis (comma-separated)
+        minor_flaws: v9a - Minor concerns worth noting but not blocking (comma-separated)
         
     Returns:
         Updated node scores
@@ -760,7 +849,33 @@ async def store_critique(
         
         severity = float(severity_score)
         old_likelihood = float(node["likelihood"])
-        new_likelihood = max(0.1, old_likelihood * (1 - severity * 0.5))
+        
+        # v9a: Tiered penalty calculation
+        MAJOR_PENALTY = 0.15  # Each major flaw has significant impact
+        MINOR_PENALTY = 0.03  # Each minor flaw has small impact
+        
+        major_count = len([f for f in major_flaws.replace('\n', ',').split(',') if f.strip()])
+        minor_count = len([f for f in minor_flaws.replace('\n', ',').split(',') if f.strip()])
+        
+        if major_count > 0 or minor_count > 0:
+            # v9a: Use tiered penalty calculation
+            total_penalty = (major_count * MAJOR_PENALTY) + (minor_count * MINOR_PENALTY)
+            new_likelihood = max(0.1, old_likelihood * (1 - min(total_penalty, 0.8)))
+            tier_breakdown = {
+                "major_count": major_count,
+                "minor_count": minor_count,
+                "total_penalty": round(total_penalty, 3),
+                "method": "tiered"
+            }
+        else:
+            # Legacy: fallback to severity_score
+            new_likelihood = max(0.1, old_likelihood * (1 - severity * 0.5))
+            tier_breakdown = {
+                "major_count": 0,
+                "minor_count": 0,
+                "total_penalty": round(severity * 0.5, 3),
+                "method": "legacy_severity"
+            }
         
         cur.execute(
             "UPDATE thought_nodes SET likelihood = %s, updated_at = NOW() WHERE id = %s RETURNING prior_score, likelihood, posterior_score",
@@ -786,7 +901,9 @@ async def store_critique(
                 "old_likelihood": old_likelihood,
                 "new_likelihood": float(updated["likelihood"]),
                 "posterior_score": float(updated["posterior_score"]) if updated["posterior_score"] else None
-            }
+            },
+            # v9a: Tier breakdown for transparency
+            "tier_breakdown": tier_breakdown
         }
         
     except Exception as e:
