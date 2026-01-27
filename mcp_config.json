@@ -1,0 +1,13 @@
+{
+    "mcpServers": {
+        "pas-server": {
+            "command": "/home/nocoma/Documents/MCP/PAS/.venv/bin/python",
+            "args": [
+                "/home/nocoma/Documents/MCP/PAS/server.py"
+            ],
+            "env": {
+                "DATABASE_URL": "postgresql://mcp_admin:12345@localhost:5432/mcp_pas"
+            }
+        }
+    }
+}

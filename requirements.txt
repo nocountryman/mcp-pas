@@ -1,0 +1,6 @@
+mcp
+psycopg2-binary
+pgvector
+pydantic
+numpy
+sentence-transformers
