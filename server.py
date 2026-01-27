@@ -457,7 +457,7 @@ async def prepare_expansion(session_id: str, parent_node_id: str | None = None) 
             "parent_content": parent_content,
             "goal": session["goal"],
             "relevant_laws": laws,
-            "instructions": "Before generating hypotheses, briefly consider: What is explicitly requested? Is this creation or modification? (if relevant) What else might be affected? Keep this brief. Then generate 3 hypotheses with confidence (0.0-1.0). If confidence < 0.7, note what would increase it. Call store_expansion(h1_text=..., h1_confidence=..., h2_text=..., h2_confidence=..., h3_text=..., h3_confidence=...)."
+            "instructions": "Before generating hypotheses, briefly consider: What is explicitly requested? Is this creation or modification? What files/modules might be affected? For each hypothesis, declare the SCOPE (comma-separated files/modules). Generate 3 hypotheses with confidence (0.0-1.0). Call store_expansion(h1_text=..., h1_confidence=..., h1_scope='file1.py, file2.py', h2_text=..., h2_confidence=..., h2_scope='...', h3_text=..., h3_confidence=..., h3_scope='...')."
         }
         
     except Exception as e:
@@ -475,12 +475,15 @@ async def store_expansion(
     # Hypothesis 1 (required)
     h1_text: str,
     h1_confidence: float,
+    h1_scope: str = None,
     # Hypothesis 2 (optional)
     h2_text: str = None,
     h2_confidence: float = None,
+    h2_scope: str = None,
     # Hypothesis 3 (optional)
     h3_text: str = None,
-    h3_confidence: float = None
+    h3_confidence: float = None,
+    h3_scope: str = None
 ) -> dict[str, Any]:
     """
     Store generated hypotheses with Bayesian scoring.
@@ -493,23 +496,26 @@ async def store_expansion(
         parent_node_id: Parent node UUID (None if expanding from goal)
         h1_text: First hypothesis text (required)
         h1_confidence: First hypothesis confidence 0.0-1.0 (required)
+        h1_scope: First hypothesis affected scope (comma-separated files/modules)
         h2_text: Second hypothesis text (optional)
         h2_confidence: Second hypothesis confidence 0.0-1.0 (optional)
+        h2_scope: Second hypothesis affected scope
         h3_text: Third hypothesis text (optional)
         h3_confidence: Third hypothesis confidence 0.0-1.0 (optional)
+        h3_scope: Third hypothesis affected scope
         
     Returns:
-        Created nodes with Bayesian posterior scores
+        Created nodes with Bayesian posterior scores and declared scopes
     """
     try:
         # Build hypotheses list from flattened params
         hypotheses = []
         if h1_text:
-            hypotheses.append({"hypothesis": h1_text, "confidence": h1_confidence or 0.5})
+            hypotheses.append({"hypothesis": h1_text, "confidence": h1_confidence or 0.5, "scope": h1_scope})
         if h2_text:
-            hypotheses.append({"hypothesis": h2_text, "confidence": h2_confidence or 0.5})
+            hypotheses.append({"hypothesis": h2_text, "confidence": h2_confidence or 0.5, "scope": h2_scope})
         if h3_text:
-            hypotheses.append({"hypothesis": h3_text, "confidence": h3_confidence or 0.5})
+            hypotheses.append({"hypothesis": h3_text, "confidence": h3_confidence or 0.5, "scope": h3_scope})
         
         if not hypotheses:
             return {"success": False, "error": "At least one hypothesis (h1_text) is required"}
@@ -553,6 +559,7 @@ async def store_expansion(
         for i, hyp in enumerate(hypotheses[:3]):
             hypothesis_text = hyp.get("hypothesis", "")
             llm_confidence = float(hyp.get("confidence", 0.5))
+            declared_scope = hyp.get("scope")
             
             if not hypothesis_text:
                 continue
@@ -602,7 +609,8 @@ async def store_expansion(
                 "prior_score": float(node["prior_score"]),
                 "likelihood": float(node["likelihood"]),
                 "posterior_score": float(node["posterior_score"]) if node["posterior_score"] else None,
-                "supporting_law": law_name
+                "supporting_law": law_name,
+                "declared_scope": declared_scope
             })
         
         conn.commit()
