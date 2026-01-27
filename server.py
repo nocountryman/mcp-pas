@@ -457,7 +457,7 @@ async def prepare_expansion(session_id: str, parent_node_id: str | None = None) 
             "parent_content": parent_content,
             "goal": session["goal"],
             "relevant_laws": laws,
-            "instructions": "Before generating hypotheses, briefly consider: What is explicitly requested? Is this creation or modification? What files/modules might be affected? For each hypothesis, declare the SCOPE (comma-separated files/modules). Generate 3 hypotheses with confidence (0.0-1.0). Call store_expansion(h1_text=..., h1_confidence=..., h1_scope='file1.py, file2.py', h2_text=..., h2_confidence=..., h2_scope='...', h3_text=..., h3_confidence=..., h3_scope='...')."
+            "instructions": "Consider: What is requested? What files/modules might be affected? For each hypothesis, declare SCOPE as specific file paths. Optionally prefix with layer if helpful: [API] routes.py, [DB] models.py, [tests] test_auth.py. Generate 3 hypotheses with confidence (0.0-1.0). Call store_expansion(h1_text=..., h1_confidence=..., h1_scope='[layer] file1.py, file2.py', ...)."
         }
         
     except Exception as e:
