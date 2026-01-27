@@ -472,20 +472,48 @@ async def prepare_expansion(session_id: str, parent_node_id: str | None = None) 
 async def store_expansion(
     session_id: str,
     parent_node_id: str | None,
-    hypotheses: list[dict]
+    # Hypothesis 1 (required)
+    h1_text: str,
+    h1_confidence: float,
+    # Hypothesis 2 (optional)
+    h2_text: str = None,
+    h2_confidence: float = None,
+    # Hypothesis 3 (optional)
+    h3_text: str = None,
+    h3_confidence: float = None
 ) -> dict[str, Any]:
     """
     Store generated hypotheses with Bayesian scoring.
     
+    Uses flattened parameters for universal LLM compatibility.
+    At least one hypothesis (h1) is required, h2 and h3 are optional.
+    
     Args:
         session_id: The reasoning session UUID
         parent_node_id: Parent node UUID (None if expanding from goal)
-        hypotheses: List of dicts with 'hypothesis' (str) and 'confidence' (float 0-1)
+        h1_text: First hypothesis text (required)
+        h1_confidence: First hypothesis confidence 0.0-1.0 (required)
+        h2_text: Second hypothesis text (optional)
+        h2_confidence: Second hypothesis confidence 0.0-1.0 (optional)
+        h3_text: Third hypothesis text (optional)
+        h3_confidence: Third hypothesis confidence 0.0-1.0 (optional)
         
     Returns:
         Created nodes with Bayesian posterior scores
     """
     try:
+        # Build hypotheses list from flattened params
+        hypotheses = []
+        if h1_text:
+            hypotheses.append({"hypothesis": h1_text, "confidence": h1_confidence or 0.5})
+        if h2_text:
+            hypotheses.append({"hypothesis": h2_text, "confidence": h2_confidence or 0.5})
+        if h3_text:
+            hypotheses.append({"hypothesis": h3_text, "confidence": h3_confidence or 0.5})
+        
+        if not hypotheses:
+            return {"success": False, "error": "At least one hypothesis (h1_text) is required"}
+        
         conn = get_db_connection()
         cur = conn.cursor()
         
