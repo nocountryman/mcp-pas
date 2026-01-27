@@ -1608,6 +1608,25 @@ async def finalize_session(
         # v8a: Outcome prompt to close self-learning loop
         outcome_prompt = f"After implementing, close the learning loop: record_outcome(session_id='{session_id}', outcome='success'|'partial'|'failure')"
         
+        # v8c: Implementation checklist - bridge reasoning to action
+        implementation_checklist = []
+        winning_content = recommendation["content"]
+        winning_scope = recommendation.get("declared_scope", "")
+        
+        # Parse scope to generate checklist items
+        if winning_scope:
+            scope_items = [s.strip() for s in winning_scope.split(",") if s.strip()]
+            for item in scope_items:
+                implementation_checklist.append(f"[ ] Modify: {item}")
+        if not implementation_checklist:
+            implementation_checklist.append("[ ] Implement the recommended approach")
+        
+        # Add standard checklist items
+        implementation_checklist.extend([
+            "[ ] Write/update tests",
+            "[ ] Verify changes work as expected"
+        ])
+        
         return {
             "success": True,
             "session_id": session_id,
@@ -1628,7 +1647,8 @@ async def finalize_session(
             "candidates_evaluated": len(processed),
             "context_summary": context_summary,
             "next_step": next_step,
-            "outcome_prompt": outcome_prompt
+            "outcome_prompt": outcome_prompt,
+            "implementation_checklist": implementation_checklist
         }
 
         
@@ -1730,6 +1750,18 @@ async def record_outcome(
         
         conn.commit()
         
+        # v8b: Auto-trigger refresh_law_weights after sufficient outcomes
+        auto_refresh_result = None
+        MIN_SAMPLES_THRESHOLD = 5
+        try:
+            cur.execute("SELECT COUNT(*) FROM outcome_records")
+            total_outcomes = cur.fetchone()[0]
+            if total_outcomes >= MIN_SAMPLES_THRESHOLD and total_outcomes % MIN_SAMPLES_THRESHOLD == 0:
+                # Trigger refresh on every Nth outcome (5, 10, 15, etc.)
+                auto_refresh_result = await refresh_law_weights(min_samples=MIN_SAMPLES_THRESHOLD)
+        except Exception as refresh_err:
+            logger.warning(f"Auto-refresh check failed: {refresh_err}")
+        
         return {
             "success": True,
             "session_id": session_id,
@@ -1740,8 +1772,11 @@ async def record_outcome(
             "attributed_nodes": stats["node_count"] or 0,
             "laws_affected": stats["laws"] or [],
             "session_completed": session_completed,
+            "auto_refresh_triggered": auto_refresh_result is not None,
+            "auto_refresh_result": auto_refresh_result,
             "message": f"Outcome recorded. {stats['node_count'] or 0} nodes in winning path." + 
-                      (" Session auto-completed." if session_completed else "")
+                      (" Session auto-completed." if session_completed else "") +
+                      (f" Auto-refreshed {auto_refresh_result.get('laws_updated', 0)} law weights." if auto_refresh_result else "")
         }
         
     except Exception as e:
