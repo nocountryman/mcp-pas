@@ -281,3 +281,88 @@ FROM interview_history ih
 LEFT JOIN outcome_records orec ON orec.session_id = ih.session_id
 GROUP BY ih.goal_domain, ih.question_category, ih.answer_given
 ORDER BY times_asked DESC;
+
+-- ============================================================================
+-- Benchmark Framework (Phase 7)
+-- Persistent test cases and results for quality measurement
+-- ============================================================================
+
+-- Table: benchmark_test_cases
+-- Standardized test goals with known correct answers
+CREATE TABLE IF NOT EXISTS benchmark_test_cases (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    test_id         VARCHAR(10) NOT NULL UNIQUE,  -- e.g., 'R1', 'N2', 'B1'
+    category        VARCHAR(50) NOT NULL 
+                    CHECK (category IN ('refactoring', 'new_feature', 'bug_fix', 'api_design', 'edge_case')),
+    goal_text       TEXT NOT NULL,
+    goal_embedding  vector(768),
+    
+    -- Ground truth for scoring
+    expected_scope  TEXT[] NOT NULL DEFAULT '{}',      -- Files/modules should be in scope
+    expected_considerations TEXT[] NOT NULL DEFAULT '{}', -- Laws/concerns to consider
+    anti_patterns   TEXT[] DEFAULT '{}',              -- Patterns to avoid
+    
+    -- Metadata
+    difficulty      VARCHAR(20) DEFAULT 'medium'
+                    CHECK (difficulty IN ('easy', 'medium', 'hard')),
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Table: benchmark_results
+-- Results from running the benchmark suite
+CREATE TABLE IF NOT EXISTS benchmark_results (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    
+    -- What was tested
+    test_case_id    UUID NOT NULL REFERENCES benchmark_test_cases(id),
+    session_id      UUID REFERENCES reasoning_sessions(id),
+    model_name      VARCHAR(100) NOT NULL,           -- e.g., 'claude-sonnet-4.5'
+    prompt_variant  VARCHAR(100) NOT NULL DEFAULT 'v1', -- e.g., 'v2_two_phase'
+    
+    -- Metrics (all 0.0-1.0)
+    scope_accuracy      DECIMAL(5,4),  -- Jaccard similarity declared vs expected
+    hypothesis_relevance DECIMAL(5,4), -- Embedding similarity to goal
+    critique_coverage   DECIMAL(5,4),  -- % hypotheses critiqued
+    tree_depth          INTEGER,       -- Max depth reached
+    
+    -- Composite score (computed)
+    composite_score     DECIMAL(5,2) GENERATED ALWAYS AS (
+        (0.40 * COALESCE(scope_accuracy, 0) +
+         0.30 * COALESCE(hypothesis_relevance, 0) +
+         0.20 * COALESCE(critique_coverage, 0) +
+         0.10 * LEAST(COALESCE(tree_depth::DECIMAL / 3, 0), 1.0)) * 100
+    ) STORED,
+    
+    -- Raw data
+    declared_scope  TEXT[],
+    notes           TEXT,
+    
+    -- Metadata
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for benchmark queries
+CREATE INDEX IF NOT EXISTS idx_benchmark_results_model 
+    ON benchmark_results(model_name, prompt_variant);
+
+CREATE INDEX IF NOT EXISTS idx_benchmark_results_test_case 
+    ON benchmark_results(test_case_id);
+
+-- View: benchmark_summary
+-- Aggregate scores by model and prompt variant
+CREATE OR REPLACE VIEW benchmark_summary AS
+SELECT 
+    br.model_name,
+    br.prompt_variant,
+    COUNT(*) as tests_run,
+    ROUND(AVG(br.scope_accuracy), 3) as avg_scope_accuracy,
+    ROUND(AVG(br.hypothesis_relevance), 3) as avg_relevance,
+    ROUND(AVG(br.critique_coverage), 3) as avg_critique_coverage,
+    ROUND(AVG(br.composite_score), 1) as avg_composite_score,
+    MIN(br.composite_score) as min_score,
+    MAX(br.composite_score) as max_score,
+    MAX(br.created_at) as last_run
+FROM benchmark_results br
+GROUP BY br.model_name, br.prompt_variant
+ORDER BY avg_composite_score DESC;

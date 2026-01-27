@@ -263,6 +263,41 @@ PAS includes 15+ established laws to ground reasoning:
 
 ---
 
+## 📊 Benchmark Framework
+
+PAS includes a quality benchmark for comparing LLMs and prompt variants.
+
+### Metrics
+| Metric | Weight | Description |
+|--------|--------|-------------|
+| Scope Accuracy | 40% | Jaccard similarity: declared vs expected scope |
+| Hypothesis Relevance | 30% | Embedding similarity to goal |
+| Critique Coverage | 20% | % of hypotheses critiqued |
+| Tree Depth | 10% | Reasoning exploration depth |
+
+### Test Suite (10 cases)
+- **Refactoring** (3): Multi-file scope detection
+- **New Feature** (2): Completeness of considerations
+- **Bug Fix** (2): Root cause identification
+- **API Design** (2): Constraint awareness
+- **Edge Case** (1): Minimal scope (shouldn't over-analyze)
+
+### Running Benchmarks
+```bash
+# Run benchmark for a model/variant
+python benchmark_runner.py --model claude-sonnet --variant v1
+
+# Compare results
+psql -d mcp_pas -c "SELECT * FROM benchmark_summary;"
+```
+
+### Database Views
+| View | Description |
+|------|-------------|
+| `benchmark_summary` | Aggregate scores by model/variant |
+
+---
+
 ## 🤝 Contributing
 
 Contributions welcome! Areas of interest:
