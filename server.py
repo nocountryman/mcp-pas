@@ -1562,6 +1562,14 @@ async def finalize_session(
                 for h in interview["answer_history"]
             }
         
+        # Determine next_step guidance based on decision quality and depth
+        winner_depth = recommendation.get("depth", 2)
+        next_step = None
+        if decision_quality == "low" and winner_depth < 4:
+            next_step = f"Decision is close. Expand the winning hypothesis deeper. Call prepare_expansion(session_id='{session_id}', parent_node_id='{recommendation['node_id']}')"
+        elif decision_quality == "medium" and winner_depth < 3:
+            next_step = f"Consider refining the recommendation. Call prepare_expansion(session_id='{session_id}', parent_node_id='{recommendation['node_id']}')"
+        
         return {
             "success": True,
             "session_id": session_id,
@@ -1580,8 +1588,10 @@ async def finalize_session(
             "decision_quality": decision_quality,
             "gap_analysis": gap_analysis,
             "candidates_evaluated": len(processed),
-            "context_summary": context_summary
+            "context_summary": context_summary,
+            "next_step": next_step
         }
+
         
     except Exception as e:
         logger.error(f"finalize_session failed: {e}")
