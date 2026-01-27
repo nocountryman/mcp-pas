@@ -621,12 +621,20 @@ async def store_expansion(
         if top_node:
             next_step = f"Challenge your top hypothesis. Call prepare_critique(node_id='{top_node['node_id']}')"
         
+        # v7a: Confidence nudge (borrowed from sequential thinking meta-cognition)
+        confidence_nudge = None
+        if created_nodes:
+            avg_confidence = sum(n.get("likelihood", 0.5) for n in created_nodes) / len(created_nodes)
+            if avg_confidence < 0.65:
+                confidence_nudge = f"Low confidence detected (avg: {avg_confidence:.2f}). Consider: (1) expand deeper on uncertain hypothesis, (2) add alternative perspectives, (3) gather more context before deciding."
+        
         return {
             "success": True, 
             "session_id": session_id, 
             "created_nodes": created_nodes, 
             "count": len(created_nodes),
-            "next_step": next_step
+            "next_step": next_step,
+            "confidence_nudge": confidence_nudge
         }
         
     except Exception as e:
