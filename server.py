@@ -457,7 +457,7 @@ async def prepare_expansion(session_id: str, parent_node_id: str | None = None) 
             "parent_content": parent_content,
             "goal": session["goal"],
             "relevant_laws": laws,
-            "instructions": "Generate 3 hypotheses based on this context. For each, provide: hypothesis (text) and confidence (0.0-1.0). Then call store_expansion() with the results."
+            "instructions": "Generate 3 hypotheses based on this context. Call store_expansion(h1_text=..., h1_confidence=..., h2_text=..., h2_confidence=..., h3_text=..., h3_confidence=...) filling in the flattened parameters."
         }
         
     except Exception as e:
@@ -666,7 +666,7 @@ async def prepare_critique(node_id: str) -> dict[str, Any]:
                 "posterior": float(node["posterior_score"]) if node["posterior_score"] else None
             },
             "supporting_laws": laws_text,
-            "instructions": "Generate a critique with: counterargument (str), logical_flaws (list), edge_cases (list), severity_score (0.0-1.0). Then call store_critique() with results."
+            "instructions": "Generate a critique. Then call store_critique(node_id=..., counterargument=..., severity_score=..., logical_flaws='flaw1, flaw2', edge_cases='case1, case2') using the flattened primitive parameters."
         }
         
     except Exception as e:
@@ -678,13 +678,25 @@ async def prepare_critique(node_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def store_critique(node_id: str, critique: dict) -> dict[str, Any]:
+
+async def store_critique(
+    node_id: str,
+    counterargument: str,
+    severity_score: float,
+    logical_flaws: str = "",
+    edge_cases: str = ""
+) -> dict[str, Any]:
     """
     Store critique results and update node likelihood.
     
+    Uses flattened parameters for universal LLM compatibility.
+    
     Args:
         node_id: The thought node UUID
-        critique: Dict with counterargument, logical_flaws, edge_cases, severity_score (0-1)
+        counterargument: Main counter-argument text
+        severity_score: Impact score 0.0-1.0 (higher = more severe critique)
+        logical_flaws: Comma or newline separated list of flaws (optional)
+        edge_cases: Comma or newline separated list of edge cases (optional)
         
     Returns:
         Updated node scores
@@ -698,7 +710,7 @@ async def store_critique(node_id: str, critique: dict) -> dict[str, Any]:
         if not node:
             return {"success": False, "error": "Node not found"}
         
-        severity = float(critique.get("severity_score", 0.5))
+        severity = float(severity_score)
         old_likelihood = float(node["likelihood"])
         new_likelihood = max(0.1, old_likelihood * (1 - severity * 0.5))
         
@@ -709,13 +721,17 @@ async def store_critique(node_id: str, critique: dict) -> dict[str, Any]:
         updated = cur.fetchone()
         conn.commit()
         
+        # Count flaws/cases for summary (simple split)
+        flaw_count = len([f for f in logical_flaws.replace('\n', ',').split(',') if f.strip()])
+        case_count = len([c for c in edge_cases.replace('\n', ',').split(',') if c.strip()])
+        
         return {
             "success": True,
             "node_id": node_id,
             "critique_summary": {
-                "counterargument": critique.get("counterargument", "")[:200],
-                "flaw_count": len(critique.get("logical_flaws", [])),
-                "edge_case_count": len(critique.get("edge_cases", [])),
+                "counterargument": counterargument[:200],
+                "flaw_count": flaw_count,
+                "edge_case_count": case_count,
                 "severity_score": severity
             },
             "score_update": {
