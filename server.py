@@ -457,7 +457,7 @@ async def prepare_expansion(session_id: str, parent_node_id: str | None = None) 
             "parent_content": parent_content,
             "goal": session["goal"],
             "relevant_laws": laws,
-            "instructions": "Generate 3 hypotheses based on this context. Call store_expansion(h1_text=..., h1_confidence=..., h2_text=..., h2_confidence=..., h3_text=..., h3_confidence=...) filling in the flattened parameters."
+            "instructions": "Before generating hypotheses, briefly consider: What is explicitly requested? Is this creation or modification? (if relevant) What else might be affected? Keep this brief. Then generate 3 hypotheses with confidence (0.0-1.0). If confidence < 0.7, note what would increase it. Call store_expansion(h1_text=..., h1_confidence=..., h2_text=..., h2_confidence=..., h3_text=..., h3_confidence=...)."
         }
         
     except Exception as e:
@@ -666,7 +666,7 @@ async def prepare_critique(node_id: str) -> dict[str, Any]:
                 "posterior": float(node["posterior_score"]) if node["posterior_score"] else None
             },
             "supporting_laws": laws_text,
-            "instructions": "Generate a critique. Then call store_critique(node_id=..., counterargument=..., severity_score=..., logical_flaws='flaw1, flaw2', edge_cases='case1, case2') using the flattened primitive parameters."
+            "instructions": "Challenge this hypothesis: What could be wrong? What would make it STRONGER? Generate critique with counterargument and severity_score (0.0-1.0). Balance criticism with constructive improvement. Call store_critique(node_id=..., counterargument=..., severity_score=..., logical_flaws='flaw1, flaw2', edge_cases='case1, case2')."
         }
         
     except Exception as e:
