@@ -483,7 +483,10 @@ async def store_expansion(
     # Hypothesis 3 (optional)
     h3_text: str = None,
     h3_confidence: float = None,
-    h3_scope: str = None
+    h3_scope: str = None,
+    # v7b: Revision tracking (borrowed from sequential thinking)
+    is_revision: bool = False,
+    revises_node_id: str = None
 ) -> dict[str, Any]:
     """
     Store generated hypotheses with Bayesian scoring.
@@ -503,9 +506,11 @@ async def store_expansion(
         h3_text: Third hypothesis text (optional)
         h3_confidence: Third hypothesis confidence 0.0-1.0 (optional)
         h3_scope: Third hypothesis affected scope
+        is_revision: True if these hypotheses revise previous thinking (v7b)
+        revises_node_id: Node ID being revised, if is_revision is True
         
     Returns:
-        Created nodes with Bayesian posterior scores and declared scopes
+        Created nodes with Bayesian posterior scores, declared scopes, and revision info
     """
     try:
         # Build hypotheses list from flattened params
@@ -628,13 +633,27 @@ async def store_expansion(
             if avg_confidence < 0.65:
                 confidence_nudge = f"Low confidence detected (avg: {avg_confidence:.2f}). Consider: (1) expand deeper on uncertain hypothesis, (2) add alternative perspectives, (3) gather more context before deciding."
         
+        # v7b: Revision tracking response
+        revision_info = None
+        revision_nudge = None
+        if is_revision:
+            revision_info = {
+                "is_revision": True,
+                "revises_node_id": revises_node_id,
+                "message": "Revision noted. Original hypothesis preserved for comparison."
+            }
+            if top_node:
+                revision_nudge = f"Revision recorded. Consider critiquing the revised hypothesis. Call prepare_critique(node_id='{top_node['node_id']}')"
+        
         return {
             "success": True, 
             "session_id": session_id, 
             "created_nodes": created_nodes, 
             "count": len(created_nodes),
             "next_step": next_step,
-            "confidence_nudge": confidence_nudge
+            "confidence_nudge": confidence_nudge,
+            "revision_info": revision_info,
+            "revision_nudge": revision_nudge
         }
         
     except Exception as e:
