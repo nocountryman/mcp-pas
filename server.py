@@ -606,7 +606,20 @@ async def store_expansion(
             })
         
         conn.commit()
-        return {"success": True, "session_id": session_id, "created_nodes": created_nodes, "count": len(created_nodes)}
+        
+        # Workflow nudge: Find top hypothesis and suggest critique
+        top_node = max(created_nodes, key=lambda n: n.get("posterior_score") or 0) if created_nodes else None
+        next_step = None
+        if top_node:
+            next_step = f"Challenge your top hypothesis. Call prepare_critique(node_id='{top_node['node_id']}')"
+        
+        return {
+            "success": True, 
+            "session_id": session_id, 
+            "created_nodes": created_nodes, 
+            "count": len(created_nodes),
+            "next_step": next_step
+        }
         
     except Exception as e:
         if 'conn' in locals():
