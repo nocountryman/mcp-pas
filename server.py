@@ -1605,6 +1605,9 @@ async def finalize_session(
         elif decision_quality == "medium" and winner_depth < 3:
             next_step = f"Consider refining the recommendation. Call prepare_expansion(session_id='{session_id}', parent_node_id='{recommendation['node_id']}')"
         
+        # v8a: Outcome prompt to close self-learning loop
+        outcome_prompt = f"After implementing, close the learning loop: record_outcome(session_id='{session_id}', outcome='success'|'partial'|'failure')"
+        
         return {
             "success": True,
             "session_id": session_id,
@@ -1624,7 +1627,8 @@ async def finalize_session(
             "gap_analysis": gap_analysis,
             "candidates_evaluated": len(processed),
             "context_summary": context_summary,
-            "next_step": next_step
+            "next_step": next_step,
+            "outcome_prompt": outcome_prompt
         }
 
         
