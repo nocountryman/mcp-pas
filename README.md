@@ -276,7 +276,7 @@ Contributions welcome! Areas of interest:
 
 ## 📄 License
 
-MIT License - see [LICENSE](LICENSE) for details.
+GNU AGPLv3 License - see [LICENSE](LICENSE) for details.
 
 ---
 
