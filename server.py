@@ -1333,6 +1333,7 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
                         "source": "historical_failure"
                     })
         except Exception as e:
+            conn.rollback()  # Clear aborted transaction state
             logger.warning(f"v16d.2 historical query failed: {e}")
         
         # =====================================================================
@@ -1425,6 +1426,7 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
                 logger.info(f"v19: Generated {len(domain_questions)} dimension questions for {len(detected_domains)} domain(s)")
         
         except Exception as e:
+            conn.rollback()  # Clear aborted transaction state
             logger.warning(f"v19 domain detection failed: {e}")
         
         # Analyze goal to generate questions
@@ -1724,6 +1726,7 @@ async def submit_answer(session_id: str, question_id: str, answer: str) -> dict[
                 
                 logger.info(f"v19: Persisted answer for dimension {dim_id}")
             except Exception as e:
+                conn.rollback()  # Clear aborted transaction state before continuing
                 logger.warning(f"v19: Failed to persist answer: {e}")
         
         # Check for follow-up injection
