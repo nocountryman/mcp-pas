@@ -2435,6 +2435,28 @@ FAILURE_PATTERNS = [
     r'\bFATAL\b',
 ]
 
+# v17b.2: Patterns to extract failure reasons for semantic learning
+# Each pattern has a named group 'reason' to capture the error message
+FAILURE_REASON_PATTERNS = [
+    # Python exceptions with message: "ValueError: invalid literal for int()"
+    r'(?P<type>\w+Error):\s*(?P<reason>.+?)(?:\n|$)',
+    # Python exceptions: "Exception: something went wrong"
+    r'(?P<type>Exception):\s*(?P<reason>.+?)(?:\n|$)',
+    # Assertion failures: "AssertionError: expected X but got Y"
+    r'AssertionError:\s*(?P<reason>.+?)(?:\n|$)',
+    # pytest/jest assertion: "assert x == y" or "Expected X to equal Y"
+    r'(?:assert|Assert)\s+(?P<reason>.+?)(?:\n|$)',
+    r'Expected\s+(?P<reason>.+?)(?:\n|$)',
+    # Build errors: "error: cannot find module 'X'"
+    r'error:\s*(?P<reason>.+?)(?:\n|$)',
+    # Compilation errors: "fatal error: file not found"
+    r'fatal error:\s*(?P<reason>.+?)(?:\n|$)',
+    # npm/node errors: "Error: Cannot find module"
+    r'Error:\s*(?P<reason>.+?)(?:\n|$)',
+    # Generic test failure with name: "FAILED test_foo - reason"
+    r'FAILED\s+\S+\s*[-:]\s*(?P<reason>.+?)(?:\n|$)',
+]
+
 
 @mcp.tool()
 async def parse_terminal_output(
@@ -2519,6 +2541,18 @@ async def parse_terminal_output(
             confidence = 0.5
         all_matches = failure_matches + success_matches
     
+    # v17b.2: Extract failure reason for semantic learning
+    failure_reason = None
+    if signal == "failure":
+        for pattern in FAILURE_REASON_PATTERNS:
+            match = re.search(pattern, terminal_text, re.IGNORECASE)
+            if match:
+                try:
+                    failure_reason = match.group('reason').strip()[:200]  # Limit length
+                    break
+                except IndexError:
+                    continue
+    
     result = {
         "success": True,
         "session_id": session_id,
@@ -2528,6 +2562,7 @@ async def parse_terminal_output(
         "failure_matches": failure_matches[:5],
         "total_success_signals": success_count,
         "total_failure_signals": failure_count,
+        "failure_reason": failure_reason,  # v17b.2
         "message": f"Detected {signal} signal with {confidence:.0%} confidence"
     }
     
@@ -2538,11 +2573,14 @@ async def parse_terminal_output(
                 session_id=session_id,
                 outcome=signal,
                 confidence=confidence,
-                notes=f"Auto-recorded by v17a RLVR. Matches: {all_matches[:3]}"
+                notes=f"Auto-recorded by v17a RLVR. Matches: {all_matches[:3]}",
+                failure_reason=failure_reason  # v17b.2: pass extracted reason
             )
             result["auto_recorded"] = True
             result["outcome_result"] = outcome_result
             result["message"] += f" Auto-recorded as {signal}."
+            if failure_reason:
+                result["message"] += f" Failure reason extracted."
         except Exception as e:
             result["auto_recorded"] = False
             result["auto_record_error"] = str(e)
