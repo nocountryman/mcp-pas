@@ -1695,9 +1695,9 @@ async def finalize_session(
             if supporting_law_ids:
                 cur.execute(
                     """
-                    SELECT AVG(empirical_weight) as avg_weight
+                    SELECT AVG(scientific_weight) as avg_weight
                     FROM scientific_laws
-                    WHERE id = ANY(%s) AND empirical_weight IS NOT NULL
+                    WHERE id = ANY(%s) AND scientific_weight IS NOT NULL
                     """,
                     (supporting_law_ids,)
                 )
