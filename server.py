@@ -1417,6 +1417,7 @@ Return [] if the goal is already specific enough. Return ONLY the JSON array."""
                 "id": "q_catchall",
                 "question_text": f"Is there anything specific about '{goal_preview}' I should know before proceeding?",
                 "question_type": "open",
+                "choices": [],  # v18: Open question has no choices
                 "optional": True,  # v18: User can skip this
                 "priority": 100,
                 "depth": 1,
