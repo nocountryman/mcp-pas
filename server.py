@@ -325,14 +325,21 @@ async def start_reasoning_session(user_goal: str) -> dict[str, Any]:
         # Generate a new session ID
         session_id = str(uuid.uuid4())
         
+        # v19: Generate goal embedding for domain detection
+        goal_embedding = None
+        try:
+            goal_embedding = get_embedding(user_goal.strip())
+        except Exception as e:
+            logger.warning(f"Failed to generate goal embedding: {e}")
+        
         # Insert the new session
         cur.execute(
             """
-            INSERT INTO reasoning_sessions (id, goal, state, context)
-            VALUES (%s, %s, 'active', %s)
+            INSERT INTO reasoning_sessions (id, goal, goal_embedding, state, context)
+            VALUES (%s, %s, %s, 'active', %s)
             RETURNING id, goal, state, created_at
             """,
-            (session_id, user_goal.strip(), json.dumps({"source": "mcp_tool"}))
+            (session_id, user_goal.strip(), goal_embedding, json.dumps({"source": "mcp_tool"}))
         )
         
         row = cur.fetchone()
@@ -1328,10 +1335,103 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
         except Exception as e:
             logger.warning(f"v16d.2 historical query failed: {e}")
         
+        # =====================================================================
+        # v19: Domain Detection + Dimension-Based Questions
+        # Detect goal domain, load dimensions, generate structured questions
+        # =====================================================================
+        domain_questions = []
+        detected_domains = []
+        try:
+            # Query domains by embedding similarity to goal
+            cur.execute("""
+                SELECT id, domain_name, description,
+                       1 - (embedding <=> (SELECT goal_embedding FROM reasoning_sessions WHERE id = %s)) as similarity
+                FROM interview_domains
+                WHERE is_active = true
+                AND embedding IS NOT NULL
+                ORDER BY embedding <=> (SELECT goal_embedding FROM reasoning_sessions WHERE id = %s)
+                LIMIT 2
+            """, (session_id, session_id))
+            
+            similar_domains = cur.fetchall()
+            
+            # Pick domains with similarity > 0.5 (or top 1 if none pass threshold)
+            for row in similar_domains:
+                if row["similarity"] > 0.5 or not detected_domains:
+                    detected_domains.append({
+                        "id": str(row["id"]),
+                        "name": row["domain_name"],
+                        "similarity": row["similarity"]
+                    })
+            
+            if detected_domains:
+                logger.info(f"v19: Detected domains: {[d['name'] for d in detected_domains]}")
+                
+                # Store detected domains in session context
+                context["detected_domains"] = detected_domains
+                
+                # Load dimensions for detected domains, ordered by priority
+                # Use string IDs - PostgreSQL will cast them to UUIDs
+                domain_ids = [d["id"] for d in detected_domains]
+                cur.execute("""
+                    SELECT dim.id, dim.dimension_name, dim.description, dim.is_required, dim.priority,
+                           d.domain_name,
+                           q.question_template, q.question_type, q.choices
+                    FROM interview_dimensions dim
+                    JOIN interview_domains d ON dim.domain_id = d.id
+                    LEFT JOIN interview_questions q ON q.dimension_id = dim.id AND q.is_default = true
+                    WHERE dim.domain_id = ANY(%s::uuid[])
+                    ORDER BY dim.priority ASC
+                """, (domain_ids,))
+                
+                dimensions = cur.fetchall()
+                
+                # Track which dimensions we're asking about
+                dimension_coverage = {}
+                
+                for dim in dimensions:
+                    dim_id = str(dim["id"])
+                    dimension_coverage[dim_id] = {
+                        "name": dim["dimension_name"],
+                        "domain": dim["domain_name"],
+                        "is_required": dim["is_required"],
+                        "covered": False
+                    }
+                    
+                    # Generate question if template exists
+                    if dim["question_template"]:
+                        choices = dim["choices"] if dim["choices"] else []
+                        domain_questions.append({
+                            "id": f"dim_{dim['dimension_name']}",
+                            "dimension_id": dim_id,
+                            "question_text": dim["question_template"],
+                            "question_type": dim["question_type"],
+                            "choices": choices,
+                            "priority": dim["priority"],
+                            "depth": 1,
+                            "depends_on": [],
+                            "follow_up_rules": [],
+                            "answered": False,
+                            "answer": None,
+                            "source": "domain_dimension",
+                            "domain": dim["domain_name"],
+                            "dimension": dim["dimension_name"],
+                            "is_required": dim["is_required"]
+                        })
+                
+                # Store dimension coverage in context for tracking
+                context["dimension_coverage"] = dimension_coverage
+                
+                logger.info(f"v19: Generated {len(domain_questions)} dimension questions for {len(detected_domains)} domain(s)")
+        
+        except Exception as e:
+            logger.warning(f"v19 domain detection failed: {e}")
+        
         # Analyze goal to generate questions
         # v16d.1: LLM-generated goal-derived questions
         # v17c: Focus on business context only, not code quality
         # v18: Smart LLM Gating - return [] for specific goals
+        # v19: Skip LLM questions if domain detection succeeded
         goal_questions = []
         try:
             goal_prompt = f"""Analyze this goal and decide if clarifying questions are needed:
@@ -1405,20 +1505,27 @@ Return [] if the goal is already specific enough. Return ONLY the JSON array."""
         except Exception as e:
             logger.warning(f"v16d.1 goal question generation failed: {e}")
         
-        # v18: Progressive Disclosure - single optional catch-all instead of static fallbacks
-        # If LLM returned [] (specific goal) and no historical questions, offer one optional question
-        questions = goal_questions if goal_questions else []
+        # v19: Prefer domain questions over LLM-generated questions
+        # Priority: 1) domain dimensions, 2) goal-derived LLM, 3) catch-all
+        if domain_questions:
+            # Domain detection succeeded - use dimension-based questions
+            questions = domain_questions
+            logger.info(f"v19: Using {len(domain_questions)} domain-based questions")
+        elif goal_questions:
+            # Fallback to LLM-generated questions
+            questions = goal_questions
+        else:
+            questions = []
         
+        # v18: If no questions at all and no historical, offer catch-all
         if not questions and not historical_questions:
-            # v18: Single catch-all question that respects Hofstadter's Law (unknown unknowns)
-            # while honoring Hick's Law (one choice is fast)
             goal_preview = goal[:50] + "..." if len(goal) > 50 else goal
             questions = [{
                 "id": "q_catchall",
                 "question_text": f"Is there anything specific about '{goal_preview}' I should know before proceeding?",
                 "question_type": "open",
-                "choices": [],  # v18: Open question has no choices
-                "optional": True,  # v18: User can skip this
+                "choices": [],
+                "optional": True,
                 "priority": 100,
                 "depth": 1,
                 "depends_on": [],
@@ -1427,7 +1534,7 @@ Return [] if the goal is already specific enough. Return ONLY the JSON array."""
                 "answer": None,
                 "source": "catchall"
             }]
-            logger.info("v18: Using catch-all question for specific goal")
+            logger.info("v18: Using catch-all question")
         
         # v16d.2: Prepend historical questions (higher priority)
         questions = historical_questions + questions
@@ -1448,6 +1555,7 @@ Return [] if the goal is already specific enough. Return ONLY the JSON array."""
             "session_id": session_id,
             "interview_config": interview["config"],
             "questions_generated": len(questions),
+            "detected_domains": [d["name"] for d in detected_domains] if detected_domains else None,
             "message": "Interview questions generated. Call get_next_question to start."
         }
         
@@ -1583,6 +1691,41 @@ async def submit_answer(session_id: str, question_id: str, answer: str) -> dict[
             "timestamp": str(uuid.uuid4())[:8]  # Simple timestamp proxy
         })
         
+        # =====================================================================
+        # v19: Track dimension coverage for domain-based questions
+        # =====================================================================
+        dimension_covered = None
+        if question.get("source") == "domain_dimension" and question.get("dimension_id"):
+            dim_id = question["dimension_id"]
+            dimension_coverage = context.get("dimension_coverage", {})
+            
+            if dim_id in dimension_coverage:
+                dimension_coverage[dim_id]["covered"] = True
+                dimension_covered = dimension_coverage[dim_id]["name"]
+                logger.info(f"v19: Dimension '{dimension_covered}' covered")
+            
+            # Store answer in interview_answers for conflict detection
+            try:
+                # Find the answer text from choices
+                answer_text = answer
+                for choice in question.get("choices", []):
+                    if choice.get("label") == answer:
+                        answer_text = choice.get("description", answer)
+                        break
+                
+                cur.execute("""
+                    INSERT INTO interview_answers (session_id, dimension_id, question_id, answer_label, answer_text)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (session_id, dimension_id) DO UPDATE SET
+                        answer_label = EXCLUDED.answer_label,
+                        answer_text = EXCLUDED.answer_text,
+                        created_at = NOW()
+                """, (session_id, dim_id, question.get("id"), answer, answer_text))
+                
+                logger.info(f"v19: Persisted answer for dimension {dim_id}")
+            except Exception as e:
+                logger.warning(f"v19: Failed to persist answer: {e}")
+        
         # Check for follow-up injection
         injected = []
         follow_up_rules = question.get("follow_up_rules", [])
@@ -1620,6 +1763,7 @@ async def submit_answer(session_id: str, question_id: str, answer: str) -> dict[
             "session_id": session_id,
             "question_id": question_id,
             "answer_recorded": answer,
+            "dimension_covered": dimension_covered,  # v19
             "questions_remaining": config["questions_remaining"],
             "follow_ups_injected": injected if injected else None,
             "message": f"Answer recorded. {config['questions_remaining']} questions remaining."
