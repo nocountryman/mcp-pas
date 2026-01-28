@@ -679,49 +679,68 @@ async def store_expansion(
             
             # Generate embedding and find similar law
             hyp_emb = get_embedding(hypothesis_text)
+            
+            # v13a: Multi-Law Matching - fetch top-3 similar laws for ensemble prior
             cur.execute(
                 """
-                SELECT id, law_name, definition, scientific_weight, 1 - (embedding <=> %s::vector) as similarity
+                SELECT id, law_name, definition, scientific_weight, selection_count, success_count,
+                       1 - (embedding <=> %s::vector) as similarity
                 FROM scientific_laws WHERE embedding IS NOT NULL
-                ORDER BY embedding <=> %s::vector LIMIT 1
+                ORDER BY embedding <=> %s::vector LIMIT 3
                 """,
                 (hyp_emb, hyp_emb)
             )
-            law = cur.fetchone()
+            laws = cur.fetchall()
             
-            # Calculate Bayesian scores
-            if law:
-                # v10a: Negation detection MVP - detect contradiction between hypothesis and law
-                hyp_negations = detect_negation(hypothesis_text)
-                law_negations = detect_negation(law["definition"]) if "definition" in law else set()
-                
-                # If one has negation and other doesn't, they may contradict
-                negation_asymmetry = bool(hyp_negations) != bool(law_negations)
-                negation_penalty = 0.2 if negation_asymmetry else 0.0
-                
-                # v12b: Thompson Sampling for law selection
-                # Sample from Beta(success+1, failure+1) distribution
+            # v13a: Filter by similarity threshold (>0.2) and compute weighted ensemble prior
+            MIN_SIMILARITY = 0.2
+            matching_laws = [l for l in laws if l["similarity"] >= MIN_SIMILARITY]
+            
+            if matching_laws:
                 import random
-                selection_count = law.get("selection_count", 0) or 0
-                success_count = law.get("success_count", 0) or 0
-                alpha = success_count + 1
-                beta_param = selection_count - success_count + 1
-                # Use scientific_weight as base, blend with sampled exploration bonus
-                thompson_sample = random.betavariate(alpha, beta_param)
-                base_weight = float(law["scientific_weight"])
-                # Blend: 70% base weight + 30% thompson sample (exploration)
-                effective_weight = 0.7 * base_weight + 0.3 * thompson_sample
                 
-                prior = (effective_weight * 0.6) + (float(law["similarity"]) * 0.4)
-                prior = max(0.1, prior - negation_penalty)  # v10a: Apply negation penalty
-                supporting_law = [law["id"]]
-                law_name = law["law_name"]
+                total_weighted = 0.0
+                total_similarity = 0.0
+                supporting_law_ids = []
+                law_names = []
                 
-                # v12b: Track law selection
-                cur.execute(
-                    "UPDATE scientific_laws SET selection_count = selection_count + 1 WHERE id = %s",
-                    (law["id"],)
-                )
+                for law in matching_laws:
+                    # v10a: Negation detection
+                    hyp_negations = detect_negation(hypothesis_text)
+                    law_negations = detect_negation(law["definition"]) if law["definition"] else set()
+                    negation_asymmetry = bool(hyp_negations) != bool(law_negations)
+                    negation_penalty = 0.15 if negation_asymmetry else 0.0
+                    
+                    # v12b: Thompson Sampling per law
+                    selection_count = law.get("selection_count", 0) or 0
+                    success_count = law.get("success_count", 0) or 0
+                    alpha = success_count + 1
+                    beta_param = selection_count - success_count + 1
+                    thompson_sample = random.betavariate(alpha, beta_param)
+                    
+                    base_weight = float(law["scientific_weight"])
+                    effective_weight = 0.7 * base_weight + 0.3 * thompson_sample
+                    effective_weight = max(0.1, effective_weight - negation_penalty)
+                    
+                    # Weighted contribution: weight × similarity
+                    similarity = float(law["similarity"])
+                    total_weighted += effective_weight * similarity
+                    total_similarity += similarity
+                    
+                    supporting_law_ids.append(law["id"])
+                    law_names.append(law["law_name"])
+                    
+                    # v12b: Track law selection
+                    cur.execute(
+                        "UPDATE scientific_laws SET selection_count = selection_count + 1 WHERE id = %s",
+                        (law["id"],)
+                    )
+                
+                # v13a: Ensemble prior = Σ(weight × similarity) / Σ(similarity)
+                prior = (total_weighted / total_similarity * 0.6) + (matching_laws[0]["similarity"] * 0.4)
+                prior = max(0.1, min(0.95, prior))  # Clamp to valid range
+                supporting_law = supporting_law_ids
+                law_name = law_names[0]  # Primary law for display
             else:
                 prior = 0.5
                 supporting_law = []
