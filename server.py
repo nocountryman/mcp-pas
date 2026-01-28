@@ -48,6 +48,25 @@ def get_db_connection():
     return conn
 
 
+def safe_close_connection(conn):
+    """
+    Safely close a database connection with rollback.
+    
+    Always rolls back before closing to prevent stuck transactions
+    caused by uncommitted errors. Commit must be called explicitly.
+    """
+    if conn:
+        try:
+            conn.rollback()  # Safe to call even after commit
+        except Exception:
+            pass  # Ignore rollback errors
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass  # Ignore close errors
+
+
 # =============================================================================
 # MCP Server Setup
 # =============================================================================
@@ -338,7 +357,7 @@ async def start_reasoning_session(user_goal: str) -> dict[str, Any]:
         }
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -405,7 +424,7 @@ async def get_session_status(session_id: str) -> dict[str, Any]:
         }
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -474,7 +493,7 @@ async def search_relevant_laws(query: str, limit: int = 5) -> dict[str, Any]:
         }
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 # =============================================================================
@@ -573,7 +592,7 @@ async def prepare_expansion(session_id: str, parent_node_id: str | None = None) 
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -818,7 +837,7 @@ async def store_expansion(
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -888,7 +907,7 @@ async def prepare_critique(node_id: str) -> dict[str, Any]:
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -994,7 +1013,7 @@ async def store_critique(
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -1036,7 +1055,7 @@ async def get_reasoning_tree(session_id: str, max_depth: int = 10) -> dict[str, 
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -1089,7 +1108,7 @@ async def get_best_path(session_id: str) -> dict[str, Any]:
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 # =============================================================================
@@ -1382,7 +1401,7 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -1450,7 +1469,7 @@ async def get_next_question(session_id: str) -> dict[str, Any]:
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -1558,7 +1577,7 @@ async def submit_answer(session_id: str, question_id: str, answer: str) -> dict[
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -1636,7 +1655,7 @@ async def check_interview_complete(session_id: str) -> dict[str, Any]:
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 # =============================================================================
@@ -2043,7 +2062,7 @@ async def finalize_session(
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 # =============================================================================
@@ -2253,7 +2272,7 @@ async def record_outcome(
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -2348,7 +2367,7 @@ async def refresh_law_weights(
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 # =============================================================================
@@ -2483,7 +2502,7 @@ async def find_or_create_session(
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -2536,7 +2555,7 @@ async def complete_session(
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -2617,7 +2636,7 @@ async def resume_session(
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
-            conn.close()
+            safe_close_connection(conn)
 
 
 # =============================================================================
