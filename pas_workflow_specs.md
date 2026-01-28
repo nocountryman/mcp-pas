@@ -12,7 +12,7 @@ Think of PAS as a "cognitive scaffolding" system that guides an LLM to make bett
 3. Forcing explicit critique of top hypotheses
 4. Nudging the LLM toward deeper exploration when confidence is low
 
-**Benchmark Performance**: 79.4 composite score (+40.8% improvement from baseline)
+**Benchmark Performance**: 81.0 composite score (+43.6% improvement from baseline)
 
 ---
 
@@ -288,8 +288,9 @@ record_outcome(
 
 ---
 
-## Key Features (v7-v8)
+## Key Features (v7-v12)
 
+### v7-v8: Foundation
 | Version | Feature | Impact |
 |---------|---------|--------|
 | v7a | `confidence_nudge` | Infers exploration need from low confidence |
@@ -297,6 +298,35 @@ record_outcome(
 | v8a | `outcome_prompt` | Guides self-learning loop |
 | v8b | Auto-refresh law weights | Makes self-learning automatic |
 | v8c | `implementation_checklist` | Bridges reasoning → action |
+
+### v9-v10: Active Critique (System 2)
+| Version | Feature | Impact |
+|---------|---------|--------|
+| v9a | Multi-Tier Critique (major/minor flaws) | Major: -0.15, Minor: -0.03 penalty |
+| v9b | Constitutional Principles | 5 code + 5 UI/UX principles for critique |
+| v9b.1 | UI/UX Principles | Hick's Law, WCAG, Visual Hierarchy |
+| v10a | Negation Detection | Penalizes hypothesis-law contradictions |
+| v10b | Critic Personas (3) | Strict Skeptic, Pragmatic Engineer, Domain Expert |
+
+### v11-v12: MCTS-Inspired Self-Learning
+| Version | Feature | Impact |
+|---------|---------|--------|
+| v11a | UCT Tiebreaking | Breaks close decisions (gap < 0.05) with exploration bonus |
+| v11b | Law-Grounded Rollout | 20% rollout weight from scientific_weight |
+| v12a | PRM Data Collection | Logs hypothesis+outcome for future fine-tuning |
+| v12b | Thompson Sampling | Beta-distributed law selection (explore-exploit) |
+
+---
+
+## Benchmark Evolution
+
+| Variant | Score | Key Change |
+|---------|-------|------------|
+| v1_baseline | 56.4 | Initial |
+| v7b_is_revision | 79.4 | +40.8% from backtracking |
+| **v9ab_tiered_ux** | **81.0** | Current best (tiered critique + UX) |
+| v11ab_mcts | 78.8 | UCT + rollout |
+| v12ab_thompson | 77.7 | Exploration variance (early stage) |
 
 ---
 
@@ -328,12 +358,17 @@ PAS uses semantic similarity to match hypotheses with relevant laws:
 
 ## Research Questions for Improvement
 
-1. **Prior Quality**: How can we improve semantic matching between hypotheses and laws?
-2. **Exploration vs. Exploitation**: When should PAS encourage more alternatives vs. deeper refinement?
-3. **Critique Calibration**: Is the severity_score being used effectively?
-4. **Self-Learning Convergence**: How many outcomes needed before law weights stabilize?
-5. **Multi-Domain Transfer**: Do law weights learned in one domain transfer to others?
-6. **Goodhart Risk**: Are we optimizing the benchmark or genuine reasoning quality?
+### Active Research (v9-v12 enabled)
+1. **Thompson Sampling Convergence**: How many outcomes before Beta distributions stabilize?
+2. **PRM Training Threshold**: When is training_data sufficient for fine-tuning (~500+ samples)?
+3. **UCT Trigger Rate**: Is 0.05 threshold too conservative? (Currently never triggers)
+4. **Critique Persona Correlation**: Which persona finds most actionable flaws?
+
+### Open Questions
+5. **Prior Quality**: How can we improve semantic matching between hypotheses and laws?
+6. **Exploration vs. Exploitation**: When should PAS encourage more alternatives vs. deeper refinement?
+7. **Multi-Domain Transfer**: Do law weights learned in one domain transfer to others?
+8. **Goodhart Risk**: Are we optimizing the benchmark or genuine reasoning quality?
 
 ---
 
