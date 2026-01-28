@@ -881,6 +881,48 @@ async def prepare_critique(node_id: str) -> dict[str, Any]:
                     "failure_modes": law["failure_modes"] or []  # v14c.1
                 })
         
+        # v16c: LLM Critique Synthesis - generate suggested critique
+        suggested_critique = None
+        try:
+            critique_prompt = f"""Critique this hypothesis:
+{node["content"]}
+
+Session Goal: {node["goal"]}
+
+Consider these scientific laws: {', '.join(l.get('law_name', '') for l in laws_text) if laws_text else 'None'}
+
+Return ONLY a valid JSON object:
+{{
+  "counterargument": "Main counter-argument that challenges this hypothesis",
+  "severity": 0.5,
+  "major_flaws": ["flaw1", "flaw2"],
+  "minor_flaws": ["minor issue"],
+  "edge_cases": ["edge case 1"]
+}}
+
+Be specific and constructive. Focus on what could go wrong."""
+            
+            response = await mcp.request_context.session.create_message(
+                CreateMessageRequestParams(
+                    messages=[SamplingMessage(role="user", content=TextContent(type="text", text=critique_prompt))],
+                    max_tokens=500,
+                    system_prompt="You are a hypothesis critic. Return only valid JSON."
+                )
+            )
+            
+            if response and response.content and response.content.text:
+                response_text = response.content.text.strip()
+                # Handle markdown code blocks
+                if response_text.startswith("```"):
+                    response_text = response_text.split("```")[1]
+                    if response_text.startswith("json"):
+                        response_text = response_text[4:]
+                    response_text = response_text.strip()
+                suggested_critique = json.loads(response_text)
+                logger.info(f"v16c: Generated suggested critique for node {node_id}")
+        except Exception as e:
+            logger.warning(f"v16c critique generation failed: {e}")
+        
         return {
             "success": True,
             "node_id": node_id,
@@ -893,6 +935,8 @@ async def prepare_critique(node_id: str) -> dict[str, Any]:
                 "posterior": float(node["posterior_score"]) if node["posterior_score"] else None
             },
             "supporting_laws": laws_text,
+            # v16c: LLM-generated critique suggestion
+            "suggested_critique": suggested_critique,
             # v14c.1: Enhanced instructions with failure mode guidance
             "instructions": "Challenge this hypothesis. Use the failure_modes from supporting laws as targeted challenge prompts. What could go wrong? What would make it STRONGER? Generate critique with counterargument and severity_score (0.0-1.0). Call store_critique(node_id=..., counterargument=..., severity_score=..., logical_flaws='flaw1, flaw2', edge_cases='case1, case2').",
             # v9b: Constitutional Principles for structured critique
@@ -1285,10 +1329,68 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
             logger.warning(f"v16d.2 historical query failed: {e}")
         
         # Analyze goal to generate questions
-        # v16d.1 TODO: Replace with LLM-generated goal-derived questions
-        # For now: use generic questions as fallback
+        # v16d.1: LLM-generated goal-derived questions
+        goal_questions = []
+        try:
+            goal_prompt = f"""Generate 2-3 clarifying questions for this goal:
+{goal}
+
+Return a JSON array where each question has:
+- "question_text": A clear question about the goal
+- "choices": Array of options, each with "label" (A/B/C), "description", "pros" (array), "cons" (array)
+
+Focus on questions that clarify:
+1. Scope and constraints
+2. User/audience
+3. Technical preferences
+
+Example format:
+[{{"question_text": "...", "choices": [{{"label": "A", "description": "...", "pros": ["..."], "cons": ["..."]}}]}}]
+
+Return ONLY the JSON array, no other text."""
+            
+            # Use sampling to generate questions
+            from mcp.types import SamplingMessage, TextContent
+            response = await mcp.request_context.session.create_message(
+                CreateMessageRequestParams(
+                    messages=[SamplingMessage(role="user", content=TextContent(type="text", text=goal_prompt))],
+                    max_tokens=1000,
+                    system_prompt="You are a structured question generator. Return only valid JSON arrays."
+                )
+            )
+            
+            if response and response.content and response.content.text:
+                # Try to parse JSON from response
+                import json as json_parser
+                response_text = response.content.text.strip()
+                # Handle potential markdown code blocks
+                if response_text.startswith("```"):
+                    response_text = response_text.split("```")[1]
+                    if response_text.startswith("json"):
+                        response_text = response_text[4:]
+                    response_text = response_text.strip()
+                
+                parsed = json_parser.loads(response_text)
+                for i, q in enumerate(parsed[:3]):  # Limit to 3 questions
+                    goal_questions.append({
+                        "id": f"goal_{i+1}",
+                        "question_text": q.get("question_text", ""),
+                        "question_type": "single_choice",
+                        "choices": q.get("choices", []),
+                        "priority": 3 + i,  # Priority 3-5, after historical but before generic
+                        "depth": 1,
+                        "depends_on": [],
+                        "follow_up_rules": [],
+                        "answered": False,
+                        "answer": None,
+                        "source": "goal_derived"
+                    })
+                logger.info(f"v16d.1: Generated {len(goal_questions)} goal-derived questions")
+        except Exception as e:
+            logger.warning(f"v16d.1 goal question generation failed: {e}")
         
-        questions = [
+        # Generic questions as fallback (only if no goal questions generated)
+        questions = goal_questions if goal_questions else [
             {
                 "id": "q1",
                 "question_text": "What is the primary platform for this solution?",
@@ -2275,6 +2377,154 @@ async def record_outcome(
     finally:
         if 'conn' in locals():
             safe_close_connection(conn)
+
+
+# =============================================================================
+# v17a: RLVR Auto-Outcome Detection
+# =============================================================================
+
+import re
+
+# Domain-agnostic patterns for success/failure detection
+SUCCESS_PATTERNS = [
+    r'\bPASS(?:ED)?\b',
+    r'\bOK\b',
+    r'\bSUCCESS(?:FUL)?\b',
+    r'✓',
+    r'\bAll tests passed\b',
+    r'\bBuild succeeded\b',
+    r'\bexit code 0\b',
+    r'\b0 failed\b',
+    r'\bno errors\b',
+    r'\bcompleted successfully\b',
+]
+
+FAILURE_PATTERNS = [
+    r'\bFAIL(?:ED|URE)?\b',
+    r'\bERROR\b',
+    r'\bException\b',
+    r'✗',
+    r'\bAssertionError\b',
+    r'\bBuild failed\b',
+    r'exit code [1-9]\d*',
+    r'\bTraceback\b',
+    r'\bSyntaxError\b',
+    r'\bTypeError\b',
+    r'\bValueError\b',
+    r'\bAttributeError\b',
+    r'\bImportError\b',
+    r'\bRuntimeError\b',
+    r'\bCRITICAL\b',
+    r'\bFATAL\b',
+]
+
+
+@mcp.tool()
+async def parse_terminal_output(
+    session_id: str,
+    terminal_text: str,
+    auto_record: bool = False
+) -> dict[str, Any]:
+    """
+    Parse terminal output for success/failure signals (v17a RLVR).
+    
+    Uses domain-agnostic regex patterns to detect test pass/fail,
+    build success/error, and runtime crashes. Returns structured
+    signal detection with confidence scoring.
+    
+    Args:
+        session_id: The reasoning session UUID
+        terminal_text: Raw terminal output to analyze
+        auto_record: If True and signal is clear, auto-call record_outcome
+        
+    Returns:
+        Detected signal with confidence and matches
+    """
+    if not terminal_text or not terminal_text.strip():
+        return {
+            "success": True,
+            "signal": "unknown",
+            "confidence": 0.0,
+            "matches": [],
+            "message": "Empty terminal output provided"
+        }
+    
+    # Case-insensitive matching
+    success_matches = []
+    failure_matches = []
+    
+    for pattern in SUCCESS_PATTERNS:
+        matches = re.findall(pattern, terminal_text, re.IGNORECASE)
+        if matches:
+            success_matches.extend(matches)
+    
+    for pattern in FAILURE_PATTERNS:
+        matches = re.findall(pattern, terminal_text, re.IGNORECASE)
+        if matches:
+            failure_matches.extend(matches)
+    
+    # Determine signal and confidence
+    success_count = len(success_matches)
+    failure_count = len(failure_matches)
+    total = success_count + failure_count
+    
+    if total == 0:
+        signal = "unknown"
+        confidence = 0.0
+        all_matches = []
+    elif failure_count > 0 and success_count == 0:
+        signal = "failure"
+        confidence = min(0.95, 0.7 + (failure_count * 0.05))
+        all_matches = failure_matches
+    elif success_count > 0 and failure_count == 0:
+        signal = "success"
+        confidence = min(0.95, 0.7 + (success_count * 0.05))
+        all_matches = success_matches
+    else:
+        # Mixed signals - failure takes precedence
+        if failure_count >= success_count:
+            signal = "failure"
+            confidence = 0.6
+        else:
+            signal = "success"
+            confidence = 0.5
+        all_matches = failure_matches + success_matches
+    
+    result = {
+        "success": True,
+        "session_id": session_id,
+        "signal": signal,
+        "confidence": round(confidence, 2),
+        "success_matches": success_matches[:5],  # Limit to first 5
+        "failure_matches": failure_matches[:5],
+        "total_success_signals": success_count,
+        "total_failure_signals": failure_count,
+        "message": f"Detected {signal} signal with {confidence:.0%} confidence"
+    }
+    
+    # Auto-record if enabled and confidence is high
+    if auto_record and signal != "unknown" and confidence >= 0.7:
+        try:
+            outcome_result = await record_outcome(
+                session_id=session_id,
+                outcome=signal,
+                confidence=confidence,
+                notes=f"Auto-recorded by v17a RLVR. Matches: {all_matches[:3]}"
+            )
+            result["auto_recorded"] = True
+            result["outcome_result"] = outcome_result
+            result["message"] += f" Auto-recorded as {signal}."
+        except Exception as e:
+            result["auto_recorded"] = False
+            result["auto_record_error"] = str(e)
+    else:
+        result["auto_recorded"] = False
+        if auto_record and signal == "unknown":
+            result["message"] += " Signal too ambiguous for auto-record."
+        elif auto_record and confidence < 0.7:
+            result["message"] += f" Confidence too low ({confidence:.0%}) for auto-record."
+    
+    return result
 
 
 @mcp.tool()
