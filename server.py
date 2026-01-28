@@ -1233,9 +1233,41 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
                 "message": "Interview already has pending questions. Use get_next_question to continue."
             }
         
+        # v16d.2: Query historical failures for similar goals (domain-agnostic via embedding)
+        historical_questions = []
+        try:
+            cur.execute("""
+                SELECT s.goal, o.notes, o.failure_reason
+                FROM outcome_records o
+                JOIN reasoning_sessions s ON o.session_id = s.id
+                WHERE o.outcome != 'success'
+                AND (o.notes IS NOT NULL OR o.failure_reason IS NOT NULL)
+                AND s.goal_embedding IS NOT NULL
+                AND 1 - (s.goal_embedding <=> (SELECT goal_embedding FROM reasoning_sessions WHERE id = %s)) > 0.6
+                LIMIT 3
+            """, (session_id,))
+            
+            for row in cur.fetchall():
+                reason = row["failure_reason"] or row["notes"]
+                if reason:
+                    historical_questions.append({
+                        "id": f"hist_{len(historical_questions)+1}",
+                        "question_text": f"A similar goal '{row['goal'][:50]}...' failed because: {reason[:100]}. How will you address this?",
+                        "question_type": "open",
+                        "priority": 5,  # High priority - show first
+                        "depth": 1,
+                        "depends_on": [],
+                        "follow_up_rules": [],
+                        "answered": False,
+                        "answer": None,
+                        "source": "historical_failure"
+                    })
+        except Exception as e:
+            logger.warning(f"v16d.2 historical query failed: {e}")
+        
         # Analyze goal to generate questions
-        # For now, generate standard UX/design questions as template
-        # In future: use LLM to generate context-specific questions
+        # v16d.1 TODO: Replace with LLM-generated goal-derived questions
+        # For now: use generic questions as fallback
         
         questions = [
             {
@@ -1322,6 +1354,9 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
                 "answer": None
             }
         ]
+        
+        # v16d.2: Prepend historical questions (higher priority)
+        questions = historical_questions + questions
         
         # Update interview context
         interview["pending_questions"] = questions
@@ -1944,6 +1979,26 @@ async def finalize_session(
         except Exception as e:
             logger.warning(f"v15b past_failures lookup failed: {e}")
         
+        # v16b.1: Compute confidence calibration warning (LLM nudge, not adjustment)
+        calibration_warning = None
+        try:
+            cur.execute("""
+                SELECT 
+                    COUNT(*) FILTER (WHERE o.outcome = 'success') as successes,
+                    COUNT(*) as total
+                FROM outcome_records o
+                JOIN thought_nodes t ON t.session_id = o.session_id
+                WHERE t.likelihood >= 0.8
+                AND o.created_at > NOW() - INTERVAL '30 days'
+            """)
+            cal = cur.fetchone()
+            if cal and cal["total"] >= 5:
+                success_rate = cal["successes"] / cal["total"]
+                if success_rate < 0.7:
+                    calibration_warning = f"⚠️ Calibration: High-confidence (≥0.8) hypotheses succeed only {success_rate:.0%} of the time in recent sessions"
+        except Exception as e:
+            logger.warning(f"v16b.1 calibration query failed: {e}")
+        
         # v15b: Construct scope_guidance (domain-agnostic)
         winning_scope = recommendation.get("declared_scope", "") or ""
         scope_guidance = {
@@ -1953,7 +2008,8 @@ async def finalize_session(
                 "recommendation": recommendation["content"][:200]
             },
             "prompt": "What validation or follow-up steps are needed for this specific context? If this is pure reasoning with no action items, respond 'No follow-up needed'.",
-            "past_failures": past_failures
+            "past_failures": past_failures,
+            "calibration_warning": calibration_warning  # v16b.1
         }
         
         return {
