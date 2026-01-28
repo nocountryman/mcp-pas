@@ -1571,6 +1571,18 @@ HEURISTIC_PENALTIES = {
 
 DEPTH_BONUS_PER_LEVEL = 0.02  # Reward deeper refinement
 
+# =============================================================================
+# v11a: UCT-based selection for close decisions
+# =============================================================================
+UCT_EXPLORATION_C = 1.4  # Standard exploration constant
+UCT_THRESHOLD = 0.05     # Apply UCT when gap < threshold
+
+# =============================================================================
+# v11b: Law-grounded rollout configuration  
+# =============================================================================
+ROLLOUT_WEIGHT = 0.2     # Blend: final = (1-weight)*posterior + weight*rollout
+
+
 
 @mcp.tool()
 async def finalize_session(
@@ -1677,6 +1689,25 @@ async def finalize_session(
             # Ensure score stays in valid range
             adjusted_score = max(0.1, min(1.0, adjusted_score))
             
+            # v11b: Calculate law-grounded rollout score
+            supporting_law_ids = node["supporting_laws"] or []
+            rollout_score = 0.5  # Default neutral
+            if supporting_law_ids:
+                cur.execute(
+                    """
+                    SELECT AVG(empirical_weight) as avg_weight
+                    FROM scientific_laws
+                    WHERE id = ANY(%s) AND empirical_weight IS NOT NULL
+                    """,
+                    (supporting_law_ids,)
+                )
+                rollout_result = cur.fetchone()
+                if rollout_result and rollout_result["avg_weight"]:
+                    rollout_score = float(rollout_result["avg_weight"])
+            
+            # v11b: Blend adjusted score with rollout score
+            final_score = (1 - ROLLOUT_WEIGHT) * adjusted_score + ROLLOUT_WEIGHT * rollout_score
+            
             processed.append({
                 "node_id": str(node["id"]),
                 "path": node["path"],
@@ -1684,11 +1715,13 @@ async def finalize_session(
                 "depth": depth,
                 "original_score": round(original_score, 4),
                 "adjusted_score": round(adjusted_score, 4),
+                "rollout_score": round(rollout_score, 4),  # v11b
+                "final_score": round(final_score, 4),      # v11b
                 "penalties_applied": penalties
             })
         
-        # Sort by adjusted score
-        processed.sort(key=lambda x: x["adjusted_score"], reverse=True)
+        # Sort by final score (includes rollout blending)
+        processed.sort(key=lambda x: x["final_score"], reverse=True)
         
         # Deep critique mode - return requests for LLM
         if deep_critique and len(processed) >= 1:
@@ -1723,10 +1756,31 @@ async def finalize_session(
         recommendation = processed[0]
         runner_up = processed[1] if len(processed) > 1 else None
         
+        # v11a: UCT tiebreaking for close decisions
+        uct_applied = False
         if runner_up:
-            gap = recommendation["adjusted_score"] - runner_up["adjusted_score"]
-            avg = (recommendation["adjusted_score"] + runner_up["adjusted_score"]) / 2
+            gap = recommendation["final_score"] - runner_up["final_score"]
+            avg = (recommendation["final_score"] + runner_up["final_score"]) / 2
             relative_gap = gap / avg if avg > 0 else 0
+            
+            # v11a: If gap < threshold, apply UCT exploration bonus
+            if gap < UCT_THRESHOLD:
+                import math
+                # Count approx visits based on depth (deeper = more iterations)
+                rec_visits = max(1, recommendation["depth"])
+                run_visits = max(1, runner_up["depth"])
+                total_visits = rec_visits + run_visits
+                
+                # UCT: Q + C * sqrt(ln(N)/n)
+                rec_uct = recommendation["final_score"] + UCT_EXPLORATION_C * math.sqrt(math.log(total_visits) / rec_visits)
+                run_uct = runner_up["final_score"] + UCT_EXPLORATION_C * math.sqrt(math.log(total_visits) / run_visits)
+                
+                # If UCT favors runner-up, swap
+                if run_uct > rec_uct:
+                    recommendation, runner_up = runner_up, recommendation
+                    processed[0], processed[1] = processed[1], processed[0]
+                    uct_applied = True
+                    gap = recommendation["final_score"] - runner_up["final_score"]
             
             if gap < 0.03:
                 decision_quality = "low"
@@ -1737,6 +1791,9 @@ async def finalize_session(
             else:
                 decision_quality = "high"
                 gap_analysis = f"Clear winner (gap: {gap:.3f}). High confidence in recommendation."
+            
+            if uct_applied:
+                gap_analysis += " [v11a: UCT exploration applied]"
         else:
             decision_quality = "medium"
             gap_analysis = "Only one candidate available."
