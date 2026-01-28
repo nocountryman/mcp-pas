@@ -1173,6 +1173,18 @@ DEFAULT_INTERVIEW_CONFIG = {
     "questions_remaining": 0
 }
 
+# =============================================================================
+# v20: Adaptive Depth Quality Thresholds
+# =============================================================================
+
+DEFAULT_QUALITY_THRESHOLDS = {
+    "gap_score": 0.10,           # Winner must be ≥10% better than runner-up
+    "critique_coverage": 0.66,   # ≥66% of top candidates must be critiqued
+    "min_depth": 2,              # Must explore at least 2 levels deep
+    "max_confidence_variance": 0.25,  # Variance ≤0.25 for stability
+    "max_iterations": 5          # Safeguard: max expansion cycles
+}
+
 
 def get_interview_context(session_context: dict) -> dict:
     """Extract or initialize interview context from session."""
@@ -1884,6 +1896,111 @@ UCT_THRESHOLD = 0.05     # Apply UCT when gap < threshold
 ROLLOUT_WEIGHT = 0.2     # Blend: final = (1-weight)*posterior + weight*rollout
 
 
+# =============================================================================
+# v20: Adaptive Depth Quality Metrics
+# =============================================================================
+
+def compute_quality_metrics(
+    cur,
+    session_id: str,
+    candidates: list,
+    gap: float,
+    thresholds: dict = None
+) -> dict:
+    """
+    Compute 4 quality signals to determine if reasoning is sufficient.
+    
+    Returns quality_sufficient flag, metrics breakdown, and suggestions.
+    """
+    import statistics
+    
+    thresholds = thresholds or DEFAULT_QUALITY_THRESHOLDS
+    
+    # 1. Gap score (already computed by caller)
+    gap_ok = gap >= thresholds["gap_score"]
+    
+    # 2. Critique coverage - % of top candidates that have been critiqued
+    critiqued_count = 0
+    uncritiqued_nodes = []
+    for c in candidates[:3]:  # Check top 3
+        node_id = c.get("node_id") or c.get("id")
+        if node_id:
+            cur.execute("""
+                SELECT COUNT(*) as cnt FROM thought_critiques WHERE node_id = %s
+            """, (str(node_id),))
+            result = cur.fetchone()
+            if result and result["cnt"] > 0:
+                critiqued_count += 1
+            else:
+                uncritiqued_nodes.append(str(node_id))
+    
+    critique_coverage = critiqued_count / max(len(candidates[:3]), 1)
+    critique_ok = critique_coverage >= thresholds["critique_coverage"]
+    
+    # 3. Tree depth - maximum depth reached
+    cur.execute("""
+        SELECT MAX(depth) as max_depth FROM thought_nodes WHERE session_id = %s
+    """, (session_id,))
+    depth_result = cur.fetchone()
+    max_depth = depth_result["max_depth"] if depth_result and depth_result["max_depth"] else 0
+    depth_ok = max_depth >= thresholds["min_depth"]
+    
+    # 4. Confidence variance - stability of scores
+    confidences = [c.get("likelihood", 0.5) for c in candidates]
+    if len(confidences) > 1:
+        variance = statistics.variance(confidences)
+    else:
+        variance = 0
+    variance_ok = variance <= thresholds["max_confidence_variance"]
+    
+    # Compute overall sufficiency
+    quality_sufficient = gap_ok and critique_ok and depth_ok and variance_ok
+    
+    # Generate suggestions for improvement
+    suggestions = []
+    if not critique_ok and uncritiqued_nodes:
+        suggestions.append({
+            "action": "critique",
+            "node_id": uncritiqued_nodes[0],
+            "reason": f"Top candidate unchallenged ({critiqued_count}/{len(candidates[:3])} critiqued)"
+        })
+    if not depth_ok:
+        best_node_id = candidates[0].get("node_id") or candidates[0].get("id") if candidates else None
+        if best_node_id:
+            suggestions.append({
+                "action": "expand",
+                "node_id": str(best_node_id),
+                "reason": f"Tree too shallow (depth {max_depth}, need ≥{thresholds['min_depth']})"
+            })
+    if not gap_ok:
+        suggestions.append({
+            "action": "expand_alternatives",
+            "node_id": None,
+            "reason": f"Gap too small ({gap:.3f}, need ≥{thresholds['gap_score']}). Explore more options."
+        })
+    if not variance_ok:
+        suggestions.append({
+            "action": "refine_confidences",
+            "node_id": None,
+            "reason": f"High uncertainty (variance {variance:.3f}). Add evidence or critique."
+        })
+    
+    return {
+        "sufficient": quality_sufficient,
+        "metrics": {
+            "gap_score": round(gap, 4),
+            "gap_ok": gap_ok,
+            "critique_coverage": round(critique_coverage, 2),
+            "critique_ok": critique_ok,
+            "tree_depth": max_depth,
+            "depth_ok": depth_ok,
+            "confidence_variance": round(variance, 4),
+            "variance_ok": variance_ok
+        },
+        "suggestions": suggestions,
+        "thresholds": thresholds
+    }
+
 
 @mcp.tool()
 async def finalize_session(
@@ -2140,6 +2257,15 @@ async def finalize_session(
         else:
             decision_quality = "medium"
             gap_analysis = "Only one candidate available."
+            gap = 0  # Single candidate, no gap
+        
+        # v20: Compute adaptive depth quality metrics
+        quality_result = compute_quality_metrics(
+            cur=cur,
+            session_id=session_id,
+            candidates=processed,
+            gap=gap
+        )
         
         # Get interview context summary if available
         context = session["context"] or {}
@@ -2273,7 +2399,11 @@ async def finalize_session(
             "outcome_prompt": outcome_prompt if not rlvr_result else None,  # v17b: suppress if auto-recorded
             "implementation_checklist": implementation_checklist,
             "scope_guidance": scope_guidance,  # v15b
-            "rlvr_result": rlvr_result  # v17b: auto-outcome detection result
+            "rlvr_result": rlvr_result,  # v17b: auto-outcome detection result
+            # v20: Adaptive depth quality metrics
+            "quality_sufficient": quality_result["sufficient"],
+            "quality_breakdown": quality_result["metrics"],
+            "deepen_suggestions": quality_result["suggestions"] if not quality_result["sufficient"] else []
         }
 
         
