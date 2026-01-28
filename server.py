@@ -62,30 +62,67 @@ mcp = FastMCP(
 # =============================================================================
 
 CONSTITUTIONAL_PRINCIPLES = [
+    # Code-focused principles
     {
         "principle": "Identify unstated assumptions",
         "focus": "Implicit requirements, hidden dependencies, unverified preconditions",
-        "question": "What must be true for this to work that isn't explicitly stated?"
+        "question": "What must be true for this to work that isn't explicitly stated?",
+        "domain": "code"
     },
     {
         "principle": "Check boundary conditions",
         "focus": "Empty inputs, null values, extreme sizes, negative numbers",
-        "question": "What happens at the edges of valid input ranges?"
+        "question": "What happens at the edges of valid input ranges?",
+        "domain": "code"
     },
     {
         "principle": "Verify causation vs correlation",
         "focus": "Logical reasoning, cause-effect chains, spurious relationships",
-        "question": "Does X actually cause Y, or are they merely correlated?"
+        "question": "Does X actually cause Y, or are they merely correlated?",
+        "domain": "code"
     },
     {
         "principle": "Question unstated dependencies",
         "focus": "Libraries, services, configurations, external state",
-        "question": "What external systems/state does this rely on?"
+        "question": "What external systems/state does this rely on?",
+        "domain": "code"
     },
     {
         "principle": "Consider failure modes",
         "focus": "Error handling, timeouts, partial failures, rollback",
-        "question": "What happens when this fails? Is recovery possible?"
+        "question": "What happens when this fails? Is recovery possible?",
+        "domain": "code"
+    },
+    # v9b.1: UI/UX design principles
+    {
+        "principle": "Apply Hick's Law (choice complexity)",
+        "focus": "Decision paralysis, option overload, cognitive burden",
+        "question": "Are there too many choices? Can we reduce or progressively disclose options?",
+        "domain": "ui_ux"
+    },
+    {
+        "principle": "Verify visual hierarchy",
+        "focus": "Primary/secondary actions, information prominence, scan patterns",
+        "question": "Is the most important element the most visually prominent? Does flow match user priority?",
+        "domain": "ui_ux"
+    },
+    {
+        "principle": "Check accessibility (WCAG)",
+        "focus": "Color contrast, keyboard nav, screen readers, touch targets",
+        "question": "Can users with disabilities perceive and operate this? Is contrast ≥4.5:1?",
+        "domain": "ui_ux"
+    },
+    {
+        "principle": "Test responsive breakpoints",
+        "focus": "Mobile-first, tablet, desktop, large screens",
+        "question": "Does this work on all screen sizes? Are touch targets ≥44px on mobile?",
+        "domain": "ui_ux"
+    },
+    {
+        "principle": "Validate feedback & affordances",
+        "focus": "Loading states, hover/active states, error messages, success confirmations",
+        "question": "Does the UI communicate what's happening? Are interactive elements obviously clickable?",
+        "domain": "ui_ux"
     }
 ]
 
