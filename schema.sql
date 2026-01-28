@@ -236,8 +236,14 @@ CREATE TABLE IF NOT EXISTS outcome_records (
                     CHECK (confidence >= 0.0 AND confidence <= 1.0),
     winning_path    LTREE,
     notes           TEXT,
+    failure_reason  TEXT,                   -- v15b: explicit failure reason for learning
+    scope_embedding vector(768),            -- v15b: embedded scope for semantic matching
     created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- v15b: Index for semantic scope search
+CREATE INDEX IF NOT EXISTS idx_outcome_scope_embedding 
+    ON outcome_records USING ivfflat (scope_embedding vector_cosine_ops) WITH (lists = 10);
 
 CREATE INDEX IF NOT EXISTS idx_outcome_records_session 
     ON outcome_records (session_id);

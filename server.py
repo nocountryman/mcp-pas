@@ -1923,6 +1923,39 @@ async def finalize_session(
             "[ ] Verify changes work as expected"
         ])
         
+        # v15b: Query past failures with similar goals (domain-agnostic via semantic similarity)
+        past_failures = []
+        try:
+            if session.get("goal_embedding"):
+                cur.execute("""
+                    SELECT o.notes, o.failure_reason, s.goal 
+                    FROM outcome_records o 
+                    JOIN reasoning_sessions s ON o.session_id = s.id
+                    WHERE o.outcome != 'success' 
+                    AND (o.notes IS NOT NULL OR o.failure_reason IS NOT NULL)
+                    AND s.goal_embedding IS NOT NULL
+                    AND 1 - (s.goal_embedding <=> %s) > 0.7
+                    LIMIT 3
+                """, (session["goal_embedding"],))
+                for r in cur.fetchall():
+                    reason = r["failure_reason"] or r["notes"]
+                    if reason:
+                        past_failures.append({"goal": r["goal"][:100], "reason": reason})
+        except Exception as e:
+            logger.warning(f"v15b past_failures lookup failed: {e}")
+        
+        # v15b: Construct scope_guidance (domain-agnostic)
+        winning_scope = recommendation.get("declared_scope", "") or ""
+        scope_guidance = {
+            "context": {
+                "goal": session["goal"],
+                "scope": winning_scope,
+                "recommendation": recommendation["content"][:200]
+            },
+            "prompt": "What validation or follow-up steps are needed for this specific context? If this is pure reasoning with no action items, respond 'No follow-up needed'.",
+            "past_failures": past_failures
+        }
+        
         return {
             "success": True,
             "session_id": session_id,
@@ -1944,7 +1977,8 @@ async def finalize_session(
             "context_summary": context_summary,
             "next_step": next_step,
             "outcome_prompt": outcome_prompt,
-            "implementation_checklist": implementation_checklist
+            "implementation_checklist": implementation_checklist,
+            "scope_guidance": scope_guidance  # v15b
         }
 
         
@@ -1966,6 +2000,7 @@ async def record_outcome(
     outcome: str,
     confidence: float = 1.0,
     notes: str = None,
+    failure_reason: str = None,  # v15b: explicit failure reason for learning
     keep_open: bool = False
 ) -> dict[str, Any]:
     """
@@ -1979,6 +2014,7 @@ async def record_outcome(
         outcome: 'success', 'partial', or 'failure'
         confidence: How confident is this assessment (0.0-1.0)
         notes: Optional notes about why this outcome
+        failure_reason: v15b - Explicit reason for failure (enables semantic learning)
         keep_open: If True, don't auto-complete even on success/failure
         
     Returns:
@@ -2012,14 +2048,27 @@ async def record_outcome(
         
         winning_path = best_node["path"]
         
-        # Record the outcome
+        # v15b: Get scope embedding for learning (from best node's declared_scope)
+        scope_embedding = None
+        try:
+            cur.execute(
+                "SELECT declared_scope FROM thought_nodes WHERE id = %s",
+                (best_node["id"],)
+            )
+            scope_row = cur.fetchone()
+            if scope_row and scope_row.get("declared_scope"):
+                scope_embedding = generate_embedding(scope_row["declared_scope"])
+        except Exception as e:
+            logger.warning(f"v15b scope embedding failed: {e}")
+        
+        # Record the outcome with v15b fields
         cur.execute(
             """
-            INSERT INTO outcome_records (session_id, outcome, confidence, winning_path, notes)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO outcome_records (session_id, outcome, confidence, winning_path, notes, failure_reason, scope_embedding)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING id, created_at
             """,
-            (session_id, outcome, confidence, winning_path, notes)
+            (session_id, outcome, confidence, winning_path, notes, failure_reason, scope_embedding)
         )
         record = cur.fetchone()
         
