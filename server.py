@@ -1331,29 +1331,39 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
         # Analyze goal to generate questions
         # v16d.1: LLM-generated goal-derived questions
         # v17c: Focus on business context only, not code quality
+        # v18: Smart LLM Gating - return [] for specific goals
         goal_questions = []
         try:
-            goal_prompt = f"""Generate 2-3 clarifying questions for this goal:
-{goal}
+            goal_prompt = f"""Analyze this goal and decide if clarifying questions are needed:
 
-Return a JSON array where each question has:
-- "question_text": A clear question about the goal
-- "choices": Array of options, each with "label" (A/B/C), "description", "pros" (array), "cons" (array)
+GOAL: {goal}
 
-Focus ONLY on BUSINESS CONTEXT:
-1. Requirements and acceptance criteria ("How will you know it works?")
-2. User/audience needs and constraints
-3. Scope boundaries and priorities
+DECISION RULES:
+1. If goal is SPECIFIC (names files/functions, has clear constraints) → return []
+2. If goal is AMBIGUOUS (multiple valid interpretations) → return 1-2 questions max
+3. If goal is OPEN-ENDED (design/architecture/planning) → return 2-3 questions max
 
-Do NOT ask about:
-- Code quality, architecture, or implementation approach
-- Testing strategy (PAS validates this automatically via RLVR)
-- Performance optimization (unless explicitly user-facing)
+EXAMPLES OF SPECIFIC GOALS (return []):
+- "Fix bug in auth.py line 45"
+- "Add logging to UserService.create_user()"
+- "Refactor parse_terminal_output to handle '0 failed'"
 
-Example format:
+EXAMPLES OF AMBIGUOUS GOALS (return 1-2 questions):
+- "Improve performance" → ask about which endpoints, target latency
+- "Add authentication" → ask about auth type, user scope
+- "Fix the login issue" → ask for repro steps
+
+For each question, focus on BUSINESS CONTEXT only:
+- Scope boundaries (what's in/out?)
+- Success criteria (how will you know it works?)
+- User context (who is this for?)
+
+Do NOT ask about code quality, architecture, or testing strategy.
+
+Return format:
 [{{"question_text": "...", "choices": [{{"label": "A", "description": "...", "pros": ["..."], "cons": ["..."]}}]}}]
 
-Return ONLY the JSON array, no other text."""
+Return [] if the goal is already specific enough. Return ONLY the JSON array."""
             
             # Use sampling to generate questions
             from mcp.types import SamplingMessage, TextContent
@@ -1395,92 +1405,28 @@ Return ONLY the JSON array, no other text."""
         except Exception as e:
             logger.warning(f"v16d.1 goal question generation failed: {e}")
         
-        # Generic questions as fallback (only if no goal questions generated)
-        questions = goal_questions if goal_questions else [
-            {
-                "id": "q1",
-                "question_text": "What is the primary platform for this solution?",
-                "question_type": "single_choice",
-                "choices": [
-                    {"label": "A", "description": "Desktop-first web application",
-                     "pros": ["Maximum screen space", "Complex UI possible"], 
-                     "cons": ["Not mobile accessible"]},
-                    {"label": "B", "description": "Mobile-first responsive",
-                     "pros": ["Accessible anywhere", "Touch-optimized"], 
-                     "cons": ["Limited screen space"]},
-                    {"label": "C", "description": "Desktop + Tablet hybrid",
-                     "pros": ["Best of both", "Flexible deployment"], 
-                     "cons": ["More design work required"]}
-                ],
-                "priority": 10,
-                "depth": 1,
-                "depends_on": [],
-                "follow_up_rules": [
-                    {
-                        "when_answer": "C",
-                        "inject": {
-                            "id": "q1a",
-                            "question_text": "Which should be the PRIMARY design target?",
-                            "question_type": "single_choice",
-                            "choices": [
-                                {"label": "A", "description": "Desktop-first, adapt to tablet",
-                                 "pros": ["Easier complex layouts"], "cons": ["May feel cramped on tablet"]},
-                                {"label": "B", "description": "Tablet-first, scale to desktop",
-                                 "pros": ["Touch-friendly base"], "cons": ["May underuse desktop space"]}
-                            ],
-                            "priority": 15,
-                            "depth": 2,
-                            "depends_on": ["q1"]
-                        }
-                    }
-                ],
-                "answered": False,
-                "answer": None
-            },
-            {
-                "id": "q2",
-                "question_text": "What is the primary user expertise level?",
-                "question_type": "single_choice",
-                "choices": [
-                    {"label": "A", "description": "Beginners / Students",
-                     "pros": ["Simple interface", "Guided experience"], 
-                     "cons": ["May frustrate power users"]},
-                    {"label": "B", "description": "Professionals",
-                     "pros": ["Dense information", "Advanced features"], 
-                     "cons": ["Steep learning curve"]},
-                    {"label": "C", "description": "Mixed (beginners to pros)",
-                     "pros": ["Wide audience"], 
-                     "cons": ["Must support progressive disclosure"]}
-                ],
-                "priority": 20,
+        # v18: Progressive Disclosure - single optional catch-all instead of static fallbacks
+        # If LLM returned [] (specific goal) and no historical questions, offer one optional question
+        questions = goal_questions if goal_questions else []
+        
+        if not questions and not historical_questions:
+            # v18: Single catch-all question that respects Hofstadter's Law (unknown unknowns)
+            # while honoring Hick's Law (one choice is fast)
+            goal_preview = goal[:50] + "..." if len(goal) > 50 else goal
+            questions = [{
+                "id": "q_catchall",
+                "question_text": f"Is there anything specific about '{goal_preview}' I should know before proceeding?",
+                "question_type": "open",
+                "optional": True,  # v18: User can skip this
+                "priority": 100,
                 "depth": 1,
                 "depends_on": [],
                 "follow_up_rules": [],
                 "answered": False,
-                "answer": None
-            },
-            {
-                "id": "q3",
-                "question_text": "What visual style best fits the product?",
-                "question_type": "single_choice",
-                "choices": [
-                    {"label": "A", "description": "Clean / Minimal (like Linear, Apple)",
-                     "pros": ["Timeless", "Professional"], "cons": ["Can feel cold"]},
-                    {"label": "B", "description": "Playful / Approachable (like Canva, Notion)",
-                     "pros": ["Welcoming", "Reduces anxiety"], "cons": ["May not feel serious"]},
-                    {"label": "C", "description": "Dark / Professional (like Figma, DaVinci)",
-                     "pros": ["Familiar to pros"], "cons": ["Can intimidate beginners"]},
-                    {"label": "D", "description": "Organic / Warm (earthy, handcrafted)",
-                     "pros": ["Unique, indie spirit"], "cons": ["Niche taste"]}
-                ],
-                "priority": 30,
-                "depth": 1,
-                "depends_on": [],
-                "follow_up_rules": [],
-                "answered": False,
-                "answer": None
-            }
-        ]
+                "answer": None,
+                "source": "catchall"
+            }]
+            logger.info("v18: Using catch-all question for specific goal")
         
         # v16d.2: Prepend historical questions (higher priority)
         questions = historical_questions + questions
