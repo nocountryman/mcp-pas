@@ -1920,18 +1920,18 @@ def compute_quality_metrics(
     gap_ok = gap >= thresholds["gap_score"]
     
     # 2. Critique coverage - % of top candidates that have been critiqued
+    # Critiqued nodes have likelihood reduced below their original confidence
     critiqued_count = 0
     uncritiqued_nodes = []
     for c in candidates[:3]:  # Check top 3
         node_id = c.get("node_id") or c.get("id")
-        if node_id:
-            cur.execute("""
-                SELECT COUNT(*) as cnt FROM thought_critiques WHERE node_id = %s
-            """, (str(node_id),))
-            result = cur.fetchone()
-            if result and result["cnt"] > 0:
-                critiqued_count += 1
-            else:
+        likelihood = c.get("likelihood", 0.5)
+        # A node is considered critiqued if likelihood < initial confidence
+        # (store_critique reduces likelihood, initial is typically 0.7-0.9)
+        if likelihood < 0.8:  # Threshold: critiqued if reduced
+            critiqued_count += 1
+        else:
+            if node_id:
                 uncritiqued_nodes.append(str(node_id))
     
     critique_coverage = critiqued_count / max(len(candidates[:3]), 1)
