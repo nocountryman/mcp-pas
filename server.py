@@ -2480,6 +2480,18 @@ async def parse_terminal_output(
         if matches:
             failure_matches.extend(matches)
     
+    # v17a.2: Filter out false-positive failures from success contexts
+    # "0 failed", "passed", etc. should not count as failure signals
+    false_positive_context = re.search(r'\b0\s+failed\b', terminal_text, re.IGNORECASE)
+    if false_positive_context:
+        # Remove one 'failed' match for each '0 failed' context found
+        zero_failed_count = len(re.findall(r'\b0\s+failed\b', terminal_text, re.IGNORECASE))
+        for _ in range(zero_failed_count):
+            for i, m in enumerate(failure_matches):
+                if m.lower() == 'failed':
+                    failure_matches.pop(i)
+                    break
+    
     # Determine signal and confidence
     success_count = len(success_matches)
     failure_count = len(failure_matches)
