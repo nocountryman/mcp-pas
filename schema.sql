@@ -179,6 +179,13 @@ ALTER TABLE scientific_laws ADD COLUMN IF NOT EXISTS
     success_count INTEGER DEFAULT 0;
 
 -- ============================================================================
+-- v14c.1: Law Failure Modes for Targeted Critique Prompts
+-- Common failure patterns to guide LLM critiques
+-- ============================================================================
+ALTER TABLE scientific_laws ADD COLUMN IF NOT EXISTS
+    failure_modes TEXT[] DEFAULT '{}';
+
+-- ============================================================================
 -- v12a: Training Data Collection for PRM
 -- Stores hypothesis+outcome pairs for future fine-tuning
 -- ============================================================================

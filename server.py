@@ -853,9 +853,14 @@ async def prepare_critique(node_id: str) -> dict[str, Any]:
         # Get supporting laws
         laws_text = []
         if node["supporting_laws"]:
-            cur.execute("SELECT law_name, definition FROM scientific_laws WHERE id = ANY(%s)", (node["supporting_laws"],))
+            # v14c.1: Include failure_modes for targeted critique
+            cur.execute("SELECT law_name, definition, failure_modes FROM scientific_laws WHERE id = ANY(%s)", (node["supporting_laws"],))
             for law in cur.fetchall():
-                laws_text.append({"law_name": law["law_name"], "definition": law["definition"]})
+                laws_text.append({
+                    "law_name": law["law_name"], 
+                    "definition": law["definition"],
+                    "failure_modes": law["failure_modes"] or []  # v14c.1
+                })
         
         return {
             "success": True,
@@ -869,7 +874,8 @@ async def prepare_critique(node_id: str) -> dict[str, Any]:
                 "posterior": float(node["posterior_score"]) if node["posterior_score"] else None
             },
             "supporting_laws": laws_text,
-            "instructions": "Challenge this hypothesis: What could be wrong? What would make it STRONGER? Generate critique with counterargument and severity_score (0.0-1.0). Balance criticism with constructive improvement. Call store_critique(node_id=..., counterargument=..., severity_score=..., logical_flaws='flaw1, flaw2', edge_cases='case1, case2').",
+            # v14c.1: Enhanced instructions with failure mode guidance
+            "instructions": "Challenge this hypothesis. Use the failure_modes from supporting laws as targeted challenge prompts. What could go wrong? What would make it STRONGER? Generate critique with counterargument and severity_score (0.0-1.0). Call store_critique(node_id=..., counterargument=..., severity_score=..., logical_flaws='flaw1, flaw2', edge_cases='case1, case2').",
             # v9b: Constitutional Principles for structured critique
             "constitutional_principles": CONSTITUTIONAL_PRINCIPLES,
             # v10b: Critic Ensemble Personas
@@ -1776,6 +1782,9 @@ async def finalize_session(
                 "path": node["path"],
                 "content": node["content"],
                 "depth": depth,
+                "prior_score": round(float(node["prior_score"]), 4),      # v14a.1
+                "likelihood": round(float(node["likelihood"]), 4),        # v14a.1
+                "confidence": round(float(node["prior_score"]) * float(node["likelihood"]), 4),  # v14a.1
                 "original_score": round(original_score, 4),
                 "adjusted_score": round(adjusted_score, 4),
                 "rollout_score": round(rollout_score, 4),  # v11b
@@ -1854,6 +1863,19 @@ async def finalize_session(
             else:
                 decision_quality = "high"
                 gap_analysis = f"Clear winner (gap: {gap:.3f}). High confidence in recommendation."
+            
+            # v14a.1: Confidence-weighted gap - lower confidence reduces decision quality
+            rec_conf = recommendation.get("confidence", 0.5)
+            run_conf = runner_up.get("confidence", 0.5)
+            weighted_gap = gap * min(rec_conf, run_conf)
+            
+            # v14a.1: Downgrade decision quality if weighted gap is too low
+            if decision_quality == "high" and weighted_gap < 0.05:
+                decision_quality = "medium"
+                gap_analysis += f" [v14a.1: Downgraded - low confidence (wgap: {weighted_gap:.3f})]"
+            elif decision_quality == "medium" and weighted_gap < 0.02:
+                decision_quality = "low"
+                gap_analysis += f" [v14a.1: Downgraded - low confidence (wgap: {weighted_gap:.3f})]"
             
             if uct_applied:
                 gap_analysis += " [v11a: UCT exploration applied]"
