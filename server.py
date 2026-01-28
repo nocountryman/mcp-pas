@@ -2103,6 +2103,7 @@ async def record_outcome(
     
     try:
         conn = get_db_connection()
+        conn.rollback()  # Defensive: ensure clean transaction state
         cur = conn.cursor()
         
         # Get the best path for this session
