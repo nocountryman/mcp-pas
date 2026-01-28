@@ -169,6 +169,33 @@ ALTER TABLE scientific_laws ADD COLUMN IF NOT EXISTS
     domain_weights JSONB DEFAULT '{}';
 -- Example: {"ui_design": 0.85, "architecture": 0.6, "debugging": 0.7}
 
+-- ============================================================================
+-- v12b: Thompson Sampling for Law Selection
+-- Tracks selection/success counts for explore-exploit balancing
+-- ============================================================================
+ALTER TABLE scientific_laws ADD COLUMN IF NOT EXISTS
+    selection_count INTEGER DEFAULT 0;
+ALTER TABLE scientific_laws ADD COLUMN IF NOT EXISTS
+    success_count INTEGER DEFAULT 0;
+
+-- ============================================================================
+-- v12a: Training Data Collection for PRM
+-- Stores hypothesis+outcome pairs for future fine-tuning
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS training_data (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    hypothesis_text TEXT NOT NULL,
+    goal_text       TEXT NOT NULL,
+    outcome         VARCHAR(20) CHECK (outcome IN ('success', 'partial', 'failure')),
+    depth           INTEGER,
+    law_name        VARCHAR(255),
+    session_id      UUID REFERENCES reasoning_sessions(id),
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_data_outcome 
+    ON training_data(outcome);
+
 -- Table: outcome_records
 -- Tracks session outcomes for learning
 CREATE TABLE IF NOT EXISTS outcome_records (

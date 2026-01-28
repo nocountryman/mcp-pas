@@ -699,10 +699,29 @@ async def store_expansion(
                 negation_asymmetry = bool(hyp_negations) != bool(law_negations)
                 negation_penalty = 0.2 if negation_asymmetry else 0.0
                 
-                prior = (float(law["scientific_weight"]) * 0.6) + (float(law["similarity"]) * 0.4)
+                # v12b: Thompson Sampling for law selection
+                # Sample from Beta(success+1, failure+1) distribution
+                import random
+                selection_count = law.get("selection_count", 0) or 0
+                success_count = law.get("success_count", 0) or 0
+                alpha = success_count + 1
+                beta_param = selection_count - success_count + 1
+                # Use scientific_weight as base, blend with sampled exploration bonus
+                thompson_sample = random.betavariate(alpha, beta_param)
+                base_weight = float(law["scientific_weight"])
+                # Blend: 70% base weight + 30% thompson sample (exploration)
+                effective_weight = 0.7 * base_weight + 0.3 * thompson_sample
+                
+                prior = (effective_weight * 0.6) + (float(law["similarity"]) * 0.4)
                 prior = max(0.1, prior - negation_penalty)  # v10a: Apply negation penalty
                 supporting_law = [law["id"]]
                 law_name = law["law_name"]
+                
+                # v12b: Track law selection
+                cur.execute(
+                    "UPDATE scientific_laws SET selection_count = selection_count + 1 WHERE id = %s",
+                    (law["id"],)
+                )
             else:
                 prior = 0.5
                 supporting_law = []
@@ -1949,6 +1968,39 @@ async def record_outcome(
             (session_id, winning_path)
         )
         stats = cur.fetchone()
+        
+        # v12b: Update success_count for Thompson Sampling on success outcomes
+        if outcome == 'success' and stats and stats["laws"]:
+            attributed_laws = [l for l in stats["laws"] if l is not None]
+            if attributed_laws:
+                cur.execute(
+                    "UPDATE scientific_laws SET success_count = success_count + 1 WHERE id = ANY(%s)",
+                    (attributed_laws,)
+                )
+        
+        # v12a: Log training data for PRM fine-tuning
+        cur.execute(
+            """
+            SELECT content, path, supporting_laws FROM thought_nodes
+            WHERE session_id = %s AND path <@ %s AND node_type = 'hypothesis'
+            """,
+            (session_id, winning_path)
+        )
+        for node in cur.fetchall():
+            # Get first supporting law name
+            law_name = None
+            if node["supporting_laws"]:
+                cur.execute("SELECT law_name FROM scientific_laws WHERE id = %s", (node["supporting_laws"][0],))
+                law_row = cur.fetchone()
+                law_name = law_row["law_name"] if law_row else None
+            
+            cur.execute(
+                """
+                INSERT INTO training_data (hypothesis_text, goal_text, outcome, depth, law_name, session_id)
+                VALUES (%s, (SELECT goal FROM reasoning_sessions WHERE id = %s), %s, %s, %s, %s)
+                """,
+                (node["content"], session_id, outcome, len(str(node["path"]).split(".")), law_name, session_id)
+            )
         
         # Auto-complete session if outcome is definitive (not partial) and not keep_open
         session_completed = False
