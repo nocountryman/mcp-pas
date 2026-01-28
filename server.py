@@ -2136,6 +2136,7 @@ async def record_outcome(
                 scope_embedding = get_embedding(scope_row["declared_scope"])
         except Exception as e:
             logger.warning(f"v15b scope embedding failed: {e}")
+            conn.rollback()  # Clear aborted transaction state before continuing
         
         # Record the outcome with v15b fields
         cur.execute(
