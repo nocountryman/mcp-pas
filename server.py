@@ -2132,7 +2132,7 @@ async def record_outcome(
             )
             scope_row = cur.fetchone()
             if scope_row and scope_row.get("declared_scope"):
-                scope_embedding = generate_embedding(scope_row["declared_scope"])
+                scope_embedding = get_embedding(scope_row["declared_scope"])
         except Exception as e:
             logger.warning(f"v15b scope embedding failed: {e}")
         
