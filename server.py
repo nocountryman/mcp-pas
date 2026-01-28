@@ -1605,6 +1605,7 @@ async def check_interview_complete(session_id: str) -> dict[str, Any]:
 HEURISTIC_PENALTIES = {
     "unchallenged": 0.10,      # Never critiqued
     "shallow_alternatives": 0.05,  # <2 siblings at same level
+    "monoculture": 0.05,       # v13b: All siblings match same law
 }
 
 DEPTH_BONUS_PER_LEVEL = 0.02  # Reward deeper refinement
@@ -1690,6 +1691,22 @@ async def finalize_session(
         )
         sibling_counts = {str(row["parent_path"]): row["sibling_count"] for row in cur.fetchall()}
         
+        # v13b: Get unique law counts per parent path for monoculture detection
+        cur.execute(
+            """
+            SELECT SUBPATH(path, 0, NLEVEL(path) - 1) as parent_path,
+                   COUNT(DISTINCT supporting_laws[1]) as unique_laws,
+                   COUNT(*) as total_siblings
+            FROM thought_nodes
+            WHERE session_id = %s AND node_type = 'hypothesis' 
+                  AND supporting_laws IS NOT NULL AND array_length(supporting_laws, 1) > 0
+            GROUP BY SUBPATH(path, 0, NLEVEL(path) - 1)
+            """,
+            (session_id,)
+        )
+        law_diversity = {str(row["parent_path"]): (row["unique_laws"], row["total_siblings"]) 
+                        for row in cur.fetchall()}
+        
         # Check if nodes have been critiqued (likelihood changed from initial)
         # A critiqued node will have likelihood != 0.X initial value
         
@@ -1723,6 +1740,14 @@ async def finalize_session(
             if sibling_count < 2:
                 adjusted_score -= HEURISTIC_PENALTIES["shallow_alternatives"]
                 penalties.append("shallow_alternatives_penalty")
+            
+            # v13b: Monoculture penalty - if all siblings match same law, penalize
+            if parent_path in law_diversity:
+                unique_laws, total_siblings = law_diversity[parent_path]
+                # If multiple siblings but only 1 unique law = monoculture
+                if total_siblings >= 2 and unique_laws == 1:
+                    adjusted_score -= HEURISTIC_PENALTIES["monoculture"]
+                    penalties.append("monoculture_penalty")
             
             # Ensure score stays in valid range
             adjusted_score = max(0.1, min(1.0, adjusted_score))
@@ -2019,6 +2044,41 @@ async def record_outcome(
                 VALUES (%s, (SELECT goal FROM reasoning_sessions WHERE id = %s), %s, %s, %s, %s)
                 """,
                 (node["content"], session_id, outcome, len(str(node["path"]).split(".")), law_name, session_id)
+            )
+        
+        # v13c: Track critique accuracy for self-learning calibration
+        # Find all critiqued nodes in session (nodes where likelihood was modified from initial)
+        cur.execute(
+            """
+            SELECT tn.id, tn.path, tn.likelihood, tn.posterior_score
+            FROM thought_nodes tn
+            WHERE tn.session_id = %s 
+              AND tn.node_type = 'hypothesis'
+              AND tn.likelihood NOT IN (0.8, 0.85, 0.9, 0.95, 0.88, 0.92, 0.75, 0.7)
+            """,
+            (session_id,)
+        )
+        critiqued_nodes = cur.fetchall()
+        
+        for cnode in critiqued_nodes:
+            is_winner = str(cnode["path"]).startswith(str(winning_path)) or str(winning_path).startswith(str(cnode["path"]))
+            # Critique was accurate if: node was critiqued AND (failure if winner OR success if not winner)
+            # Simple heuristic: critique severity implied caution, was it warranted?
+            critique_accurate = None
+            if is_winner:
+                # If winner was critiqued and outcome is failure, critique was accurate
+                critique_accurate = (outcome == 'failure')
+            else:
+                # If non-winner was critiqued and outcome is success, critique may have been accurate
+                critique_accurate = (outcome == 'success')
+            
+            cur.execute(
+                """
+                INSERT INTO critique_accuracy 
+                    (session_id, node_id, critique_severity, was_top_hypothesis, actual_outcome, critique_accurate)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (session_id, cnode["id"], 1.0 - float(cnode["likelihood"]), is_winner, outcome, critique_accurate)
             )
         
         # Auto-complete session if outcome is definitive (not partial) and not keep_open

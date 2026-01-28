@@ -196,6 +196,28 @@ CREATE TABLE IF NOT EXISTS training_data (
 CREATE INDEX IF NOT EXISTS idx_training_data_outcome 
     ON training_data(outcome);
 
+-- ============================================================================
+-- v13c: Critique Calibration - Track critique accuracy for self-learning
+-- Stores critique→outcome links to calibrate future critique weights
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS critique_accuracy (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id      UUID NOT NULL REFERENCES reasoning_sessions(id) ON DELETE CASCADE,
+    node_id         UUID NOT NULL REFERENCES thought_nodes(id) ON DELETE CASCADE,
+    critique_severity DECIMAL(3,2), -- Original severity score (0.0-1.0)
+    persona         VARCHAR(50),    -- Which critic persona (if any)
+    was_top_hypothesis BOOLEAN DEFAULT false, -- Was this the winning hypothesis?
+    actual_outcome  VARCHAR(20) CHECK (actual_outcome IN ('success', 'partial', 'failure')),
+    critique_accurate BOOLEAN, -- Did the critique correctly predict failure?
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_critique_accuracy_session 
+    ON critique_accuracy(session_id);
+CREATE INDEX IF NOT EXISTS idx_critique_accuracy_persona 
+    ON critique_accuracy(persona);
+
+
 -- Table: outcome_records
 -- Tracks session outcomes for learning
 CREATE TABLE IF NOT EXISTS outcome_records (
