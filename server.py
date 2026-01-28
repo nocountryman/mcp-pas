@@ -1789,7 +1789,8 @@ ROLLOUT_WEIGHT = 0.2     # Blend: final = (1-weight)*posterior + weight*rollout
 async def finalize_session(
     session_id: str,
     top_n: int = 3,
-    deep_critique: bool = False
+    deep_critique: bool = False,
+    terminal_output: str = None  # v17b: RLVR auto-record
 ) -> dict[str, Any]:
     """
     Finalize a reasoning session by auto-critiquing top hypotheses.
@@ -1801,6 +1802,7 @@ async def finalize_session(
         session_id: The reasoning session UUID
         top_n: Number of top candidates to consider (default: 3)
         deep_critique: If True, returns critique requests for LLM
+        terminal_output: v17b - Raw terminal output to auto-parse and record outcome
         
     Returns:
         Final recommendation with adjusted score and decision quality
@@ -2133,6 +2135,20 @@ async def finalize_session(
             "calibration_warning": calibration_warning  # v16b.1
         }
         
+        # v17b: RLVR Auto-Recording - parse terminal output and auto-record outcome
+        rlvr_result = None
+        if terminal_output and terminal_output.strip():
+            try:
+                rlvr_result = await parse_terminal_output(
+                    session_id=session_id,
+                    terminal_text=terminal_output,
+                    auto_record=True
+                )
+                logger.info(f"v17b: RLVR auto-recorded for session {session_id}: {rlvr_result.get('signal')}")
+            except Exception as e:
+                logger.warning(f"v17b RLVR auto-record failed: {e}")
+                rlvr_result = {"success": False, "error": str(e)}
+        
         return {
             "success": True,
             "session_id": session_id,
@@ -2153,9 +2169,10 @@ async def finalize_session(
             "candidates_evaluated": len(processed),
             "context_summary": context_summary,
             "next_step": next_step,
-            "outcome_prompt": outcome_prompt,
+            "outcome_prompt": outcome_prompt if not rlvr_result else None,  # v17b: suppress if auto-recorded
             "implementation_checklist": implementation_checklist,
-            "scope_guidance": scope_guidance  # v15b
+            "scope_guidance": scope_guidance,  # v15b
+            "rlvr_result": rlvr_result  # v17b: auto-outcome detection result
         }
 
         
