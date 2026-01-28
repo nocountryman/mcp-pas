@@ -1330,6 +1330,7 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
         
         # Analyze goal to generate questions
         # v16d.1: LLM-generated goal-derived questions
+        # v17c: Focus on business context only, not code quality
         goal_questions = []
         try:
             goal_prompt = f"""Generate 2-3 clarifying questions for this goal:
@@ -1339,10 +1340,15 @@ Return a JSON array where each question has:
 - "question_text": A clear question about the goal
 - "choices": Array of options, each with "label" (A/B/C), "description", "pros" (array), "cons" (array)
 
-Focus on questions that clarify:
-1. Scope and constraints
-2. User/audience
-3. Technical preferences
+Focus ONLY on BUSINESS CONTEXT:
+1. Requirements and acceptance criteria ("How will you know it works?")
+2. User/audience needs and constraints
+3. Scope boundaries and priorities
+
+Do NOT ask about:
+- Code quality, architecture, or implementation approach
+- Testing strategy (PAS validates this automatically via RLVR)
+- Performance optimization (unless explicitly user-facing)
 
 Example format:
 [{{"question_text": "...", "choices": [{{"label": "A", "description": "...", "pros": ["..."], "cons": ["..."]}}]}}]
@@ -2060,7 +2066,8 @@ async def finalize_session(
             next_step = f"Consider refining the recommendation. Call prepare_expansion(session_id='{session_id}', parent_node_id='{recommendation['node_id']}')"
         
         # v8a: Outcome prompt to close self-learning loop
-        outcome_prompt = f"After implementing, close the learning loop: record_outcome(session_id='{session_id}', outcome='success'|'partial'|'failure')"
+        # v17c: Focus on business value, not code quality (RLVR handles that)
+        outcome_prompt = f"Did this solve your business problem? record_outcome(session_id='{session_id}', outcome='success'|'partial'|'failure'). Note: Code quality is validated automatically by RLVR."
         
         # v8c: Implementation checklist - bridge reasoning to action
         implementation_checklist = []
