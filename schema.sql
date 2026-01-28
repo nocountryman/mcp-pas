@@ -428,3 +428,104 @@ SELECT
 FROM benchmark_results br
 GROUP BY br.model_name, br.prompt_variant
 ORDER BY avg_composite_score DESC;
+
+-- ============================================================================
+-- v19: Interview Domain System
+-- Domain-driven question trees with dimension tracking
+-- ============================================================================
+
+-- Table: interview_domains
+-- Predefined domains (ui_design, api_design, coding_task, etc.)
+CREATE TABLE IF NOT EXISTS interview_domains (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    domain_name     VARCHAR(100) NOT NULL UNIQUE,
+    description     TEXT NOT NULL,
+    example_goals   TEXT[] DEFAULT '{}',    -- Sample goals for this domain
+    embedding       vector(768),             -- For semantic matching
+    is_active       BOOLEAN DEFAULT true,
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- HNSW index for domain similarity search
+CREATE INDEX IF NOT EXISTS idx_interview_domains_embedding
+    ON interview_domains
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+-- Table: interview_dimensions
+-- Dimensions per domain (colors, layout, scope, constraints, etc.)
+CREATE TABLE IF NOT EXISTS interview_dimensions (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    domain_id       UUID NOT NULL REFERENCES interview_domains(id) ON DELETE CASCADE,
+    dimension_name  VARCHAR(100) NOT NULL,
+    description     TEXT,
+    is_required     BOOLEAN DEFAULT true,   -- Must be answered for domain complete
+    priority        INTEGER DEFAULT 50,      -- Lower = ask first
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    UNIQUE(domain_id, dimension_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_interview_dimensions_domain
+    ON interview_dimensions(domain_id);
+
+-- Table: interview_questions
+-- Question templates per dimension with choices
+CREATE TABLE IF NOT EXISTS interview_questions (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    dimension_id    UUID NOT NULL REFERENCES interview_dimensions(id) ON DELETE CASCADE,
+    question_template TEXT NOT NULL,
+    question_type   VARCHAR(20) NOT NULL CHECK (question_type IN ('simple', 'complex')),
+    choices         JSONB NOT NULL DEFAULT '[]',  -- [{label, description, pros, cons}]
+    is_default      BOOLEAN DEFAULT true,         -- Use as default question for dimension
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_interview_questions_dimension
+    ON interview_questions(dimension_id);
+
+-- Table: interview_answers (v19)
+-- Stores answers for conflict detection across sessions
+CREATE TABLE IF NOT EXISTS interview_answers (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id      UUID NOT NULL REFERENCES reasoning_sessions(id) ON DELETE CASCADE,
+    dimension_id    UUID NOT NULL REFERENCES interview_dimensions(id),
+    question_id     UUID REFERENCES interview_questions(id),
+    answer_label    VARCHAR(10),            -- 'A', 'B', 'C', etc.
+    answer_text     TEXT,                   -- Full answer description
+    answer_embedding vector(768),           -- For semantic conflict detection
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    UNIQUE(session_id, dimension_id)  -- One answer per dimension per session
+);
+
+CREATE INDEX IF NOT EXISTS idx_interview_answers_session
+    ON interview_answers(session_id);
+
+CREATE INDEX IF NOT EXISTS idx_interview_answers_dimension
+    ON interview_answers(dimension_id);
+
+CREATE INDEX IF NOT EXISTS idx_interview_answers_embedding
+    ON interview_answers
+    USING hnsw (answer_embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+-- View: dimension_coverage
+-- Shows which dimensions are covered per session
+CREATE OR REPLACE VIEW dimension_coverage AS
+SELECT 
+    s.id as session_id,
+    d.id as domain_id,
+    d.domain_name,
+    dim.id as dimension_id,
+    dim.dimension_name,
+    dim.is_required,
+    CASE WHEN a.id IS NOT NULL THEN true ELSE false END as is_covered,
+    a.answer_label,
+    a.answer_text
+FROM reasoning_sessions s
+CROSS JOIN interview_domains d
+JOIN interview_dimensions dim ON dim.domain_id = d.id
+LEFT JOIN interview_answers a ON a.session_id = s.id AND a.dimension_id = dim.id
+WHERE d.is_active = true;
