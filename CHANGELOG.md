@@ -5,7 +5,7 @@ All notable changes to PAS (Scientific Reasoning MCP) are documented here.
 ## [v39] - 2026-01-30
 
 ### Added
-- **Modularization Phase 0-5** - Major server.py decomposition
+- **Modularization Phase 0-6** - Major server.py decomposition
   - `errors.py` - Standardized exception hierarchy (~200 lines)
     - `PASError` base class with `to_dict()` for MCP responses
     - Session, Node, Database, Validation, Quality Gate, Codebase, Sampling errors
@@ -32,16 +32,21 @@ All notable changes to PAS (Scientific Reasoning MCP) are documented here.
     - `get_language_from_path()`, `should_skip_file()`
     - `extract_symbol_patterns_from_text()`, `build_reference_summary()`
     - Constants: `LANGUAGE_MAP`, `SKIP_EXTENSIONS`, `SKIP_DIRS`
+  - `sessions_helpers.py` - Session lifecycle utilities (~270 lines)
+    - `derive_user_id_from_goal()`, `compute_decayed_trait_score()`
+    - `build_trait_entry()`, `merge_traits_into_context()`
+    - `summarize_session_for_response()`, `build_continuation_context()`
+    - Constants: `TRAIT_HALF_LIFE_DAYS`, `VALID_SESSION_STATES`
 
 ### Changed
-- **server.py reduced from 5773 to 5371 lines (-402, 7.0%)**
+- **server.py reduced from 5773 to 5389 lines (-384, 6.7%)**
 - Pure helper functions imported with `_` prefix aliases for compatibility
 - All patterns and constants now centralized in domain-specific modules
 
 ### Technical
 - PAS self-analysis session `8fbb42ab` (score: 0.913, quality gate passed)
 - "Logic-Only Module Extraction" pattern: MCP decorators stay in server.py as thin wrappers
-- 6 new modules created, ~1,400 lines of reusable code
+- 7 new modules created, ~1,700 lines of reusable code
 
 ---
 

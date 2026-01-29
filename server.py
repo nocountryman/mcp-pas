@@ -85,6 +85,24 @@ from codebase_helpers import (
     SKIP_DIRS,
 )
 
+from sessions_helpers import (
+    derive_user_id_from_goal,
+    compute_decayed_trait_score,
+    should_include_trait,
+    build_trait_entry,
+    build_initial_context,
+    merge_traits_into_context,
+    validate_session_state,
+    compute_session_duration,
+    summarize_session_for_response,
+    build_continuation_context,
+    # Constants
+    TRAIT_HALF_LIFE_DAYS,
+    TRAIT_INCLUSION_THRESHOLD,
+    MAX_PERSISTENT_TRAITS,
+    VALID_SESSION_STATES,
+)
+
 # Load environment variables
 load_dotenv()
 
