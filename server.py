@@ -343,11 +343,70 @@ async def start_reasoning_session(user_goal: str) -> dict[str, Any]:
         )
         
         row = cur.fetchone()
+        
+        # =====================================================================
+        # v22 Feature 1: Load Persistent Trait Profiles
+        # Query user_trait_profiles for this project and pre-populate context
+        # =====================================================================
+        persistent_traits = []
+        user_id = None
+        
+        try:
+            # Use goal hash as a proxy for project identity (could be enhanced)
+            import hashlib
+            # Generate user_id from goal pattern (simplified - in production use project path)
+            user_id = hashlib.sha256(user_goal.strip()[:100].encode()).hexdigest()[:32]
+            
+            cur.execute("""
+                SELECT trait_name, cumulative_score, last_reinforced_at
+                FROM user_trait_profiles
+                WHERE user_id = %s AND cumulative_score > 0
+                ORDER BY cumulative_score DESC
+                LIMIT 5
+            """, (user_id,))
+            
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            half_life_days = 30
+            
+            for trait_row in cur.fetchall():
+                days_elapsed = (now - trait_row["last_reinforced_at"]).days
+                decayed_score = trait_row["cumulative_score"] * (0.5 ** (days_elapsed / half_life_days))
+                
+                if decayed_score >= 0.3:  # Threshold for inclusion
+                    persistent_traits.append({
+                        "trait": trait_row["trait_name"],
+                        "confidence": min(decayed_score, 1.0),
+                        "source": "persistent",
+                        "days_since_reinforced": days_elapsed
+                    })
+            
+            if persistent_traits:
+                # Update session context with persistent traits AND user_id
+                cur.execute("""
+                    UPDATE reasoning_sessions 
+                    SET context = context || %s::jsonb
+                    WHERE id = %s
+                """, (json.dumps({"persistent_traits": persistent_traits, "user_id": user_id}), session_id))
+                conn.commit()
+                logger.info(f"v22: Loaded {len(persistent_traits)} persistent traits for session")
+            else:
+                # v22: Still store user_id for trait persistence on record_outcome
+                cur.execute("""
+                    UPDATE reasoning_sessions 
+                    SET context = context || %s::jsonb
+                    WHERE id = %s
+                """, (json.dumps({"user_id": user_id}), session_id))
+                conn.commit()
+                
+        except Exception as e:
+            logger.warning(f"v22: Failed to load persistent traits: {e}")
+        
         conn.commit()
         
         logger.info(f"Created reasoning session: {session_id}")
         
-        return {
+        response = {
             "success": True,
             "session_id": str(row["id"]),
             "goal": row["goal"],
@@ -355,6 +414,12 @@ async def start_reasoning_session(user_goal: str) -> dict[str, Any]:
             "created_at": row["created_at"].isoformat(),
             "message": f"Reasoning session started. Use this session_id for subsequent reasoning operations."
         }
+        
+        if persistent_traits:
+            response["persistent_traits"] = persistent_traits
+            response["message"] += f" Loaded {len(persistent_traits)} persistent trait(s) from history."
+        
+        return response
         
     except Exception as e:
         logger.error(f"Failed to create session: {e}")
@@ -583,6 +648,87 @@ async def prepare_expansion(session_id: str, parent_node_id: str | None = None) 
                  "weight": float(r["scientific_weight"]), "similarity": round(float(r["similarity"]), 4)}
                 for r in cur.fetchall()]
         
+        # =====================================================================
+        # v22 Feature 2: Law Weight Boosting Based on User Traits
+        # Boost law weights that correlate with user's persistent/latent traits
+        # =====================================================================
+        # Get session context for traits
+        cur.execute("SELECT context FROM reasoning_sessions WHERE id = %s", (session_id,))
+        context_row = cur.fetchone()
+        session_context = context_row["context"] if context_row and context_row["context"] else {}
+        
+        # Combine persistent and latent traits
+        all_trait_names = []
+        persistent_traits = session_context.get("persistent_traits", [])
+        latent_traits = session_context.get("latent_traits", [])
+        
+        for t in persistent_traits:
+            if t.get("trait"):
+                all_trait_names.append(t["trait"])
+        for t in latent_traits:
+            if t.get("trait"):
+                all_trait_names.append(t["trait"])
+        
+        # Apply boosting if we have traits
+        boosted_laws = []
+        if all_trait_names and laws:
+            cur.execute("""
+                SELECT law_id, SUM(boost_factor) as total_boost
+                FROM trait_law_correlations
+                WHERE trait_name = ANY(%s)
+                GROUP BY law_id
+            """, (all_trait_names,))
+            
+            boosts = {row["law_id"]: row["total_boost"] for row in cur.fetchall()}
+            
+            for law in laws:
+                if law["id"] in boosts:
+                    # Cap boost at 50% to prevent runaway
+                    boost = min(boosts[law["id"]], 0.5)
+                    original_weight = law["weight"]
+                    law["weight"] = round(law["weight"] * (1 + boost), 4)
+                    law["boosted_by"] = boost
+                    boosted_laws.append(law["law_name"])
+                    logger.debug(f"v22: Boosted {law['law_name']} from {original_weight} to {law['weight']}")
+        
+        # =====================================================================
+        # v21 Phase 3: Trait-Aware Instructions
+        # Read latent_traits from session context and append dynamic guidance
+        # =====================================================================
+        base_instructions = "Consider: What is requested? What files/modules might be affected? For each hypothesis, declare SCOPE as specific file paths. Optionally prefix with layer if helpful: [API] routes.py, [DB] models.py, [tests] test_auth.py. Generate 3 hypotheses with confidence (0.0-1.0). Call store_expansion(h1_text=..., h1_confidence=..., h1_scope='[layer] file1.py, file2.py', ...)."
+        
+        # v22: latent_traits already retrieved in Feature 2 section above
+        
+        # Trait-to-guidance mapping
+        TRAIT_GUIDANCE = {
+            "RISK_AVERSE": "User prefers SAFE, REVERSIBLE approaches. Prioritize hypotheses with clear rollback strategies and minimal blast radius.",
+            "MINIMALIST": "User values SIMPLICITY. Favor minimal implementations that solve the core problem without unnecessary complexity.",
+            "CONTROL_ORIENTED": "User wants EXPLICIT CONTROL. Prefer solutions that give user visibility and manual override options.",
+            "AUTOMATION_TRUSTING": "User trusts AUTOMATION. Feel free to propose AI/automated solutions without excessive manual oversight.",
+            "ACCESSIBILITY_FOCUSED": "User prioritizes ACCESSIBILITY. Consider beginner-friendly approaches with good documentation.",
+            "PRAGMATIST": "User seeks BALANCED solutions. Blend theory with practicality, avoid extremes.",
+            "EXPLICIT_CONTROL": "User wants TRANSPARENCY. Prefer explicit configuration over magic/convention.",
+            "SPEED_FOCUSED": "User prioritizes PERFORMANCE. Consider efficiency and fast execution in hypotheses.",
+            "SAFETY_CONSCIOUS": "User values ERROR PREVENTION. Include validation and safety checks in proposed solutions.",
+            "AUTONOMY_FOCUSED": "User wants FREEDOM and flexibility. Avoid overly prescriptive or locked-down solutions.",
+        }
+        
+        # Build trait guidance section
+        trait_guidance = ""
+        if latent_traits:
+            guidance_lines = []
+            for trait_info in latent_traits:
+                trait_name = trait_info.get("trait")
+                confidence = trait_info.get("confidence", 0)
+                if trait_name in TRAIT_GUIDANCE and confidence >= 0.7:
+                    guidance_lines.append(f"- {TRAIT_GUIDANCE[trait_name]}")
+            
+            if guidance_lines:
+                trait_guidance = "\n\nUSER PREFERENCES DETECTED:\n" + "\n".join(guidance_lines)
+                logger.info(f"v21 Phase 3: Added {len(guidance_lines)} trait guidance(s) to instructions")
+        
+        instructions = base_instructions + trait_guidance
+        
         return {
             "success": True,
             "session_id": session_id,
@@ -591,7 +737,8 @@ async def prepare_expansion(session_id: str, parent_node_id: str | None = None) 
             "parent_content": parent_content,
             "goal": session["goal"],
             "relevant_laws": laws,
-            "instructions": "Consider: What is requested? What files/modules might be affected? For each hypothesis, declare SCOPE as specific file paths. Optionally prefix with layer if helpful: [API] routes.py, [DB] models.py, [tests] test_auth.py. Generate 3 hypotheses with confidence (0.0-1.0). Call store_expansion(h1_text=..., h1_confidence=..., h1_scope='[layer] file1.py, file2.py', ...)."
+            "instructions": instructions,
+            "latent_traits": latent_traits if latent_traits else None  # v21: Include for transparency
         }
         
     except Exception as e:
@@ -620,7 +767,10 @@ async def store_expansion(
     h3_scope: str = None,
     # v7b: Revision tracking (borrowed from sequential thinking)
     is_revision: bool = False,
-    revises_node_id: str = None
+    revises_node_id: str = None,
+    # v25: Conversation logging
+    source_text: str = None,
+    user_id: str = None
 ) -> dict[str, Any]:
     """
     Store generated hypotheses with Bayesian scoring.
@@ -642,6 +792,8 @@ async def store_expansion(
         h3_scope: Third hypothesis affected scope
         is_revision: True if these hypotheses revise previous thinking (v7b)
         revises_node_id: Node ID being revised, if is_revision is True
+        source_text: v25 - Raw user input that inspired this hypothesis (logged for semantic search)
+        user_id: v25 - Optional user identifier for multi-user scenarios
         
     Returns:
         Created nodes with Bayesian posterior scores, declared scopes, and revision info
@@ -780,11 +932,11 @@ async def store_expansion(
             
             cur.execute(
                 """
-                INSERT INTO thought_nodes (id, session_id, path, content, node_type, prior_score, likelihood, embedding, supporting_laws)
-                VALUES (%s, %s, %s, %s, 'hypothesis', %s, %s, %s, %s)
+                INSERT INTO thought_nodes (id, session_id, path, content, node_type, prior_score, likelihood, embedding, supporting_laws, declared_scope)
+                VALUES (%s, %s, %s, %s, 'hypothesis', %s, %s, %s, %s, %s)
                 RETURNING id, path, prior_score, likelihood, posterior_score
                 """,
-                (node_id, session_id, new_path, hypothesis_text, prior, likelihood, hyp_emb, supporting_law)
+                (node_id, session_id, new_path, hypothesis_text, prior, likelihood, hyp_emb, supporting_law, declared_scope)
             )
             node = cur.fetchone()
             
@@ -798,6 +950,30 @@ async def store_expansion(
                 "supporting_law": law_name,
                 "declared_scope": declared_scope
             })
+        
+        # =====================================================================
+        # v25: Conversation Logging - Store source_text if provided
+        # =====================================================================
+        conversation_log_id = None
+        if source_text and created_nodes:
+            try:
+                first_node_id = created_nodes[0]["node_id"]
+                source_embedding = get_embedding(source_text[:2000])  # Truncate for embedding (max useful context)
+                
+                cur.execute(
+                    """
+                    INSERT INTO conversation_log (session_id, thought_node_id, user_id, log_type, raw_text, embedding)
+                    VALUES (%s, %s, %s, 'user_input', %s, %s)
+                    RETURNING id
+                    """,
+                    (session_id, first_node_id, user_id, source_text, source_embedding)
+                )
+                log_entry = cur.fetchone()
+                conversation_log_id = str(log_entry["id"]) if log_entry else None
+                logger.info(f"v25: Created conversation_log entry {conversation_log_id} for source_text ({len(source_text)} chars)")
+            except Exception as log_err:
+                logger.warning(f"v25: Failed to create conversation_log entry: {log_err}")
+                # Don't fail the whole operation for logging failure
         
         conn.commit()
         
@@ -826,6 +1002,54 @@ async def store_expansion(
             if top_node:
                 revision_nudge = f"Revision recorded. Consider critiquing the revised hypothesis. Call prepare_critique(node_id='{top_node['node_id']}')"
         
+        # =====================================================================
+        # v21: Scope-Based Failure Matching
+        # Query historical failures that touched similar files/scopes
+        # =====================================================================
+        scope_warnings = []
+        try:
+            # Collect all declared scopes from this expansion
+            all_scopes = []
+            for node in created_nodes:
+                scope = node.get("declared_scope")
+                if scope:
+                    # Parse comma-separated scope items
+                    all_scopes.extend([s.strip() for s in scope.split(',') if s.strip()])
+            
+            if all_scopes:
+                # Query failures that mention similar files/scopes
+                scope_patterns = ['%' + s.split(':')[0] + '%' for s in all_scopes if s]  # Extract file/module names
+                
+                cur.execute("""
+                    SELECT DISTINCT o.failure_reason, s.goal, t.declared_scope
+                    FROM outcome_records o
+                    JOIN reasoning_sessions s ON o.session_id = s.id
+                    JOIN thought_nodes t ON t.session_id = s.id
+                    WHERE o.outcome = 'failure'
+                    AND o.failure_reason IS NOT NULL
+                    AND t.declared_scope IS NOT NULL
+                    AND (
+                        -- Match if any scope pattern overlaps
+                        t.declared_scope ILIKE ANY(%s)
+                    )
+                    ORDER BY o.created_at DESC
+                    LIMIT 3
+                """, (scope_patterns,))
+                
+                related_failures = cur.fetchall()
+                for r in related_failures:
+                    scope_warnings.append({
+                        "past_goal": r["goal"][:60] + "..." if len(r["goal"]) > 60 else r["goal"],
+                        "past_scope": r["declared_scope"][:80] if r["declared_scope"] else None,
+                        "failure_reason": r["failure_reason"][:120] + "..." if len(r["failure_reason"]) > 120 else r["failure_reason"]
+                    })
+                
+                if scope_warnings:
+                    logger.info(f"v21: Found {len(scope_warnings)} scope-related historical failures")
+        except Exception as e:
+            conn.rollback()  # Clear any transaction issues
+            logger.warning(f"v21: Scope-based failure matching failed: {e}")
+        
         return {
             "success": True, 
             "session_id": session_id, 
@@ -834,7 +1058,8 @@ async def store_expansion(
             "next_step": next_step,
             "confidence_nudge": confidence_nudge,
             "revision_info": revision_info,
-            "revision_nudge": revision_nudge
+            "revision_nudge": revision_nudge,
+            "scope_warnings": scope_warnings if scope_warnings else None  # v21: Historical failure warnings
         }
         
     except Exception as e:
@@ -930,6 +1155,33 @@ Be specific and constructive. Focus on what could go wrong."""
         except Exception as e:
             logger.warning(f"v16c critique generation failed: {e}")
         
+        # v27: Surface past failures matching this hypothesis content
+        past_failures = []
+        try:
+            # Get embedding for current node content
+            node_embedding = get_embedding(node["content"][:1000])
+            cur.execute("""
+                SELECT o.failure_reason, s.goal,
+                       1 - (o.failure_reason_embedding <=> %s::vector) as similarity
+                FROM outcome_records o
+                JOIN reasoning_sessions s ON o.session_id = s.id
+                WHERE o.outcome != 'success'
+                AND o.failure_reason_embedding IS NOT NULL
+                AND 1 - (o.failure_reason_embedding <=> %s::vector) > 0.25
+                ORDER BY similarity DESC
+                LIMIT 3
+            """, (node_embedding, node_embedding))
+            for r in cur.fetchall():
+                past_failures.append({
+                    "failure_reason": r["failure_reason"][:200],
+                    "session_goal": r["goal"][:100],
+                    "similarity": round(float(r["similarity"]), 3)
+                })
+            if past_failures:
+                logger.info(f"v27: Found {len(past_failures)} related past failures for node {node_id}")
+        except Exception as e:
+            logger.warning(f"v27 past_failures lookup failed: {e}")
+        
         return {
             "success": True,
             "node_id": node_id,
@@ -944,6 +1196,8 @@ Be specific and constructive. Focus on what could go wrong."""
             "supporting_laws": laws_text,
             # v16c: LLM-generated critique suggestion
             "suggested_critique": suggested_critique,
+            # v27: Past failures matching this hypothesis
+            "past_failures": past_failures,
             # v14c.1: Enhanced instructions with failure mode guidance
             "instructions": "Challenge this hypothesis. Use the failure_modes from supporting laws as targeted challenge prompts. What could go wrong? What would make it STRONGER? Generate critique with counterargument and severity_score (0.0-1.0). Call store_critique(node_id=..., counterargument=..., severity_score=..., logical_flaws='flaw1, flaw2', edge_cases='case1, case2').",
             # v9b: Constitutional Principles for structured critique
@@ -1446,9 +1700,10 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
         # v17c: Focus on business context only, not code quality
         # v18: Smart LLM Gating - return [] for specific goals
         # v19: Skip LLM questions if domain detection succeeded
+        # v21: Hidden Context Question Design - laddering, trade-offs, consequence-framing
         goal_questions = []
         try:
-            goal_prompt = f"""Analyze this goal and decide if clarifying questions are needed:
+            goal_prompt = f"""Analyze this goal and generate clarifying questions if needed:
 
 GOAL: {goal}
 
@@ -1462,22 +1717,40 @@ EXAMPLES OF SPECIFIC GOALS (return []):
 - "Add logging to UserService.create_user()"
 - "Refactor parse_terminal_output to handle '0 failed'"
 
-EXAMPLES OF AMBIGUOUS GOALS (return 1-2 questions):
-- "Improve performance" → ask about which endpoints, target latency
-- "Add authentication" → ask about auth type, user scope
-- "Fix the login issue" → ask for repro steps
+=== HIDDEN CONTEXT QUESTION DESIGN (v21) ===
+Use psychology-based techniques to extract more information per question:
 
-For each question, focus on BUSINESS CONTEXT only:
-- Scope boundaries (what's in/out?)
-- Success criteria (how will you know it works?)
-- User context (who is this for?)
+1. CONSEQUENCE FRAMING (Laddering):
+   - Frame choices as CONSEQUENCES, not features
+   - BAD: "Which database?" → "PostgreSQL / MySQL / MongoDB"
+   - GOOD: "When data integrity fails, what's the worst outcome?"
+          → "Users lose trust / Debugging becomes hard / Schema breaks"
 
-Do NOT ask about code quality, architecture, or testing strategy.
+2. TRADE-OFF BUNDLES (Conjoint):
+   - Force implicit priority decisions
+   - BAD: "Is performance important?" (everyone says yes)
+   - GOOD: "Which trade-off can you live with?"
+          → "50ms slower but consistent / Fast but occasional stale reads"
+
+3. SCENARIO COMPLETION (Projective):
+   - Present a situation and ask what happens next
+   - GOOD: "A critical bug appears at 2am before launch. When you investigate, you find..."
+          → Options reveal risk tolerance, debugging philosophy
+
+4. COGNITIVE LOAD (Keep it simple):
+   - Options < 15 words each
+   - Use concrete scenarios, not abstractions
+   - Gut reaction = true preference
+
+WHAT EACH CHOICE REVEALS:
+- Every option should reveal an underlying VALUE (risk tolerance, priority, philosophy)
+- Include a "hidden_value" field describing what the choice reveals
+- Example: {{"label": "A", "description": "Fast but complex", "hidden_value": "performance_priority"}}
 
 Return format:
-[{{"question_text": "...", "choices": [{{"label": "A", "description": "...", "pros": ["..."], "cons": ["..."]}}]}}]
+[{{"question_text": "...", "choices": [{{"label": "A", "description": "...", "hidden_value": "...", "pros": ["..."], "cons": ["..."]}}]}}]
 
-Return [] if the goal is already specific enough. Return ONLY the JSON array."""
+Return [] if goal is specific enough. Return ONLY the JSON array."""
             
             # Use sampling to generate questions
             from mcp.types import SamplingMessage, TextContent
@@ -1607,6 +1880,20 @@ async def get_next_question(session_id: str) -> dict[str, Any]:
         context = session["context"] or {}
         interview = get_interview_context(context)
         
+        # =====================================================================
+        # v23: Check if early termination suggested
+        # =====================================================================
+        if interview.get("early_termination_suggested") and not interview.get("early_exit_declined"):
+            remaining = len([q for q in interview.get("pending_questions", []) if not q.get("answered")])
+            return {
+                "success": True,
+                "session_id": session_id,
+                "early_exit_offered": True,
+                "questions_remaining": remaining,
+                "reason": interview.get("early_termination_reason", "diminishing_returns"),
+                "message": "We've learned enough about your preferences. Continue (submit any answer) or proceed to prepare_expansion."
+            }
+        
         # Find first unanswered, unlocked question
         pending = interview.get("pending_questions", [])
         answered_ids = {q["id"] for q in pending if q.get("answered")}
@@ -1614,6 +1901,7 @@ async def get_next_question(session_id: str) -> dict[str, Any]:
         for q in sorted(pending, key=lambda x: x.get("priority", 999)):
             if q.get("answered"):
                 continue
+
             # Check dependencies
             deps = q.get("depends_on", [])
             if all(d in answered_ids for d in deps):
@@ -1679,6 +1967,12 @@ async def submit_answer(session_id: str, question_id: str, answer: str) -> dict[
         pending = interview.get("pending_questions", [])
         config = interview["config"]
         
+        # v23: If user continues after early exit offer, mark as declined
+        if interview.get("early_termination_suggested"):
+            interview["early_exit_declined"] = True
+            logger.info("v23: User declined early exit, continuing interview")
+
+        
         # Find the question
         question = None
         for q in pending:
@@ -1697,11 +1991,22 @@ async def submit_answer(session_id: str, question_id: str, answer: str) -> dict[
         question["answer"] = answer
         config["questions_answered"] = config.get("questions_answered", 0) + 1
         
-        # Store in history
+        # v21: Extract hidden_value from selected choice
+        hidden_value = None
+        answer_description = None
+        for choice in question.get("choices", []):
+            if choice.get("label") == answer:
+                hidden_value = choice.get("hidden_value")
+                answer_description = choice.get("description")
+                break
+        
+        # Store in history (v21: now includes hidden_value for latent trait inference)
         interview["answer_history"].append({
             "question_id": question_id,
             "question_text": question["question_text"],
             "answer": answer,
+            "answer_description": answer_description,
+            "hidden_value": hidden_value,  # v21: reveals underlying values/priorities
             "timestamp": str(uuid.uuid4())[:8]  # Simple timestamp proxy
         })
         
@@ -1766,11 +2071,39 @@ async def submit_answer(session_id: str, question_id: str, answer: str) -> dict[
         # Update remaining count
         config["questions_remaining"] = len([q for q in pending if not q.get("answered")])
         
+        # =====================================================================
+        # v23: Track evidence delta for plateau detection
+        # =====================================================================
+        evidence_history = interview.get("evidence_history", [])
+        
+        # Calculate current evidence (count of hidden_values detected)
+        previous_total = sum(evidence_history) if evidence_history else 0
+        current_hidden_values = {}
+        for entry in interview.get("answer_history", []):
+            hv = entry.get("hidden_value")
+            if hv:
+                current_hidden_values[hv] = current_hidden_values.get(hv, 0) + 1
+        current_total = sum(current_hidden_values.values())
+        
+        # Delta = how many new hidden_value "hits" this answer contributed
+        evidence_delta = 1 if hidden_value else 0  # Simple: count if this answer had a hidden_value
+        evidence_history.append(evidence_delta)
+        interview["evidence_history"] = evidence_history[-5:]  # Keep last 5
+        
+        # Check for plateau (last 3 answers with no new trait info)
+        if len(evidence_history) >= 3:
+            recent_gain = sum(evidence_history[-3:])
+            if recent_gain == 0 and config.get("questions_answered", 0) >= 3:
+                interview["early_termination_suggested"] = True
+                interview["early_termination_reason"] = "diminishing_returns"
+                logger.info("v23: Early termination suggested - no trait evidence in last 3 answers")
+        
         # Save to session
         cur.execute(
             "UPDATE reasoning_sessions SET context = %s, updated_at = NOW() WHERE id = %s",
             (json.dumps(context), session_id)
         )
+
         conn.commit()
         
         return {
@@ -1839,6 +2172,121 @@ async def check_interview_complete(session_id: str) -> dict[str, Any]:
                 "selected": selected
             }
         
+        # =====================================================================
+        # v21 Phase 2: Latent Trait Inference from Hidden Values
+        # Aggregates hidden_values from answer_history and infers user traits
+        # =====================================================================
+        latent_traits = []
+        hidden_value_counts = {}
+        
+        if is_complete:
+            # Aggregate hidden_values from answer history
+            answer_history = interview.get("answer_history", [])
+            for entry in answer_history:
+                hv = entry.get("hidden_value")
+                if hv:
+                    hidden_value_counts[hv] = hidden_value_counts.get(hv, 0) + 1
+            
+            # Rule-based trait inference
+            # Each rule: if hidden_value appears N+ times → infer trait
+            TRAIT_RULES = [
+                # (hidden_value_pattern, min_count, trait_name, confidence)
+                ("SAFETY", 2, "RISK_AVERSE", 0.8),
+                ("SIMPLICITY", 2, "MINIMALIST", 0.75),
+                ("POWER_USER", 2, "CONTROL_ORIENTED", 0.8),
+                ("AI_", 2, "AUTOMATION_TRUSTING", 0.7),
+                ("BEGINNER", 2, "ACCESSIBILITY_FOCUSED", 0.75),
+                ("BALANCE", 3, "PRAGMATIST", 0.7),
+                ("EXPLICIT", 2, "EXPLICIT_CONTROL", 0.8),
+                ("PERFORMANCE", 2, "SPEED_FOCUSED", 0.75),
+                ("ERROR_PREVENTION", 2, "SAFETY_CONSCIOUS", 0.8),
+                ("FREEDOM", 2, "AUTONOMY_FOCUSED", 0.75),
+            ]
+            
+            for pattern, min_count, trait_name, confidence in TRAIT_RULES:
+                # Sum counts for any hidden_value containing the pattern
+                matching_count = sum(
+                    count for hv, count in hidden_value_counts.items() 
+                    if pattern in hv.upper()
+                )
+                if matching_count >= min_count:
+                    latent_traits.append({
+                        "trait": trait_name,
+                        "confidence": confidence,
+                        "evidence_count": matching_count
+                    })
+            
+            # =================================================================
+            # v22 Feature 3: Hybrid Inference - Semantic Fallback
+            # For answers without hidden_value or unmatched patterns, use
+            # semantic similarity against trait_exemplars
+            # =================================================================
+            unmatched_descriptions = []
+            for entry in answer_history:
+                hv = entry.get("hidden_value")
+                desc = entry.get("answer_description")
+                
+                # If no hidden_value OR hidden_value didn't match any rule pattern
+                if desc and (not hv or not any(p in (hv or "").upper() for p, _, _, _ in TRAIT_RULES)):
+                    unmatched_descriptions.append(desc)
+            
+            semantic_matches = []
+            if unmatched_descriptions:
+                try:
+                    # Check if trait_exemplars table has embeddings
+                    cur.execute("SELECT COUNT(*) FROM trait_exemplars WHERE embedding IS NOT NULL")
+                    exemplar_count = cur.fetchone()[0]
+                    
+                    if exemplar_count > 0:
+                        from sentence_transformers import SentenceTransformer
+                        model = SentenceTransformer('all-mpnet-base-v2')
+                        
+                        for desc_text in unmatched_descriptions[:5]:  # Limit to 5 for performance
+                            desc_embedding = model.encode(desc_text).tolist()
+                            
+                            cur.execute("""
+                                SELECT trait_name, 1 - (embedding <=> %s::vector) as similarity
+                                FROM trait_exemplars
+                                WHERE embedding IS NOT NULL
+                                ORDER BY embedding <=> %s::vector
+                                LIMIT 1
+                            """, (desc_embedding, desc_embedding))
+                            
+                            result = cur.fetchone()
+                            if result and result["similarity"] > 0.65:  # Threshold for semantic match
+                                semantic_matches.append({
+                                    "trait": result["trait_name"],
+                                    "similarity": round(float(result["similarity"]), 3),
+                                    "source_text": desc_text[:50]
+                                })
+                                
+                                # Add to trait counts with reduced confidence
+                                trait_name = result["trait_name"]
+                                existing = next((t for t in latent_traits if t["trait"] == trait_name), None)
+                                if existing:
+                                    existing["evidence_count"] = existing.get("evidence_count", 1) + 1
+                                    existing["semantic_boost"] = True
+                                else:
+                                    latent_traits.append({
+                                        "trait": trait_name,
+                                        "confidence": 0.6,  # Lower confidence for semantic matches
+                                        "evidence_count": 1,
+                                        "source": "semantic"
+                                    })
+                                
+                                logger.info(f"v22 Semantic match: '{desc_text[:30]}...' → {trait_name} (sim: {result['similarity']:.2f})")
+                                
+                except ImportError:
+                    logger.debug("v22: sentence-transformers not available for hybrid inference")
+                except Exception as e:
+                    logger.warning(f"v22 Hybrid inference failed: {e}")
+            
+            # Store in session context for downstream use
+            if latent_traits or hidden_value_counts:
+                context["latent_traits"] = latent_traits
+                context["hidden_value_counts"] = hidden_value_counts
+                logger.info(f"v21: Inferred {len(latent_traits)} latent traits from {sum(hidden_value_counts.values())} hidden_values")
+        
         # Archive interview to history for self-learning
         if is_complete and not interview.get("archived"):
             try:
@@ -1860,6 +2308,8 @@ async def check_interview_complete(session_id: str) -> dict[str, Any]:
             "questions_answered": len(answered),
             "questions_remaining": len(unanswered),
             "context_summary": context_summary if is_complete else None,
+            "latent_traits": latent_traits if latent_traits else None,  # v21 Phase 2
+            "hidden_value_counts": hidden_value_counts if hidden_value_counts else None,  # v21 Phase 2
             "archived_for_learning": interview.get("archived", False),
             "message": "Ready for prepare_expansion" if is_complete else f"{len(unanswered)} questions remaining"
         }
@@ -2308,6 +2758,36 @@ async def finalize_session(
             "[ ] Verify changes work as expected"
         ])
         
+        # v26: Suggest tags based on goal and recommendation
+        suggested_tags = []
+        try:
+            # Extract key terms from goal and winning content
+            combined_text = f"{session['goal']} {winning_content}".lower()
+            
+            # Simple keyword extraction - look for known domain patterns
+            domain_patterns = [
+                ("database", ["db", "schema", "table", "sql", "postgres", "column"]),
+                ("api", ["api", "endpoint", "route", "request", "response"]),
+                ("backend", ["server", "backend", "service", "logic"]),
+                ("frontend", ["ui", "ux", "frontend", "component", "page"]),
+                ("testing", ["test", "pytest", "verify", "validation"]),
+                ("bugfix", ["bug", "fix", "error", "failure"]),
+                ("feature", ["feature", "implement", "add", "new"]),
+                ("refactor", ["refactor", "cleanup", "improve", "optimize"]),
+            ]
+            
+            for tag, keywords in domain_patterns:
+                if any(kw in combined_text for kw in keywords):
+                    suggested_tags.append(tag)
+            
+            # Limit to 5 tags
+            suggested_tags = suggested_tags[:5]
+            
+            if suggested_tags:
+                logger.info(f"v26: Suggested tags for session {session_id}: {suggested_tags}")
+        except Exception as e:
+            logger.warning(f"v26 tag suggestion failed: {e}")
+        
         # v15b: Query past failures with similar goals (domain-agnostic via semantic similarity)
         past_failures = []
         try:
@@ -2403,7 +2883,9 @@ async def finalize_session(
             # v20: Adaptive depth quality metrics
             "quality_sufficient": quality_result["sufficient"],
             "quality_breakdown": quality_result["metrics"],
-            "deepen_suggestions": quality_result["suggestions"] if not quality_result["sufficient"] else []
+            "deepen_suggestions": quality_result["suggestions"] if not quality_result["sufficient"] else [],
+            # v26: Suggested tags for session organization
+            "suggested_tags": suggested_tags
         }
 
         
@@ -2418,6 +2900,90 @@ async def finalize_session(
 # =============================================================================
 # Self-Learning Tools (Phase 4)
 # =============================================================================
+
+
+@mcp.tool()
+async def tag_session(
+    session_id: str,
+    tags: str  # Comma-separated tags for universal LLM compatibility
+) -> dict[str, Any]:
+    """
+    Add tags to a reasoning session for organization and retrieval.
+    
+    Tags are normalized (lowercase, trimmed) and deduplicated.
+    If a tag has an alias defined, the canonical form is used.
+    
+    Args:
+        session_id: The reasoning session UUID
+        tags: Comma-separated list of tags (e.g., "backend, database, v27")
+        
+    Returns:
+        Confirmation with normalized tags applied
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Parse and normalize tags
+        tag_list = [t.strip().lower() for t in tags.split(",") if t.strip()]
+        if not tag_list:
+            return {"success": False, "error": "No valid tags provided"}
+        
+        # Check aliases and normalize
+        normalized_tags = []
+        for tag in tag_list:
+            cur.execute(
+                "SELECT canonical_tag FROM tag_aliases WHERE alias = %s",
+                (tag,)
+            )
+            alias_row = cur.fetchone()
+            canonical = alias_row["canonical_tag"] if alias_row else tag
+            if canonical not in normalized_tags:
+                normalized_tags.append(canonical)
+        
+        # Insert tags (ignore duplicates)
+        inserted = 0
+        for tag in normalized_tags:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO session_tags (session_id, tag)
+                    VALUES (%s, %s)
+                    ON CONFLICT (session_id, tag) DO NOTHING
+                    """,
+                    (session_id, tag)
+                )
+                if cur.rowcount > 0:
+                    inserted += 1
+            except Exception as e:
+                logger.warning(f"v26 tag insert failed for '{tag}': {e}")
+        
+        conn.commit()
+        
+        # Get all tags for session
+        cur.execute(
+            "SELECT tag FROM session_tags WHERE session_id = %s ORDER BY created_at",
+            (session_id,)
+        )
+        all_tags = [r["tag"] for r in cur.fetchall()]
+        
+        logger.info(f"v26: Tagged session {session_id} with {inserted} new tags")
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "tags_added": inserted,
+            "all_tags": all_tags,
+            "message": f"Session tagged with {len(all_tags)} tags"
+        }
+        
+    except Exception as e:
+        logger.error(f"tag_session failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
 
 @mcp.tool()
 async def record_outcome(
@@ -2488,14 +3054,23 @@ async def record_outcome(
             logger.warning(f"v15b scope embedding failed: {e}")
             conn.rollback()  # Clear aborted transaction state before continuing
         
-        # Record the outcome with v15b fields
+        # v27: Embed failure_reason for semantic search (if provided)
+        failure_reason_embedding = None
+        if failure_reason:
+            try:
+                failure_reason_embedding = get_embedding(failure_reason[:2000])
+                logger.info(f"v27: Embedded failure_reason for session {session_id}")
+            except Exception as e:
+                logger.warning(f"v27 failure_reason embedding failed: {e}")
+        
+        # Record the outcome with v15b + v27 fields
         cur.execute(
             """
-            INSERT INTO outcome_records (session_id, outcome, confidence, winning_path, notes, failure_reason, scope_embedding)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO outcome_records (session_id, outcome, confidence, winning_path, notes, failure_reason, scope_embedding, failure_reason_embedding)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, created_at
             """,
-            (session_id, outcome, confidence, winning_path, notes, failure_reason, scope_embedding)
+            (session_id, outcome, confidence, winning_path, notes, failure_reason, scope_embedding, failure_reason_embedding)
         )
         record = cur.fetchone()
         
@@ -2587,6 +3162,47 @@ async def record_outcome(
                 (session_id,)
             )
             session_completed = True
+        
+        # =====================================================================
+        # v22 Feature 1b: Persist Traits to user_trait_profiles
+        # Store session traits with outcome-based weighting
+        # =====================================================================
+        traits_persisted = 0
+        try:
+            # Get session context for user_id and latent_traits
+            cur.execute("SELECT context FROM reasoning_sessions WHERE id = %s", (session_id,))
+            ctx_row = cur.fetchone()
+            session_context = ctx_row["context"] if ctx_row and ctx_row["context"] else {}
+            
+            user_id = session_context.get("user_id")
+            latent_traits = session_context.get("latent_traits", [])
+            
+            if user_id and latent_traits:
+                # Outcome weighting: success boosts traits, failure reduces
+                outcome_multiplier = 1.2 if outcome == "success" else (0.8 if outcome == "failure" else 1.0)
+                
+                for trait_info in latent_traits:
+                    trait_name = trait_info.get("trait")
+                    if not trait_name:
+                        continue
+                    
+                    evidence = trait_info.get("confidence", 0.5) * outcome_multiplier
+                    
+                    cur.execute("""
+                        INSERT INTO user_trait_profiles (user_id, trait_name, cumulative_score, evidence_count)
+                        VALUES (%s, %s, %s, 1)
+                        ON CONFLICT (user_id, trait_name) DO UPDATE SET
+                            cumulative_score = user_trait_profiles.cumulative_score + %s,
+                            evidence_count = user_trait_profiles.evidence_count + 1,
+                            last_reinforced_at = now()
+                    """, (user_id, trait_name, evidence, evidence))
+                    traits_persisted += 1
+                
+                if traits_persisted > 0:
+                    logger.info(f"v22: Persisted {traits_persisted} traits for user {user_id[:8]}...")
+                    
+        except Exception as e:
+            logger.warning(f"v22: Failed to persist traits: {e}")
         
         conn.commit()
         
@@ -3183,6 +3799,181 @@ async def resume_session(
         
     except Exception as e:
         logger.error(f"resume_session failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+# =============================================================================
+# v25: Conversation Logging Tools
+# =============================================================================
+
+@mcp.tool()
+async def search_conversation_log(
+    query: str,
+    session_id: str = None,
+    log_type: str = None,
+    limit: int = 10
+) -> dict[str, Any]:
+    """
+    Search conversation logs by semantic similarity.
+    
+    Finds past user inputs, feedback, and context that match the query.
+    Useful for understanding what the user has said across sessions.
+    
+    Args:
+        query: The search text (will be embedded for semantic matching)
+        session_id: Optional - limit search to specific session
+        log_type: Optional - filter by type ('user_input', 'feedback', 'interview_answer', 'context')
+        limit: Maximum results to return (default: 10)
+        
+    Returns:
+        Matching log entries with their linked sessions and thought nodes
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Generate query embedding
+        query_embedding = get_embedding(query)
+        
+        # Build query based on filters
+        base_query = """
+            SELECT 
+                cl.id,
+                cl.session_id,
+                cl.thought_node_id,
+                cl.user_id,
+                cl.log_type,
+                cl.raw_text,
+                cl.created_at,
+                1 - (cl.embedding <=> %s::vector) as similarity,
+                rs.goal as session_goal,
+                tn.content as linked_thought
+            FROM conversation_log cl
+            JOIN reasoning_sessions rs ON cl.session_id = rs.id
+            LEFT JOIN thought_nodes tn ON cl.thought_node_id = tn.id
+            WHERE cl.embedding IS NOT NULL
+        """
+        params = [query_embedding]
+        
+        if session_id:
+            base_query += " AND cl.session_id = %s"
+            params.append(session_id)
+        
+        if log_type:
+            base_query += " AND cl.log_type = %s"
+            params.append(log_type)
+        
+        base_query += " ORDER BY cl.embedding <=> %s::vector LIMIT %s"
+        params.extend([query_embedding, limit])
+        
+        cur.execute(base_query, params)
+        results = cur.fetchall()
+        
+        entries = []
+        for r in results:
+            entries.append({
+                "id": str(r["id"]),
+                "session_id": str(r["session_id"]),
+                "thought_node_id": str(r["thought_node_id"]) if r["thought_node_id"] else None,
+                "user_id": r["user_id"],
+                "log_type": r["log_type"],
+                "raw_text": r["raw_text"][:500] + "..." if len(r["raw_text"]) > 500 else r["raw_text"],
+                "full_text_length": len(r["raw_text"]),
+                "similarity": round(float(r["similarity"]), 4),
+                "session_goal": r["session_goal"][:100] + "..." if len(r["session_goal"]) > 100 else r["session_goal"],
+                "linked_thought": r["linked_thought"][:150] + "..." if r["linked_thought"] and len(r["linked_thought"]) > 150 else r["linked_thought"],
+                "created_at": r["created_at"].isoformat()
+            })
+        
+        return {
+            "success": True,
+            "query": query,
+            "count": len(entries),
+            "entries": entries,
+            "filters_applied": {
+                "session_id": session_id,
+                "log_type": log_type
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"search_conversation_log failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def log_conversation(
+    session_id: str,
+    raw_text: str,
+    log_type: str = "context",
+    thought_node_id: str = None,
+    user_id: str = None
+) -> dict[str, Any]:
+    """
+    Manually log free-form text to a session's conversation log.
+    
+    Use this to capture user context, feedback, or notes that aren't
+    directly tied to hypothesis creation.
+    
+    Args:
+        session_id: The reasoning session UUID
+        raw_text: The text to log (no truncation)
+        log_type: One of 'user_input', 'feedback', 'interview_answer', 'context' (default: 'context')
+        thought_node_id: Optional - link to a specific thought node
+        user_id: Optional - user identifier for multi-user scenarios
+        
+    Returns:
+        Created log entry ID
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verify session exists
+        cur.execute("SELECT id FROM reasoning_sessions WHERE id = %s", (session_id,))
+        if not cur.fetchone():
+            return {"success": False, "error": "Session not found"}
+        
+        # Verify thought_node if provided
+        if thought_node_id:
+            cur.execute("SELECT id FROM thought_nodes WHERE id = %s", (thought_node_id,))
+            if not cur.fetchone():
+                return {"success": False, "error": "Thought node not found"}
+        
+        # Generate embedding (truncate for embedding, but store full text)
+        embedding = get_embedding(raw_text[:2000])
+        
+        cur.execute(
+            """
+            INSERT INTO conversation_log (session_id, thought_node_id, user_id, log_type, raw_text, embedding)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id, created_at
+            """,
+            (session_id, thought_node_id, user_id, log_type, raw_text, embedding)
+        )
+        result = cur.fetchone()
+        conn.commit()
+        
+        return {
+            "success": True,
+            "log_id": str(result["id"]),
+            "session_id": session_id,
+            "log_type": log_type,
+            "text_length": len(raw_text),
+            "created_at": result["created_at"].isoformat(),
+            "message": f"Logged {len(raw_text)} characters to conversation_log"
+        }
+        
+    except Exception as e:
+        if 'conn' in locals():
+            conn.rollback()
+        logger.error(f"log_conversation failed: {e}")
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():

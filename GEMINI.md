@@ -23,16 +23,48 @@
 - Documentation/comments
 - Typo fixes
 
-## Rule 2: Log Failures
+---
 
-Every bug discovered during implementation MUST be logged:
+## Rule 2: Log ALL Failures Immediately 🚨
+
+**When ANY of these occur, LOG FIRST, then fix:**
+
+| Failure Type | Example | Log As |
+|--------------|---------|--------|
+| **Bug discovered** | Tests fail, runtime error | `failure` |
+| **Planning gap** | Missed dependency, wrong assumption | `partial` |
+| **Type mismatch** | SQL type error, API contract violation | `failure` |
+| **Integration issue** | Library doesn't work as expected | `failure` |
+| **Silent failure** | Code runs but wrong result | `failure` |
+
+**Logging Flow:**
+1. **STOP** - Don't fix it yet
+2. **START SESSION** - Create PAS session for the bug
+3. **STORE HYPOTHESIS** - Document what went wrong
+4. **RECORD OUTCOME** - `failure` with semantic `failure_reason`
+5. **NOW FIX** - Implement the fix
 
 ```python
+# Quick logging pattern
+mcp_pas-server_start_reasoning_session(user_goal="Bug: <description>")
+mcp_pas-server_store_expansion(h1_text="<root cause>", h1_confidence=0.9)
 mcp_pas-server_record_outcome(
     session_id="...",
     outcome="failure",
-    failure_reason="<semantic description of what went wrong>"
+    failure_reason="<semantic description for future similarity matching>"
 )
 ```
 
-This enables PAS self-learning via v17b semantic similarity.
+> **Why?** PAS learns from failures via semantic similarity (v17b). Unlogged failures = lost learning.
+
+---
+
+## Rule 3: Verify Before Completing
+
+| Change Type | Verification Method |
+|-------------|---------------------|
+| Schema changes | `psql` query to verify |
+| server.py changes | Restart MCP + test tool call |
+| seed scripts | Run script + verify data |
+
+**Never mark complete without empirical evidence.**

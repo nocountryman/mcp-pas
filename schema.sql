@@ -238,6 +238,7 @@ CREATE TABLE IF NOT EXISTS outcome_records (
     notes           TEXT,
     failure_reason  TEXT,                   -- v15b: explicit failure reason for learning
     scope_embedding vector(768),            -- v15b: embedded scope for semantic matching
+    failure_reason_embedding vector(768),   -- v27: embedded failure_reason for semantic search
     created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -274,6 +275,34 @@ JOIN outcome_records orec ON orec.session_id = tn.session_id
   AND tn.path <@ orec.winning_path
 JOIN reasoning_sessions rs ON rs.id = tn.session_id
 GROUP BY sl.id, sl.law_name, SUBSTRING(rs.goal, 1, 50);
+
+-- ============================================================================
+-- v26: Session Tagging System
+-- Enables semantic tagging and retrieval of reasoning sessions
+-- ============================================================================
+
+-- Table: session_tags
+-- Many-to-many relationship between sessions and tags
+CREATE TABLE IF NOT EXISTS session_tags (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id UUID NOT NULL REFERENCES reasoning_sessions(id) ON DELETE CASCADE,
+    tag VARCHAR(100) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(session_id, tag)
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag);
+
+-- Table: tag_aliases
+-- Normalizes tag variations to canonical forms
+CREATE TABLE IF NOT EXISTS tag_aliases (
+    alias VARCHAR(100) PRIMARY KEY,
+    canonical_tag VARCHAR(100) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tag_aliases_canonical ON tag_aliases(canonical_tag);
 
 -- ============================================================================
 -- Interview Self-Learning Extension (Phase 6)
@@ -529,3 +558,50 @@ CROSS JOIN interview_domains d
 JOIN interview_dimensions dim ON dim.domain_id = d.id
 LEFT JOIN interview_answers a ON a.session_id = s.id AND a.dimension_id = dim.id
 WHERE d.is_active = true;
+
+
+-- ============================================================================
+-- v25: Conversation Logging
+-- Stores free-form user text for semantic retrieval and provenance tracking
+-- ============================================================================
+
+-- Table: conversation_log
+-- Captures raw user input that inspired hypotheses, feedback, extended answers
+CREATE TABLE IF NOT EXISTS conversation_log (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id      UUID NOT NULL REFERENCES reasoning_sessions(id) ON DELETE CASCADE,
+    thought_node_id UUID REFERENCES thought_nodes(id) ON DELETE SET NULL,  -- nullable link
+    user_id         VARCHAR(64),    -- Optional user identifier for multi-user scenarios
+    
+    -- Content
+    log_type        VARCHAR(30) NOT NULL CHECK (log_type IN (
+        'user_input',       -- Raw user text that inspired a hypothesis
+        'feedback',         -- User feedback on results
+        'interview_answer', -- Extended answer beyond A/B/C
+        'context'           -- Background context provided by user
+    )),
+    raw_text        TEXT NOT NULL,  -- Full text, no truncation (TOAST auto-compresses >2KB)
+    
+    -- Embeddings (support chunked for long text)
+    embedding       vector(768),     -- Primary embedding (first chunk or summary)
+    chunk_index     INTEGER DEFAULT 0,  -- 0 = primary, 1+ = additional chunks
+    total_chunks    INTEGER DEFAULT 1,  -- Total chunks for this log entry
+    
+    -- Metadata
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- HNSW index for semantic search
+CREATE INDEX IF NOT EXISTS idx_conversation_log_embedding
+    ON conversation_log
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_log_session
+    ON conversation_log(session_id);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_log_type
+    ON conversation_log(log_type);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_log_user
+    ON conversation_log(user_id);

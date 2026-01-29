@@ -11,3 +11,7 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# UI/UX Design Mockups (local only)
+mockups/
+dill_ui_ux_design_exploration.md
