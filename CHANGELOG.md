@@ -5,7 +5,7 @@ All notable changes to PAS (Scientific Reasoning MCP) are documented here.
 ## [v39] - 2026-01-30
 
 ### Added
-- **Modularization Phase 0-2a** - Beginning server.py decomposition
+- **Modularization Phase 0-5** - Major server.py decomposition
   - `errors.py` - Standardized exception hierarchy (~200 lines)
     - `PASError` base class with `to_dict()` for MCP responses
     - Session, Node, Database, Validation, Quality Gate, Codebase, Sampling errors
@@ -19,14 +19,29 @@ All notable changes to PAS (Scientific Reasoning MCP) are documented here.
     - `compute_decision_quality()`, `apply_uct_tiebreaking()`
     - `build_processed_candidate()`, `generate_suggested_tags()`
     - Constants: `HEURISTIC_PENALTIES`, `ROLLOUT_WEIGHT`, `UCT_THRESHOLD`
+  - `learning_helpers.py` - RLVR/outcome functions (~240 lines)
+    - `parse_terminal_signals()`, `extract_failure_reason()`
+    - `signal_to_outcome()`, `compute_trait_reinforcement()`
+    - Constants: `SUCCESS_PATTERNS`, `FAILURE_PATTERNS`, `FAILURE_REASON_PATTERNS`
+  - `interview_helpers.py` - Interview flow helpers (~220 lines)
+    - `get_interview_context()`, `extract_domain_from_goal()`
+    - `format_question_for_display()`, `compute_interview_progress()`
+    - Constants: `DEFAULT_INTERVIEW_CONFIG`, `DEFAULT_QUALITY_THRESHOLDS`
+  - `codebase_helpers.py` - Code navigation utilities (~260 lines)
+    - `extract_symbols()` - tree-sitter symbol extraction
+    - `get_language_from_path()`, `should_skip_file()`
+    - `extract_symbol_patterns_from_text()`, `build_reference_summary()`
+    - Constants: `LANGUAGE_MAP`, `SKIP_EXTENSIONS`, `SKIP_DIRS`
 
 ### Changed
-- `server.py` reduced from 5773 to 5493 lines (-280, 4.8%)
-- Pure helper functions now imported from `reasoning_helpers.py`
+- **server.py reduced from 5773 to 5371 lines (-402, 7.0%)**
+- Pure helper functions imported with `_` prefix aliases for compatibility
+- All patterns and constants now centralized in domain-specific modules
 
 ### Technical
 - PAS self-analysis session `8fbb42ab` (score: 0.913, quality gate passed)
 - "Logic-Only Module Extraction" pattern: MCP decorators stay in server.py as thin wrappers
+- 6 new modules created, ~1,400 lines of reusable code
 
 ---
 
