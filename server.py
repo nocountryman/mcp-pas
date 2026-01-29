@@ -11,8 +11,7 @@ import os
 import json
 import uuid
 import logging
-from typing import Any
-from contextlib import asynccontextmanager
+from typing import Any, Optional
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -249,7 +248,7 @@ async def sample_agent(
     try:
         # Get the current request context to access sampling capability
         from mcp.server.fastmcp import Context
-        ctx = Context.current()
+        ctx = Context.current()  # type: ignore[attr-defined]
         
         if not ctx or not ctx.session:
             raise SamplingError("No active MCP session - cannot perform sampling")
@@ -756,21 +755,21 @@ async def store_expansion(
     # Hypothesis 1 (required)
     h1_text: str,
     h1_confidence: float,
-    h1_scope: str = None,
+    h1_scope: Optional[str] = None,
     # Hypothesis 2 (optional)
-    h2_text: str = None,
-    h2_confidence: float = None,
-    h2_scope: str = None,
+    h2_text: Optional[str] = None,
+    h2_confidence: Optional[float] = None,
+    h2_scope: Optional[str] = None,
     # Hypothesis 3 (optional)
-    h3_text: str = None,
-    h3_confidence: float = None,
-    h3_scope: str = None,
+    h3_text: Optional[str] = None,
+    h3_confidence: Optional[float] = None,
+    h3_scope: Optional[str] = None,
     # v7b: Revision tracking (borrowed from sequential thinking)
     is_revision: bool = False,
-    revises_node_id: str = None,
+    revises_node_id: Optional[str] = None,
     # v25: Conversation logging
-    source_text: str = None,
-    user_id: str = None
+    source_text: Optional[str] = None,
+    user_id: Optional[str] = None
 ) -> dict[str, Any]:
     """
     Store generated hypotheses with Bayesian scoring.
@@ -848,8 +847,9 @@ async def store_expansion(
         
         created_nodes = []
         for i, hyp in enumerate(hypotheses[:3]):
-            hypothesis_text = hyp.get("hypothesis", "")
-            llm_confidence = float(hyp.get("confidence", 0.5))
+            hypothesis_text = str(hyp.get("hypothesis", ""))
+            _conf = hyp.get("confidence")
+            llm_confidence = float(_conf) if _conf is not None else 0.5  # type: ignore[arg-type]
             declared_scope = hyp.get("scope")
             
             if not hypothesis_text:
@@ -875,50 +875,18 @@ async def store_expansion(
             matching_laws = [l for l in laws if l["similarity"] >= MIN_SIMILARITY]
             
             if matching_laws:
-                import random
+                # v35: Use extracted pure helper for ensemble prior
+                prior, supporting_law_ids, law_name = _compute_ensemble_prior(
+                    matching_laws, hypothesis_text
+                )
+                supporting_law = supporting_law_ids
                 
-                total_weighted = 0.0
-                total_similarity = 0.0
-                supporting_law_ids = []
-                law_names = []
-                
+                # v12b: Track law selection (DB update must stay inline)
                 for law in matching_laws:
-                    # v10a: Negation detection
-                    hyp_negations = detect_negation(hypothesis_text)
-                    law_negations = detect_negation(law["definition"]) if law["definition"] else set()
-                    negation_asymmetry = bool(hyp_negations) != bool(law_negations)
-                    negation_penalty = 0.15 if negation_asymmetry else 0.0
-                    
-                    # v12b: Thompson Sampling per law
-                    selection_count = law.get("selection_count", 0) or 0
-                    success_count = law.get("success_count", 0) or 0
-                    alpha = success_count + 1
-                    beta_param = selection_count - success_count + 1
-                    thompson_sample = random.betavariate(alpha, beta_param)
-                    
-                    base_weight = float(law["scientific_weight"])
-                    effective_weight = 0.7 * base_weight + 0.3 * thompson_sample
-                    effective_weight = max(0.1, effective_weight - negation_penalty)
-                    
-                    # Weighted contribution: weight × similarity
-                    similarity = float(law["similarity"])
-                    total_weighted += effective_weight * similarity
-                    total_similarity += similarity
-                    
-                    supporting_law_ids.append(law["id"])
-                    law_names.append(law["law_name"])
-                    
-                    # v12b: Track law selection
                     cur.execute(
                         "UPDATE scientific_laws SET selection_count = selection_count + 1 WHERE id = %s",
                         (law["id"],)
                     )
-                
-                # v13a: Ensemble prior = Σ(weight × similarity) / Σ(similarity)
-                prior = (total_weighted / total_similarity * 0.6) + (matching_laws[0]["similarity"] * 0.4)
-                prior = max(0.1, min(0.95, prior))  # Clamp to valid range
-                supporting_law = supporting_law_ids
-                law_name = law_names[0]  # Primary law for display
             else:
                 prior = 0.5
                 supporting_law = []
@@ -1764,7 +1732,7 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
             }
         
         # v16d.2: Query historical failures for similar goals (domain-agnostic via embedding)
-        historical_questions = []
+        historical_questions: list[dict[str, Any]] = []
         try:
             cur.execute("""
                 SELECT s.goal, o.notes, o.failure_reason
@@ -1801,7 +1769,7 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
         # Detect goal domain, load dimensions, generate structured questions
         # =====================================================================
         domain_questions = []
-        detected_domains = []
+        detected_domains: list[dict[str, Any]] = []
         try:
             # Query domains by embedding similarity to goal
             cur.execute("""
@@ -1895,7 +1863,7 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
         # v18: Smart LLM Gating - return [] for specific goals
         # v19: Skip LLM questions if domain detection succeeded
         # v21: Hidden Context Question Design - laddering, trade-offs, consequence-framing
-        goal_questions = []
+        goal_questions: list[dict[str, Any]] = []
         try:
             goal_prompt = f"""Analyze this goal and generate clarifying questions if needed:
 
@@ -2246,7 +2214,7 @@ async def submit_answer(session_id: str, question_id: str, answer: str) -> dict[
         
         # Calculate current evidence (count of hidden_values detected)
         previous_total = sum(evidence_history) if evidence_history else 0
-        current_hidden_values = {}
+        current_hidden_values: dict[str, int] = {}
         for entry in interview.get("answer_history", []):
             hv = entry.get("hidden_value")
             if hv:
@@ -2344,8 +2312,8 @@ async def check_interview_complete(session_id: str) -> dict[str, Any]:
         # v21 Phase 2: Latent Trait Inference from Hidden Values
         # Aggregates hidden_values from answer_history and infers user traits
         # =====================================================================
-        latent_traits = []
-        hidden_value_counts = {}
+        latent_traits: list[dict[str, Any]] = []
+        hidden_value_counts: dict[str, int] = {}
         
         if is_complete:
             # Aggregate hidden_values from answer history
@@ -2355,34 +2323,8 @@ async def check_interview_complete(session_id: str) -> dict[str, Any]:
                 if hv:
                     hidden_value_counts[hv] = hidden_value_counts.get(hv, 0) + 1
             
-            # Rule-based trait inference
-            # Each rule: if hidden_value appears N+ times → infer trait
-            TRAIT_RULES = [
-                # (hidden_value_pattern, min_count, trait_name, confidence)
-                ("SAFETY", 2, "RISK_AVERSE", 0.8),
-                ("SIMPLICITY", 2, "MINIMALIST", 0.75),
-                ("POWER_USER", 2, "CONTROL_ORIENTED", 0.8),
-                ("AI_", 2, "AUTOMATION_TRUSTING", 0.7),
-                ("BEGINNER", 2, "ACCESSIBILITY_FOCUSED", 0.75),
-                ("BALANCE", 3, "PRAGMATIST", 0.7),
-                ("EXPLICIT", 2, "EXPLICIT_CONTROL", 0.8),
-                ("PERFORMANCE", 2, "SPEED_FOCUSED", 0.75),
-                ("ERROR_PREVENTION", 2, "SAFETY_CONSCIOUS", 0.8),
-                ("FREEDOM", 2, "AUTONOMY_FOCUSED", 0.75),
-            ]
-            
-            for pattern, min_count, trait_name, confidence in TRAIT_RULES:
-                # Sum counts for any hidden_value containing the pattern
-                matching_count = sum(
-                    count for hv, count in hidden_value_counts.items() 
-                    if pattern in hv.upper()
-                )
-                if matching_count >= min_count:
-                    latent_traits.append({
-                        "trait": trait_name,
-                        "confidence": confidence,
-                        "evidence_count": matching_count
-                    })
+            # v35: Use extracted pure helper for trait inference
+            latent_traits = _infer_traits_from_hidden_values(hidden_value_counts)
             
             # =================================================================
             # v22 Feature 3: Hybrid Inference - Semantic Fallback
@@ -2515,6 +2457,347 @@ ROLLOUT_WEIGHT = 0.2     # Blend: final = (1-weight)*posterior + weight*rollout
 
 
 # =============================================================================
+# v35: Latent Trait Inference Constants and Helper
+# =============================================================================
+
+TRAIT_RULES = [
+    # (hidden_value_pattern, min_count, trait_name, confidence)
+    ("SAFETY", 2, "RISK_AVERSE", 0.8),
+    ("SIMPLICITY", 2, "MINIMALIST", 0.75),
+    ("POWER_USER", 2, "CONTROL_ORIENTED", 0.8),
+    ("AI_", 2, "AUTOMATION_TRUSTING", 0.7),
+    ("BEGINNER", 2, "ACCESSIBILITY_FOCUSED", 0.75),
+    ("BALANCE", 3, "PRAGMATIST", 0.7),
+    ("EXPLICIT", 2, "EXPLICIT_CONTROL", 0.8),
+    ("PERFORMANCE", 2, "SPEED_FOCUSED", 0.75),
+    ("ERROR_PREVENTION", 2, "SAFETY_CONSCIOUS", 0.8),
+    ("FREEDOM", 2, "AUTONOMY_FOCUSED", 0.75),
+]
+
+
+def _infer_traits_from_hidden_values(
+    hidden_value_counts: dict[str, int]
+) -> list[dict[str, Any]]:
+    """
+    v35: Pure function to infer latent traits from hidden value patterns.
+    
+    Args:
+        hidden_value_counts: Dict of hidden_value -> occurrence count
+    
+    Returns:
+        List of trait dicts with trait, confidence, evidence_count
+    """
+    latent_traits = []
+    
+    for pattern, min_count, trait_name, confidence in TRAIT_RULES:
+        matching_count = sum(
+            count for hv, count in hidden_value_counts.items() 
+            if pattern in hv.upper()
+        )
+        if matching_count >= min_count:
+            latent_traits.append({
+                "trait": trait_name,
+                "confidence": confidence,
+                "evidence_count": matching_count
+            })
+    
+    return latent_traits
+
+
+# =============================================================================
+# Pure Utility: Heuristic Penalty Application (v35 extraction)
+# =============================================================================
+
+def _apply_heuristic_penalties(
+    node: dict[str, Any],
+    sibling_counts: dict[str, int],
+    law_diversity: dict[str, tuple[int, int]]
+) -> tuple[float, list[str]]:
+    """
+    Pure function: Apply penalties to candidate score.
+    
+    Args:
+        node: Candidate node from DB (needs posterior_score, likelihood, depth, path)
+        sibling_counts: Dict of parent_path -> count of siblings at that level
+        law_diversity: Dict of parent_path -> (unique_laws, total_siblings)
+    
+    Returns:
+        Tuple of (adjusted_score, list_of_penalties_applied)
+    """
+    original_score = float(node["posterior_score"])
+    adjusted_score = original_score
+    penalties: list[str] = []
+    
+    # Unchallenged penalty: if likelihood is suspiciously round
+    likelihood = float(node["likelihood"])
+    if str(likelihood).endswith(('0', '5')) and likelihood in [0.8, 0.85, 0.9, 0.95, 0.88, 0.92]:
+        adjusted_score -= HEURISTIC_PENALTIES["unchallenged"]
+        penalties.append("unchallenged_penalty")
+    
+    # Depth bonus (deeper = more refined)
+    depth = int(node["depth"])
+    if depth > 2:
+        bonus = (depth - 2) * DEPTH_BONUS_PER_LEVEL
+        adjusted_score += bonus
+        if bonus > 0:
+            penalties.append(f"depth_bonus_+{bonus:.2f}")
+    
+    # Shallow alternatives penalty: if <2 sibling hypotheses at same level
+    node_path = str(node["path"])
+    parent_path = ".".join(node_path.split(".")[:-1]) if "." in node_path else ""
+    sibling_count = sibling_counts.get(parent_path, 1)
+    if sibling_count < 2:
+        adjusted_score -= HEURISTIC_PENALTIES["shallow_alternatives"]
+        penalties.append("shallow_alternatives_penalty")
+    
+    # v13b: Monoculture penalty - if all siblings match same law, penalize
+    if parent_path in law_diversity:
+        unique_laws, total_siblings = law_diversity[parent_path]
+        if total_siblings >= 2 and unique_laws == 1:
+            adjusted_score -= HEURISTIC_PENALTIES["monoculture"]
+            penalties.append("monoculture_penalty")
+    
+    # Ensure score stays in valid range
+    adjusted_score = max(0.1, min(1.0, adjusted_score))
+    
+    return adjusted_score, penalties
+
+
+def _get_outcome_multiplier(outcome: str) -> float:
+    """
+    v35: Pure function for outcome-based weighting.
+    
+    Returns multiplier for trait persistence based on outcome.
+    """
+    if outcome == "success":
+        return 1.2
+    elif outcome == "failure":
+        return 0.8
+    return 1.0
+
+
+def _compute_critique_accuracy(
+    node_path: str,
+    winning_path: str,
+    outcome: str
+) -> Optional[bool]:
+    """
+    v35: Pure function to determine if critique was accurate.
+    
+    Args:
+        node_path: Path of the critiqued node
+        winning_path: Path of the winning hypothesis
+        outcome: Session outcome ('success', 'partial', 'failure')
+    
+    Returns:
+        True if critique was accurate, False if not, None if indeterminate
+    """
+    is_winner = str(node_path).startswith(str(winning_path)) or str(winning_path).startswith(str(node_path))
+    
+    if is_winner:
+        # If winner was critiqued and outcome is failure, critique was accurate
+        return outcome == 'failure'
+    else:
+        # If non-winner was critiqued and outcome is success, critique may have been accurate
+        return outcome == 'success'
+
+
+def _compute_law_effective_weight(
+    base_weight: float,
+    selection_count: int,
+    success_count: int,
+    negation_asymmetry: bool
+) -> tuple[float, float]:
+    """
+    v35: Pure function for Thompson sampling law weight.
+    
+    Args:
+        base_weight: Scientific weight from law
+        selection_count: Times this law was selected
+        success_count: Times it led to success
+        negation_asymmetry: If hypothesis negation mismatches law
+    
+    Returns:
+        Tuple of (effective_weight, thompson_sample)
+    """
+    import random
+    
+    alpha = success_count + 1
+    beta_param = selection_count - success_count + 1
+    thompson_sample = random.betavariate(alpha, beta_param)
+    
+    effective_weight = 0.7 * base_weight + 0.3 * thompson_sample
+    negation_penalty = 0.15 if negation_asymmetry else 0.0
+    effective_weight = max(0.1, effective_weight - negation_penalty)
+    
+    return effective_weight, thompson_sample
+
+
+def _compute_ensemble_prior(
+    matching_laws: list[dict],
+    hypothesis_text: str
+) -> tuple[float, list[int], str | None]:
+    """
+    v35: Pure function to compute ensemble prior from multiple laws.
+    
+    Args:
+        matching_laws: List of law dicts with similarity, scientific_weight, etc
+        hypothesis_text: The hypothesis text (for negation check)
+    
+    Returns:
+        Tuple of (prior, supporting_law_ids, primary_law_name)
+    """
+    if not matching_laws:
+        return 0.5, [], None
+    
+    total_weighted = 0.0
+    total_similarity = 0.0
+    supporting_law_ids = []
+    law_names = []
+    
+    for law in matching_laws:
+        # Negation detection
+        hyp_negations = detect_negation(hypothesis_text)
+        law_negations = detect_negation(law["definition"]) if law.get("definition") else set()
+        negation_asymmetry = bool(hyp_negations) != bool(law_negations)
+        
+        # Compute effective weight
+        effective_weight, _ = _compute_law_effective_weight(
+            float(law["scientific_weight"]),
+            law.get("selection_count", 0) or 0,
+            law.get("success_count", 0) or 0,
+            negation_asymmetry
+        )
+        
+        similarity = float(law["similarity"])
+        total_weighted += effective_weight * similarity
+        total_similarity += similarity
+        
+        supporting_law_ids.append(law["id"])
+        law_names.append(law["law_name"])
+    
+    # Ensemble prior = Σ(weight × similarity) / Σ(similarity)
+    prior = (total_weighted / total_similarity * 0.6) + (matching_laws[0]["similarity"] * 0.4)
+    prior = max(0.1, min(0.95, prior))
+    
+    return prior, supporting_law_ids, law_names[0] if law_names else None
+
+
+# v35b: Pure helper for tag generation
+DOMAIN_PATTERNS: list[tuple[str, list[str]]] = [
+    ("database", ["db", "schema", "table", "sql", "postgres", "column"]),
+    ("api", ["api", "endpoint", "route", "request", "response"]),
+    ("backend", ["server", "backend", "service", "logic"]),
+    ("frontend", ["ui", "ux", "frontend", "component", "page"]),
+    ("testing", ["test", "pytest", "verify", "validation"]),
+    ("bugfix", ["bug", "fix", "error", "failure"]),
+    ("feature", ["feature", "implement", "add", "new"]),
+    ("refactor", ["refactor", "cleanup", "improve", "optimize"]),
+]
+
+def _generate_suggested_tags(goal: str, winning_content: str, max_tags: int = 5) -> list[str]:
+    """Generate suggested tags based on goal and winning content. Pure function."""
+    combined_text = f"{goal} {winning_content}".lower()
+    tags = []
+    for tag, keywords in DOMAIN_PATTERNS:
+        if any(kw in combined_text for kw in keywords):
+            tags.append(tag)
+    return tags[:max_tags]
+
+
+# v35b: Pure helper for decision quality computation
+def _compute_decision_quality(
+    gap: float,
+    rec_conf: float,
+    run_conf: float,
+    uct_applied: bool = False
+) -> tuple[str, str]:
+    """
+    Compute decision quality and gap analysis message. Pure function.
+    Returns (decision_quality, gap_analysis).
+    """
+    if gap < 0.03:
+        decision_quality = "low"
+        gap_analysis = f"Very close decision (gap: {gap:.3f}). Consider both options."
+    elif gap < 0.10:
+        decision_quality = "medium"
+        gap_analysis = f"Moderate confidence (gap: {gap:.3f}). Winner is better but runner-up has merit."
+    else:
+        decision_quality = "high"
+        gap_analysis = f"Clear winner (gap: {gap:.3f}). High confidence in recommendation."
+    
+    # v14a.1: Confidence-weighted gap
+    weighted_gap = gap * min(rec_conf, run_conf)
+    
+    if decision_quality == "high" and weighted_gap < 0.05:
+        decision_quality = "medium"
+        gap_analysis += f" [v14a.1: Downgraded - low confidence (wgap: {weighted_gap:.3f})]"
+    elif decision_quality == "medium" and weighted_gap < 0.02:
+        decision_quality = "low"
+        gap_analysis += f" [v14a.1: Downgraded - low confidence (wgap: {weighted_gap:.3f})]"
+    
+    if uct_applied:
+        gap_analysis += " [v11a: UCT exploration applied]"
+    
+    return decision_quality, gap_analysis
+
+
+# v35b: Pure helper for UCT tiebreaking
+def _apply_uct_tiebreaking(
+    rec_score: float,
+    rec_depth: int,
+    run_score: float,
+    run_depth: int
+) -> tuple[bool, bool]:
+    """
+    Apply UCT exploration bonus for close decisions. Pure function.
+    Returns (should_swap, uct_was_applied).
+    """
+    import math
+    
+    gap = rec_score - run_score
+    if gap >= UCT_THRESHOLD:
+        return False, False
+    
+    rec_visits = max(1, rec_depth)
+    run_visits = max(1, run_depth)
+    total_visits = rec_visits + run_visits
+    
+    rec_uct = rec_score + UCT_EXPLORATION_C * math.sqrt(math.log(total_visits) / rec_visits)
+    run_uct = run_score + UCT_EXPLORATION_C * math.sqrt(math.log(total_visits) / run_visits)
+    
+    return run_uct > rec_uct, True
+
+
+# v35b: Pure helper to build processed candidate dict
+def _build_processed_candidate(
+    node: dict,
+    adjusted_score: float,
+    penalties: list[str],
+    rollout_score: float
+) -> dict[str, Any]:
+    """Build a processed candidate dict for finalize_session. Pure function."""
+    original_score = float(node["posterior_score"])
+    depth = int(node["depth"])
+    final_score = (1 - ROLLOUT_WEIGHT) * adjusted_score + ROLLOUT_WEIGHT * rollout_score
+    
+    return {
+        "node_id": str(node["id"]),
+        "path": node["path"],
+        "content": node["content"],
+        "depth": depth,
+        "prior_score": round(float(node["prior_score"]), 4),
+        "likelihood": round(float(node["likelihood"]), 4),
+        "confidence": round(float(node["prior_score"]) * float(node["likelihood"]), 4),
+        "original_score": round(original_score, 4),
+        "adjusted_score": round(adjusted_score, 4),
+        "rollout_score": round(rollout_score, 4),
+        "final_score": round(final_score, 4),
+        "penalties_applied": penalties
+    }
+
+
+# =============================================================================
 # v20: Adaptive Depth Quality Metrics
 # =============================================================================
 
@@ -2523,7 +2806,7 @@ def compute_quality_metrics(
     session_id: str,
     candidates: list,
     gap: float,
-    thresholds: dict = None
+    thresholds: Optional[dict] = None
 ) -> dict:
     """
     Compute 4 quality signals to determine if reasoning is sufficient.
@@ -2625,12 +2908,14 @@ async def finalize_session(
     session_id: str,
     top_n: int = 3,
     deep_critique: bool = False,
-    terminal_output: str = None,  # v17b: RLVR auto-record
+    terminal_output: Optional[str] = None,  # v17b: RLVR auto-record
     # v31b: Exhaustive gap check (sequential-thinking style)
     exhaustive_check: bool = True,
     # v31d: Quality thresholds
     min_score_threshold: float = 0.9,
-    min_gap_threshold: float = 0.1
+    min_gap_threshold: float = 0.1,
+    # v33: Quality gate enforcement (opt-out, not opt-in)
+    skip_quality_gate: bool = False
 ) -> dict[str, Any]:
     """
     Finalize a reasoning session by auto-critiquing top hypotheses.
@@ -2646,6 +2931,7 @@ async def finalize_session(
         exhaustive_check: v31b - Run layer-by-layer gap analysis on recommendation
         min_score_threshold: v31d - Minimum score required (default: 0.9)
         min_gap_threshold: v31d - Minimum gap between top candidates (default: 0.1)
+        skip_quality_gate: v33 - If True, bypass enforcement (for debugging only)
         
     Returns:
         Final recommendation with adjusted score and decision quality
@@ -2721,44 +3007,10 @@ async def finalize_session(
         # Process each candidate
         processed = []
         for node in candidates:
-            original_score = float(node["posterior_score"])
-            adjusted_score = original_score
-            penalties = []
-            
-            # Unchallenged penalty: if likelihood is suspiciously round
-            # (never critiqued nodes keep their initial likelihood)
-            likelihood = float(node["likelihood"])
-            # Check if likelihood looks "untouched" (ends in .0, .5, etc.)
-            if str(likelihood).endswith(('0', '5')) and likelihood in [0.8, 0.85, 0.9, 0.95, 0.88, 0.92]:
-                adjusted_score -= HEURISTIC_PENALTIES["unchallenged"]
-                penalties.append("unchallenged_penalty")
-            
-            # Depth bonus (deeper = more refined)
-            depth = int(node["depth"])
-            if depth > 2:
-                bonus = (depth - 2) * DEPTH_BONUS_PER_LEVEL
-                adjusted_score += bonus
-                if bonus > 0:
-                    penalties.append(f"depth_bonus_+{bonus:.2f}")
-            
-            # Shallow alternatives penalty: if <2 sibling hypotheses at same level
-            node_path = str(node["path"])
-            parent_path = ".".join(node_path.split(".")[:-1]) if "." in node_path else ""
-            sibling_count = sibling_counts.get(parent_path, 1)
-            if sibling_count < 2:
-                adjusted_score -= HEURISTIC_PENALTIES["shallow_alternatives"]
-                penalties.append("shallow_alternatives_penalty")
-            
-            # v13b: Monoculture penalty - if all siblings match same law, penalize
-            if parent_path in law_diversity:
-                unique_laws, total_siblings = law_diversity[parent_path]
-                # If multiple siblings but only 1 unique law = monoculture
-                if total_siblings >= 2 and unique_laws == 1:
-                    adjusted_score -= HEURISTIC_PENALTIES["monoculture"]
-                    penalties.append("monoculture_penalty")
-            
-            # Ensure score stays in valid range
-            adjusted_score = max(0.1, min(1.0, adjusted_score))
+            # v35: Use extracted pure helper for penalty calculations
+            adjusted_score, penalties = _apply_heuristic_penalties(
+                node, sibling_counts, law_diversity
+            )
             
             # v11b: Calculate law-grounded rollout score
             supporting_law_ids = node["supporting_laws"] or []
@@ -2776,23 +3028,10 @@ async def finalize_session(
                 if rollout_result and rollout_result["avg_weight"]:
                     rollout_score = float(rollout_result["avg_weight"])
             
-            # v11b: Blend adjusted score with rollout score
-            final_score = (1 - ROLLOUT_WEIGHT) * adjusted_score + ROLLOUT_WEIGHT * rollout_score
-            
-            processed.append({
-                "node_id": str(node["id"]),
-                "path": node["path"],
-                "content": node["content"],
-                "depth": depth,
-                "prior_score": round(float(node["prior_score"]), 4),      # v14a.1
-                "likelihood": round(float(node["likelihood"]), 4),        # v14a.1
-                "confidence": round(float(node["prior_score"]) * float(node["likelihood"]), 4),  # v14a.1
-                "original_score": round(original_score, 4),
-                "adjusted_score": round(adjusted_score, 4),
-                "rollout_score": round(rollout_score, 4),  # v11b
-                "final_score": round(final_score, 4),      # v11b
-                "penalties_applied": penalties
-            })
+            # v35b: Build processed dict via helper
+            processed.append(_build_processed_candidate(
+                node, adjusted_score, penalties, rollout_score
+            ))
         
         # Sort by final score (includes rollout blending)
         processed.sort(key=lambda x: x["final_score"], reverse=True)
@@ -2830,57 +3069,27 @@ async def finalize_session(
         recommendation = processed[0]
         runner_up = processed[1] if len(processed) > 1 else None
         
-        # v11a: UCT tiebreaking for close decisions
+        # v11a/v35b: UCT tiebreaking for close decisions (using pure helper)
         uct_applied = False
         if runner_up:
             gap = recommendation["final_score"] - runner_up["final_score"]
-            avg = (recommendation["final_score"] + runner_up["final_score"]) / 2
-            relative_gap = gap / avg if avg > 0 else 0
             
-            # v11a: If gap < threshold, apply UCT exploration bonus
-            if gap < UCT_THRESHOLD:
-                import math
-                # Count approx visits based on depth (deeper = more iterations)
-                rec_visits = max(1, recommendation["depth"])
-                run_visits = max(1, runner_up["depth"])
-                total_visits = rec_visits + run_visits
-                
-                # UCT: Q + C * sqrt(ln(N)/n)
-                rec_uct = recommendation["final_score"] + UCT_EXPLORATION_C * math.sqrt(math.log(total_visits) / rec_visits)
-                run_uct = runner_up["final_score"] + UCT_EXPLORATION_C * math.sqrt(math.log(total_visits) / run_visits)
-                
-                # If UCT favors runner-up, swap
-                if run_uct > rec_uct:
-                    recommendation, runner_up = runner_up, recommendation
-                    processed[0], processed[1] = processed[1], processed[0]
-                    uct_applied = True
-                    gap = recommendation["final_score"] - runner_up["final_score"]
+            # v35b: Apply UCT tiebreaking via helper
+            should_swap, uct_applied = _apply_uct_tiebreaking(
+                recommendation["final_score"], recommendation["depth"],
+                runner_up["final_score"], runner_up["depth"]
+            )
+            if should_swap:
+                recommendation, runner_up = runner_up, recommendation
+                processed[0], processed[1] = processed[1], processed[0]
+                gap = recommendation["final_score"] - runner_up["final_score"]
             
-            if gap < 0.03:
-                decision_quality = "low"
-                gap_analysis = f"Very close decision (gap: {gap:.3f}). Consider both options."
-            elif gap < 0.10:
-                decision_quality = "medium"
-                gap_analysis = f"Moderate confidence (gap: {gap:.3f}). Winner is better but runner-up has merit."
-            else:
-                decision_quality = "high"
-                gap_analysis = f"Clear winner (gap: {gap:.3f}). High confidence in recommendation."
-            
-            # v14a.1: Confidence-weighted gap - lower confidence reduces decision quality
+            # v35b: Compute decision quality via helper
             rec_conf = recommendation.get("confidence", 0.5)
             run_conf = runner_up.get("confidence", 0.5)
-            weighted_gap = gap * min(rec_conf, run_conf)
-            
-            # v14a.1: Downgrade decision quality if weighted gap is too low
-            if decision_quality == "high" and weighted_gap < 0.05:
-                decision_quality = "medium"
-                gap_analysis += f" [v14a.1: Downgraded - low confidence (wgap: {weighted_gap:.3f})]"
-            elif decision_quality == "medium" and weighted_gap < 0.02:
-                decision_quality = "low"
-                gap_analysis += f" [v14a.1: Downgraded - low confidence (wgap: {weighted_gap:.3f})]"
-            
-            if uct_applied:
-                gap_analysis += " [v11a: UCT exploration applied]"
+            decision_quality, gap_analysis = _compute_decision_quality(
+                gap, rec_conf, run_conf, uct_applied
+            )
         else:
             decision_quality = "medium"
             gap_analysis = "Only one candidate available."
@@ -2935,33 +3144,22 @@ async def finalize_session(
             "[ ] Verify changes work as expected"
         ])
         
-        # v26: Suggest tags based on goal and recommendation
-        suggested_tags = []
+        # v26/v35b: Suggest tags based on goal and recommendation (using pure helper)
+        suggested_tags: list[str] = []
         try:
-            # Extract key terms from goal and winning content
-            combined_text = f"{session['goal']} {winning_content}".lower()
-            
-            # Simple keyword extraction - look for known domain patterns
-            domain_patterns = [
-                ("database", ["db", "schema", "table", "sql", "postgres", "column"]),
-                ("api", ["api", "endpoint", "route", "request", "response"]),
-                ("backend", ["server", "backend", "service", "logic"]),
-                ("frontend", ["ui", "ux", "frontend", "component", "page"]),
-                ("testing", ["test", "pytest", "verify", "validation"]),
-                ("bugfix", ["bug", "fix", "error", "failure"]),
-                ("feature", ["feature", "implement", "add", "new"]),
-                ("refactor", ["refactor", "cleanup", "improve", "optimize"]),
-            ]
-            
-            for tag, keywords in domain_patterns:
-                if any(kw in combined_text for kw in keywords):
-                    suggested_tags.append(tag)
-            
-            # Limit to 5 tags
-            suggested_tags = suggested_tags[:5]
+            suggested_tags = _generate_suggested_tags(session["goal"], winning_content)
             
             if suggested_tags:
                 logger.info(f"v26: Suggested tags for session {session_id}: {suggested_tags}")
+                # v34: Store suggested_tags in DB for auto-application on record_outcome
+                try:
+                    cur.execute(
+                        "UPDATE reasoning_sessions SET suggested_tags = %s WHERE id = %s",
+                        (json.dumps(suggested_tags), session_id)
+                    )
+                    conn.commit()
+                except Exception as e:
+                    logger.warning(f"v34 suggested_tags DB write failed: {e}")
         except Exception as e:
             logger.warning(f"v26 tag suggestion failed: {e}")
         
@@ -3069,8 +3267,8 @@ Focus on OMISSIONS, not flaws.""",
         
         # v32: Sequential analysis moved to run_sequential_analysis tool
         # Call run_sequential_analysis(session_id) BEFORE finalize_session for gap analysis
-        sequential_analysis = []  # Populated by run_sequential_analysis if called
-        systemic_gaps = []
+        sequential_analysis: list[dict[str, Any]] = []  # Populated by run_sequential_analysis if called
+        systemic_gaps: list[str] = []
         
         # v31d: Quality Gate - check score and gap thresholds
         winner_score = recommendation["adjusted_score"]
@@ -3105,16 +3303,37 @@ Focus on OMISSIONS, not flaws.""",
                     "action": "Explore more diverse alternatives to differentiate the best solution"
                 })
         
+        # v33: Quality gate enforcement
+        quality_gate_enforced = quality_gate["passed"] or skip_quality_gate
+        
+        # v33: If gate not passed AND not skipped, prefix [UNVERIFIED] and log
+        recommendation_content = recommendation["content"]
+        if not quality_gate_enforced:
+            recommendation_content = f"[UNVERIFIED] {recommendation['content']}"
+            # Log enforcement violation to DB
+            try:
+                cur.execute("""
+                    UPDATE reasoning_sessions 
+                    SET context = COALESCE(context, '') || E'\n[ENFORCEMENT VIOLATION at ' || NOW()::text || ']'
+                    WHERE id = %s
+                """, (session_id,))
+                conn.commit()
+                logger.warning(f"v33: Quality gate not enforced for session {session_id} (score={winner_score:.3f}, gap={gap:.3f})")
+            except Exception as log_err:
+                logger.error(f"Failed to log enforcement violation: {log_err}")
+        
         return {
             "success": True,
             "session_id": session_id,
             "recommendation": {
                 "node_id": recommendation["node_id"],
-                "content": recommendation["content"],
+                "content": recommendation_content,  # v33: may have [UNVERIFIED] prefix
                 "original_score": recommendation["original_score"],
                 "adjusted_score": recommendation["adjusted_score"],
                 "penalties_applied": recommendation["penalties_applied"]
             },
+            # v33: Quality gate enforcement status
+            "quality_gate_enforced": quality_gate_enforced,
             "runner_up": {
                 "node_id": runner_up["node_id"],
                 "content": runner_up["content"],
@@ -3250,8 +3469,8 @@ async def record_outcome(
     session_id: str,
     outcome: str,
     confidence: float = 1.0,
-    notes: str = None,
-    failure_reason: str = None,  # v15b: explicit failure reason for learning
+    notes: Optional[str] = None,
+    failure_reason: Optional[str] = None,  # v15b: explicit failure reason for learning
     keep_open: bool = False
 ) -> dict[str, Any]:
     """
@@ -3394,16 +3613,9 @@ async def record_outcome(
         critiqued_nodes = cur.fetchall()
         
         for cnode in critiqued_nodes:
+            # v35: Use extracted pure helper for critique accuracy
             is_winner = str(cnode["path"]).startswith(str(winning_path)) or str(winning_path).startswith(str(cnode["path"]))
-            # Critique was accurate if: node was critiqued AND (failure if winner OR success if not winner)
-            # Simple heuristic: critique severity implied caution, was it warranted?
-            critique_accurate = None
-            if is_winner:
-                # If winner was critiqued and outcome is failure, critique was accurate
-                critique_accurate = (outcome == 'failure')
-            else:
-                # If non-winner was critiqued and outcome is success, critique may have been accurate
-                critique_accurate = (outcome == 'success')
+            critique_accurate = _compute_critique_accuracy(cnode["path"], winning_path, outcome)
             
             cur.execute(
                 """
@@ -3438,8 +3650,8 @@ async def record_outcome(
             latent_traits = session_context.get("latent_traits", [])
             
             if user_id and latent_traits:
-                # Outcome weighting: success boosts traits, failure reduces
-                outcome_multiplier = 1.2 if outcome == "success" else (0.8 if outcome == "failure" else 1.0)
+                # v35: Use extracted pure helper
+                outcome_multiplier = _get_outcome_multiplier(outcome)
                 
                 for trait_info in latent_traits:
                     trait_name = trait_info.get("trait")
@@ -3478,6 +3690,41 @@ async def record_outcome(
         except Exception as refresh_err:
             logger.warning(f"Auto-refresh check failed: {refresh_err}")
         
+        # =====================================================================
+        # v34: Auto-apply suggested_tags on success/partial outcomes
+        # =====================================================================
+        auto_tagged = None
+        if outcome in ('success', 'partial'):
+            try:
+                cur.execute(
+                    "SELECT suggested_tags FROM reasoning_sessions WHERE id = %s",
+                    (session_id,)
+                )
+                tags_row = cur.fetchone()
+                if tags_row and tags_row.get("suggested_tags"):
+                    suggested = tags_row["suggested_tags"]
+                    if isinstance(suggested, str):
+                        suggested = json.loads(suggested)
+                    if suggested:
+                        # Apply tags using existing tag_session logic
+                        for tag in suggested:
+                            # Normalize tag
+                            normalized = tag.strip().lower()
+                            if normalized:
+                                cur.execute(
+                                    """
+                                    INSERT INTO session_tags (session_id, tag)
+                                    VALUES (%s, %s)
+                                    ON CONFLICT (session_id, tag) DO NOTHING
+                                    """,
+                                    (session_id, normalized)
+                                )
+                        conn.commit()
+                        auto_tagged = suggested
+                        logger.info(f"v34: Auto-tagged session {session_id} with {suggested}")
+            except Exception as e:
+                logger.warning(f"v34 auto-tagging failed: {e}")
+        
         return {
             "success": True,
             "session_id": session_id,
@@ -3490,9 +3737,11 @@ async def record_outcome(
             "session_completed": session_completed,
             "auto_refresh_triggered": auto_refresh_result is not None,
             "auto_refresh_result": auto_refresh_result,
+            "auto_tagged": auto_tagged,  # v34
             "message": f"Outcome recorded. {stats['node_count'] or 0} nodes in winning path." + 
                       (" Session auto-completed." if session_completed else "") +
-                      (f" Auto-refreshed {auto_refresh_result.get('laws_updated', 0)} law weights." if auto_refresh_result else "")
+                      (f" Auto-refreshed {auto_refresh_result.get('laws_updated', 0)} law weights." if auto_refresh_result else "") +
+                      (f" Auto-tagged: {auto_tagged}" if auto_tagged else "")
         }
         
     except Exception as e:
@@ -3685,18 +3934,18 @@ async def parse_terminal_output(
             )
             result["auto_recorded"] = True
             result["outcome_result"] = outcome_result
-            result["message"] += f" Auto-recorded as {signal}."
+            result["message"] = str(result["message"]) + f" Auto-recorded as {signal}."
             if failure_reason:
-                result["message"] += f" Failure reason extracted."
+                result["message"] = str(result["message"]) + " Failure reason extracted."
         except Exception as e:
             result["auto_recorded"] = False
             result["auto_record_error"] = str(e)
     else:
         result["auto_recorded"] = False
         if auto_record and signal == "unknown":
-            result["message"] += " Signal too ambiguous for auto-record."
+            result["message"] = str(result["message"]) + " Signal too ambiguous for auto-record."
         elif auto_record and confidence < 0.7:
-            result["message"] += f" Confidence too low ({confidence:.0%}) for auto-record."
+            result["message"] = str(result["message"]) + f" Confidence too low ({confidence:.0%}) for auto-record."
     
     return result
 
@@ -3934,7 +4183,7 @@ async def find_or_create_session(
 @mcp.tool()
 async def complete_session(
     session_id: str,
-    notes: str = None
+    notes: Optional[str] = None
 ) -> dict[str, Any]:
     """
     Explicitly complete a reasoning session.
@@ -4072,8 +4321,8 @@ async def resume_session(
 @mcp.tool()
 async def search_conversation_log(
     query: str,
-    session_id: str = None,
-    log_type: str = None,
+    session_id: Optional[str] = None,
+    log_type: Optional[str] = None,
     limit: int = 10
 ) -> dict[str, Any]:
     """
@@ -4116,7 +4365,7 @@ async def search_conversation_log(
             LEFT JOIN thought_nodes tn ON cl.thought_node_id = tn.id
             WHERE cl.embedding IS NOT NULL
         """
-        params = [query_embedding]
+        params: list[Any] = [query_embedding]
         
         if session_id:
             base_query += " AND cl.session_id = %s"
@@ -4172,8 +4421,8 @@ async def log_conversation(
     session_id: str,
     raw_text: str,
     log_type: str = "context",
-    thought_node_id: str = None,
-    user_id: str = None
+    thought_node_id: Optional[str] = None,
+    user_id: Optional[str] = None
 ) -> dict[str, Any]:
     """
     Manually log free-form text to a session's conversation log.

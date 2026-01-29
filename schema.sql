@@ -170,6 +170,15 @@ ALTER TABLE scientific_laws ADD COLUMN IF NOT EXISTS
 -- Example: {"ui_design": 0.85, "architecture": 0.6, "debugging": 0.7}
 
 -- ============================================================================
+-- v34: Auto-Tagging on Record Outcome
+-- Stores suggested_tags from finalize_session for auto-application on success
+-- ============================================================================
+ALTER TABLE reasoning_sessions ADD COLUMN IF NOT EXISTS
+    suggested_tags JSONB DEFAULT '[]'::jsonb;
+
+-- Example: {"ui_design": 0.85, "architecture": 0.6, "debugging": 0.7}
+
+-- ============================================================================
 -- v12b: Thompson Sampling for Law Selection
 -- Tracks selection/success counts for explore-exploit balancing
 -- ============================================================================

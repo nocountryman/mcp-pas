@@ -2,6 +2,27 @@
 
 All notable changes to PAS (Scientific Reasoning MCP) are documented here.
 
+## [v35] - 2026-01-29
+
+### Added
+- **Pure Utility Helpers** - 6 extracted functions for testability:
+  - `_apply_heuristic_penalties`, `_compute_ensemble_prior`, `_infer_traits_from_hidden_values`
+  - `_get_outcome_multiplier`, `_compute_critique_accuracy`, `_compute_law_effective_weight`
+
+### Changed
+- **Complexity Reduction** - Average 15.75 → 13.74 (↓13%)
+- **Type Safety** - mypy errors 53 → 3 (↓94%)
+
+---
+
+## [v34] - 2026-01-29
+
+### Added
+- **Auto-Tagging** - `record_outcome` auto-applies `suggested_tags` from `finalize_session`
+- **JSONB Persistence** - `suggested_tags` column in `reasoning_sessions`
+
+---
+
 ## [v32] - 2026-01-29
 
 ### Fixed

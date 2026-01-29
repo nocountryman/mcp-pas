@@ -109,3 +109,30 @@ if result["decision_quality"] == "low" and is_new_feature:
 - PAS learned this from the v22 duplication bug
 
 > **Mantra**: "If quality is low, more thinking is needed."
+
+---
+
+## Rule 5: Quality Gate Enforcement 🚦 (v33)
+
+**If `finalize_session` returns `[UNVERIFIED]` prefix in recommendation:**
+
+1. **DO NOT** present as final answer
+2. **MUST** call `prepare_expansion` and deepen
+3. **Re-finalize** until `quality_gate.passed: true`
+
+### When to Use `skip_quality_gate=True`
+
+Only use this escape hatch if:
+- User explicitly requests early/partial result
+- Problem is inherently low-confidence (subjective decisions)
+- You explain why in your response
+
+### If Proceeding with [UNVERIFIED]
+
+You **MUST** explain why you are proceeding with an unverified recommendation:
+```
+"Note: This recommendation has not passed the quality gate 
+(score: X, gap: Y). Proceeding because [reason]."
+```
+
+> **v33 Change**: Quality gate is now enforced by default (opt-out, not opt-in).
