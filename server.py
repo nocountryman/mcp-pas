@@ -4488,10 +4488,438 @@ async def log_conversation(
         if 'conn' in locals():
             safe_close_connection(conn)
 
+# =============================================================================
+# v30: Global Codebase Understanding Tools
+# =============================================================================
+
+import hashlib
+from pathlib import Path
+
+# Language extensions for tree-sitter
+LANGUAGE_EXTENSIONS = {
+    '.py': 'python',
+    '.js': 'javascript',
+    '.ts': 'typescript',
+    '.jsx': 'javascript',
+    '.tsx': 'typescript',
+    '.go': 'go',
+    '.rs': 'rust',
+    '.java': 'java',
+    '.c': 'c',
+    '.cpp': 'cpp',
+    '.cs': 'c_sharp',
+    '.rb': 'ruby',
+    '.php': 'php',
+}
+
+# Patterns to skip during sync
+SKIP_PATTERNS = {
+    '__pycache__', 'node_modules', '.git', '.venv', 'venv',
+    'dist', 'build', '.egg-info', '.tox', '.pytest_cache',
+    '.mypy_cache', '.ruff_cache', 'coverage', 'htmlcov'
+}
+
+
+def _normalize_project_id(project_path: str) -> str:
+    """Derive consistent project_id from path."""
+    # Get the final directory name, lowercase alphanumeric only
+    path = Path(project_path).resolve()
+    name = path.name.lower()
+    # Remove non-alphanumeric chars
+    return ''.join(c for c in name if c.isalnum() or c == '_')
+
+
+def _compute_file_hash(file_path: Path) -> str:
+    """Compute SHA-256 hash of file content."""
+    hasher = hashlib.sha256()
+    with open(file_path, 'rb') as f:
+        for chunk in iter(lambda: f.read(8192), b''):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _extract_symbols(content: str, language: str) -> list[dict]:
+    """Extract function/class symbols using tree-sitter."""
+    try:
+        import tree_sitter_languages
+    except ImportError:
+        logger.warning("tree-sitter-languages not installed, skipping symbol extraction")
+        return []
+    
+    try:
+        parser = tree_sitter_languages.get_parser(language)
+        tree = parser.parse(content.encode())
+        
+        symbols = []
+        
+        # Walk the tree looking for function/class definitions
+        def walk_node(node, parent_name=None):
+            node_type = node.type
+            
+            # Python-specific
+            if node_type == 'function_definition':
+                name_node = node.child_by_field_name('name')
+                if name_node:
+                    sym = {
+                        'type': 'function',
+                        'name': name_node.text.decode(),
+                        'line_start': node.start_point[0] + 1,
+                        'line_end': node.end_point[0] + 1,
+                        'signature': content[node.start_byte:node.end_byte].split('\n')[0],
+                    }
+                    # Extract docstring if present
+                    if node.child_count > 0:
+                        for child in node.children:
+                            if child.type == 'expression_statement':
+                                expr = child.child(0)
+                                if expr and expr.type == 'string':
+                                    sym['docstring'] = expr.text.decode().strip('"""\'\'\'')
+                                    break
+                    symbols.append(sym)
+            
+            elif node_type == 'class_definition':
+                name_node = node.child_by_field_name('name')
+                if name_node:
+                    sym = {
+                        'type': 'class',
+                        'name': name_node.text.decode(),
+                        'line_start': node.start_point[0] + 1,
+                        'line_end': node.end_point[0] + 1,
+                        'signature': content[node.start_byte:node.end_byte].split('\n')[0],
+                    }
+                    symbols.append(sym)
+            
+            # JavaScript/TypeScript function
+            elif node_type in ('function_declaration', 'method_definition', 'arrow_function'):
+                name_node = node.child_by_field_name('name')
+                if name_node:
+                    symbols.append({
+                        'type': 'function',
+                        'name': name_node.text.decode(),
+                        'line_start': node.start_point[0] + 1,
+                        'line_end': node.end_point[0] + 1,
+                        'signature': content[node.start_byte:node.end_byte].split('\n')[0][:200],
+                    })
+            
+            # Recurse children
+            for child in node.children:
+                walk_node(child, parent_name)
+        
+        walk_node(tree.root_node)
+        return symbols
+        
+    except Exception as e:
+        logger.warning(f"Symbol extraction failed for {language}: {e}")
+        return []
+
+
+@mcp.tool()
+async def sync_project(
+    project_path: str,
+    project_id: Optional[str] = None,
+    max_files: int = 500,
+    max_file_size_kb: int = 100
+) -> dict[str, Any]:
+    """
+    Index a project directory for codebase understanding.
+    
+    Walks the directory, computes file hashes, extracts symbols via tree-sitter,
+    and stores embeddings for semantic search. Uses project_id for isolation.
+    
+    Args:
+        project_path: Absolute path to project root
+        project_id: Optional custom project ID (auto-derived from path if not provided)
+        max_files: Maximum files to index (default 500)
+        max_file_size_kb: Skip files larger than this (default 100KB)
+    
+    Returns:
+        Sync results with counts and any errors
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        path = Path(project_path).resolve()
+        if not path.exists():
+            return {"success": False, "error": f"Path does not exist: {project_path}"}
+        
+        # Normalize project_id
+        pid = project_id or _normalize_project_id(project_path)
+        
+        # Get existing files for this project
+        cur.execute(
+            "SELECT file_path, file_hash FROM file_registry WHERE project_id = %s",
+            (pid,)
+        )
+        existing = {row['file_path']: row['file_hash'] for row in cur.fetchall()}
+        
+        stats = {
+            'files_scanned': 0,
+            'files_added': 0,
+            'files_updated': 0,
+            'files_unchanged': 0,
+            'files_skipped': 0,
+            'symbols_extracted': 0,
+            'errors': []
+        }
+        
+        # Walk directory
+        for file_path in path.rglob('*'):
+            if stats['files_scanned'] >= max_files:
+                break
+            
+            # Skip directories and non-files
+            if not file_path.is_file():
+                continue
+            
+            # Skip hidden and unwanted directories
+            rel_parts = file_path.relative_to(path).parts
+            if any(p in SKIP_PATTERNS or p.startswith('.') for p in rel_parts[:-1]):
+                continue
+            
+            # Skip large files
+            try:
+                size_kb = file_path.stat().st_size / 1024
+                if size_kb > max_file_size_kb:
+                    stats['files_skipped'] += 1
+                    continue
+            except OSError:
+                continue
+            
+            # Check extension for language support
+            ext = file_path.suffix.lower()
+            language = LANGUAGE_EXTENSIONS.get(ext)
+            if not language:
+                stats['files_skipped'] += 1
+                continue
+            
+            stats['files_scanned'] += 1
+            rel_path = str(file_path.relative_to(path))
+            
+            try:
+                # Compute hash
+                file_hash = _compute_file_hash(file_path)
+                
+                # Check if unchanged
+                if rel_path in existing and existing[rel_path] == file_hash:
+                    stats['files_unchanged'] += 1
+                    continue
+                
+                # Read content
+                content = file_path.read_text(encoding='utf-8', errors='replace')
+                line_count = content.count('\n') + 1
+                
+                # Generate embedding for file content (chunk if needed)
+                # Use first 2000 chars for embedding
+                embedding = get_embedding(content[:2000])
+                
+                # Upsert file_registry
+                cur.execute(
+                    """
+                    INSERT INTO file_registry (project_id, file_path, file_hash, language, line_count, content_embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (project_id, file_path) DO UPDATE SET
+                        file_hash = EXCLUDED.file_hash,
+                        language = EXCLUDED.language,
+                        line_count = EXCLUDED.line_count,
+                        content_embedding = EXCLUDED.content_embedding,
+                        updated_at = NOW()
+                    RETURNING id
+                    """,
+                    (pid, rel_path, file_hash, language, line_count, embedding)
+                )
+                file_id = cur.fetchone()['id']
+                
+                if rel_path in existing:
+                    stats['files_updated'] += 1
+                else:
+                    stats['files_added'] += 1
+                
+                # Extract and store symbols
+                symbols = _extract_symbols(content, language)
+                
+                # Clear old symbols for this file
+                cur.execute("DELETE FROM file_symbols WHERE file_id = %s", (file_id,))
+                
+                for sym in symbols:
+                    # Generate embedding for signature+docstring
+                    embed_text = sym.get('signature', '') + '\n' + sym.get('docstring', '')
+                    sym_embedding = get_embedding(embed_text[:500])
+                    
+                    cur.execute(
+                        """
+                        INSERT INTO file_symbols (file_id, symbol_type, symbol_name, line_start, line_end, signature, docstring, embedding)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (file_id, sym['type'], sym['name'], sym.get('line_start'), 
+                         sym.get('line_end'), sym.get('signature'), sym.get('docstring'), sym_embedding)
+                    )
+                    stats['symbols_extracted'] += 1
+                
+            except Exception as e:
+                stats['errors'].append(f"{rel_path}: {str(e)[:100]}")
+                if len(stats['errors']) > 10:
+                    break
+        
+        conn.commit()
+        
+        return {
+            "success": True,
+            "project_id": pid,
+            "project_path": str(path),
+            **stats,
+            "message": f"Synced {stats['files_added']} new, {stats['files_updated']} updated files"
+        }
+        
+    except Exception as e:
+        if 'conn' in locals():
+            conn.rollback()
+        logger.error(f"sync_project failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def query_codebase(
+    query: str,
+    project_id: str,
+    top_k: int = 10,
+    cross_project: bool = False,
+    search_symbols: bool = True,
+    search_files: bool = True
+) -> dict[str, Any]:
+    """
+    Semantic search over indexed codebase.
+    
+    Searches file content and symbols using pgvector similarity.
+    Uses project_id for isolation unless cross_project=True.
+    
+    Args:
+        query: Natural language query (e.g., "finalize session logic")
+        project_id: Project to search (required unless cross_project=True)
+        top_k: Maximum results per category (default 10)
+        cross_project: If True, search all projects (default False)
+        search_symbols: Include symbol matches (default True)
+        search_files: Include file content matches (default True)
+    
+    Returns:
+        Matching files and symbols with scores
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Generate query embedding
+        query_embedding = get_embedding(query)
+        
+        results = {
+            "success": True,
+            "query": query,
+            "project_id": project_id if not cross_project else "ALL",
+            "files": [],
+            "symbols": []
+        }
+        
+        # Search files
+        if search_files:
+            if cross_project:
+                cur.execute(
+                    """
+                    SELECT project_id, file_path, language, line_count,
+                           1 - (content_embedding <=> %s::vector) as similarity
+                    FROM file_registry
+                    WHERE content_embedding IS NOT NULL
+                    ORDER BY content_embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (query_embedding, query_embedding, top_k)
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT project_id, file_path, language, line_count,
+                           1 - (content_embedding <=> %s::vector) as similarity
+                    FROM file_registry
+                    WHERE project_id = %s AND content_embedding IS NOT NULL
+                    ORDER BY content_embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (query_embedding, project_id, query_embedding, top_k)
+                )
+            
+            for row in cur.fetchall():
+                results["files"].append({
+                    "project_id": row['project_id'],
+                    "file_path": row['file_path'],
+                    "language": row['language'],
+                    "line_count": row['line_count'],
+                    "similarity": float(row['similarity'])
+                })
+        
+        # Search symbols
+        if search_symbols:
+            if cross_project:
+                cur.execute(
+                    """
+                    SELECT fr.project_id, fr.file_path, 
+                           fs.symbol_type, fs.symbol_name, fs.line_start, fs.line_end,
+                           fs.signature, fs.docstring,
+                           1 - (fs.embedding <=> %s::vector) as similarity
+                    FROM file_symbols fs
+                    JOIN file_registry fr ON fs.file_id = fr.id
+                    WHERE fs.embedding IS NOT NULL
+                    ORDER BY fs.embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (query_embedding, query_embedding, top_k)
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT fr.project_id, fr.file_path, 
+                           fs.symbol_type, fs.symbol_name, fs.line_start, fs.line_end,
+                           fs.signature, fs.docstring,
+                           1 - (fs.embedding <=> %s::vector) as similarity
+                    FROM file_symbols fs
+                    JOIN file_registry fr ON fs.file_id = fr.id
+                    WHERE fr.project_id = %s AND fs.embedding IS NOT NULL
+                    ORDER BY fs.embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (query_embedding, project_id, query_embedding, top_k)
+                )
+            
+            for row in cur.fetchall():
+                results["symbols"].append({
+                    "project_id": row['project_id'],
+                    "file_path": row['file_path'],
+                    "symbol_type": row['symbol_type'],
+                    "symbol_name": row['symbol_name'],
+                    "line_start": row['line_start'],
+                    "line_end": row['line_end'],
+                    "signature": row['signature'][:200] if row['signature'] else None,
+                    "similarity": float(row['similarity'])
+                })
+        
+        results["file_count"] = len(results["files"])
+        results["symbol_count"] = len(results["symbols"])
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"query_codebase failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
 
 # =============================================================================
 # Entry Point
 # =============================================================================
+
 
 def main():
     """Run the MCP server."""

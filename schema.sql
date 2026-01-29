@@ -614,3 +614,73 @@ CREATE INDEX IF NOT EXISTS idx_conversation_log_type
 
 CREATE INDEX IF NOT EXISTS idx_conversation_log_user
     ON conversation_log(user_id);
+
+-- ============================================================================
+-- v30: Global Codebase Understanding
+-- File indexing with semantic search and project isolation
+-- ============================================================================
+
+-- file_registry: Core file index with semantic vectors
+CREATE TABLE IF NOT EXISTS file_registry (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id      TEXT NOT NULL,   -- Isolation boundary (normalized from path)
+    file_path       TEXT NOT NULL,   -- Relative path within project
+    file_hash       TEXT NOT NULL,   -- SHA-256 for change detection
+    language        TEXT,            -- Detected language (python, javascript, etc.)
+    line_count      INTEGER,         -- File size in lines
+    content_embedding vector(768),   -- Semantic embedding of file content
+    
+    -- Metadata
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    UNIQUE(project_id, file_path)
+);
+
+-- HNSW index for semantic search on file content
+CREATE INDEX IF NOT EXISTS idx_file_registry_embedding
+    ON file_registry
+    USING hnsw (content_embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+CREATE INDEX IF NOT EXISTS idx_file_registry_project
+    ON file_registry(project_id);
+
+-- file_symbols: Tree-sitter extracted structural symbols
+CREATE TABLE IF NOT EXISTS file_symbols (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    file_id         UUID NOT NULL REFERENCES file_registry(id) ON DELETE CASCADE,
+    
+    -- Symbol identification
+    symbol_type     TEXT NOT NULL CHECK (symbol_type IN (
+        'function', 'class', 'method', 'import', 'constant', 'variable'
+    )),
+    symbol_name     TEXT NOT NULL,
+    
+    -- Location in file
+    line_start      INTEGER,
+    line_end        INTEGER,
+    
+    -- Content for embedding
+    signature       TEXT,            -- Function signature or class header
+    docstring       TEXT,            -- Extracted docstring if present
+    embedding       vector(768),     -- Semantic embedding of signature+docstring
+    
+    -- Hierarchy
+    parent_symbol_id UUID REFERENCES file_symbols(id) ON DELETE CASCADE,
+    
+    -- Metadata
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- HNSW index for semantic search on symbols
+CREATE INDEX IF NOT EXISTS idx_file_symbols_embedding
+    ON file_symbols
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+CREATE INDEX IF NOT EXISTS idx_file_symbols_file
+    ON file_symbols(file_id);
+
+CREATE INDEX IF NOT EXISTS idx_file_symbols_type
+    ON file_symbols(symbol_type);
