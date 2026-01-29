@@ -7,7 +7,7 @@ A Model Context Protocol (MCP) server that brings structured, Bayesian reasoning
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-blue)](https://modelcontextprotocol.io)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/downloads/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16+-blue.svg)](https://www.postgresql.org/)
-[![Version](https://img.shields.io/badge/version-v38-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v39-orange.svg)](CHANGELOG.md)
 
 ---
 
@@ -34,10 +34,39 @@ Instead of producing a single answer, PAS builds a **reasoning tree** where each
 | **Smart Interview Pattern** | Psychology-based Q&A to gather missing context |
 | **Domain Detection** | Auto-detect problem domain for tailored questions |
 | **RLVR Self-Learning** | Auto-detect success/failure from terminal output |
+| **Sequential Gap Analysis** | Layer-by-layer adversarial gap detection (v32/v37) |
 | **Session Tagging** | Organize sessions with tags for retrieval |
+| **Persistent Traits** | Learn user preferences across sessions (v22) |
 | **Past Failures Surfacing** | Learn from similar past failures during critique |
 | **Live Code Navigation** | Find references/definitions via Jedi (v38) |
 | **Symbol Suggestions** | Auto-suggest symbols during hypothesis generation |
+
+---
+
+## 🧠 Sequential Thinking Integration
+
+PAS is designed to work alongside `@anthropic/mcp-sequential-thinking`. While Sequential Thinking handles **linear** thought chains, PAS provides **tree-structured** reasoning with Bayesian scoring.
+
+### Complementary Usage
+
+| Aspect | Sequential Thinking | PAS |
+|--------|---------------------|-----|
+| Structure | Linear chain | Bayesian Tree |
+| Scoring | None | Prior × Likelihood = Posterior |
+| Self-Critique | None | Tiered penalties (major/minor flaws) |
+| Quality Gate | None | 0.9 score, 0.1 gap |
+| Self-Learning | None | Laws + failure memory + traits |
+| Output | Final thought | Ranked recommendation + gaps |
+
+### Recommended Pattern
+
+```
+1. Use Sequential Thinking for quick, linear reasoning
+2. When uncertainty is high, escalate to PAS:
+   → start_reasoning_session(user_goal="...")
+   → Expand, critique, deepen until quality gate passes
+3. Record outcome for RLVR learning
+```
 
 ---
 
@@ -62,11 +91,18 @@ Instead of producing a single answer, PAS builds a **reasoning tree** where each
 | `store_critique` | Store critique with tiered penalties (major/minor) |
 | `search_relevant_laws` | Find scientific laws by semantic similarity |
 
-### Sequential Analysis (v32)
+### Sequential Analysis (v32/v37)
 | Tool | Description |
 |------|-------------|
-| `prepare_sequential_analysis` | Get prompts for gap analysis on top candidates |
+| `prepare_sequential_analysis` | Get prompts for 5-layer gap analysis on top candidates |
 | `store_sequential_analysis` | Store gap analysis, detect systemic gaps |
+
+**5-Layer Gap Analysis** checks:
+1. **CODE STRUCTURE** - What code changes are needed?
+2. **DEPENDENCIES** - What packages/systems are assumed?
+3. **DATA FLOW** - What data moves where?
+4. **INTERFACES** - What APIs/contracts are affected?
+5. **WORKFLOWS** - What user/system flows change?
 
 ### Tree Navigation
 | Tool | Description |
@@ -79,18 +115,36 @@ Instead of producing a single answer, PAS builds a **reasoning tree** where each
 | Tool | Description |
 |------|-------------|
 | `identify_gaps` | Generate clarifying questions based on goal |
-| `get_next_question` | Get one question at a time with choices |
-| `submit_answer` | Answer question, trigger follow-ups |
+| `get_next_question` | Get one question at a time with formatted choices |
+| `submit_answer` | Answer question, trigger follow-up rules |
 | `check_interview_complete` | Check if enough context gathered |
 
-### Self-Learning
+**Interview Features:**
+- **Domain Detection** - Auto-detect UI, architecture, debugging, testing domains
+- **Hidden Context** - Choices carry hidden metadata for trait inference
+- **Follow-up Rules** - Conditional question injection based on answers
+- **Progress Tracking** - Max 15 questions, 3 levels deep
+- **History Archive** - Answered questions stored for self-learning
+
+### Self-Learning (RLVR)
 | Tool | Description |
 |------|-------------|
-| `record_outcome` | Record success/failure with attribution |
-| `parse_terminal_output` | Auto-detect success/failure signals |
+| `record_outcome` | Record success/failure with semantic attribution |
+| `parse_terminal_output` | Auto-detect success/failure signals from terminal |
 | `refresh_law_weights` | Update law weights based on outcomes |
 | `log_conversation` | Store user input for semantic search |
 | `search_conversation_log` | Find past context by similarity |
+
+**RLVR Auto-Recording:**
+```json
+{
+  "finalize_session": {
+    "terminal_output": "[terminal logs here]",
+    "auto_record": true
+  }
+}
+```
+PAS automatically parses terminal output and records outcomes.
 
 ### Code Navigation (v38)
 | Tool | Description |
@@ -127,6 +181,38 @@ source .venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 ```
 
+### Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `mcp` | latest | Model Context Protocol server framework |
+| `psycopg2-binary` | latest | PostgreSQL adapter |
+| `pgvector` | latest | Vector similarity for embeddings |
+| `pydantic` | latest | Data validation |
+| `numpy` | latest | Numerical operations |
+| `sentence-transformers` | latest | Local embeddings (all-MiniLM-L6-v2) |
+| `tree-sitter-language-pack` | ≥0.13.0 | Symbol extraction for code indexing |
+| `pyyaml` | ≥6.0 | Configuration file parsing |
+| `jedi` | latest | **Live** code navigation (find references, go-to-definition) |
+
+### Optional Tools
+
+| Tool | Install | Purpose |
+|------|---------|---------|
+| `pyright` | `pip install pyright` | Generate LSIF indexes for **precision** code navigation |
+
+**When to use LSIF vs Jedi:**
+- **Jedi** (default): Live analysis, no pre-indexing, works out of the box
+- **LSIF** (optional): Pre-computed index via `pyright --outputtype lsif`, faster for large codebases
+
+```bash
+# Generate LSIF index (optional)
+pyright --outputtype lsif --outputfile project.lsif.json
+
+# Import into PAS
+# → import_lsif(project_id="...", lsif_path="/path/to/project.lsif.json")
+```
+
 ### Step 2: Database Setup
 
 ```bash
@@ -154,8 +240,9 @@ cp env.template .env
 
 ```env
 DATABASE_URL=postgresql://user:password@localhost:5432/mcp_pas
-OPENAI_API_KEY=sk-...  # For embeddings
 ```
+
+> **Note:** PAS uses local embeddings via `sentence-transformers` by default. No OpenAI API key required.
 
 ---
 
@@ -200,12 +287,33 @@ Add to your MCP configuration:
    → [Process prompt]
    → store_critique(node_id="...", counterargument="...", severity_score=0.3)
 
-4. Deepen if score < 0.9 or gap < 0.1
+4. Sequential gap analysis (REQUIRED before finalize)
+   → prepare_sequential_analysis(session_id="...", top_n=3)
+   → [Process 5-layer prompts]
+   → store_sequential_analysis(session_id="...", results="[...]")
+
+5. Deepen if score < 0.9 or gap < 0.1
    → store_expansion(parent_node_id="...", h1_text="Improved approach...", h1_confidence=0.95)
 
-5. Get recommendation
+6. Get recommendation
    → finalize_session(session_id="...")
-   # Returns: quality_gate, exhaustive_prompt, recommendation
+   # Returns: quality_gate, recommendation, exhaustive_check
+```
+
+### Smart Interview Flow
+
+```
+1. Identify missing context
+   → identify_gaps(session_id="...")
+
+2. Ask questions one at a time
+   → get_next_question(session_id="...")
+   → [Present to user]
+   → submit_answer(session_id="...", question_id="...", answer="B")
+
+3. Check completion
+   → check_interview_complete(session_id="...")
+   # Once complete, hidden context is propagated to session
 ```
 
 ### Quality Gate (v31)
@@ -238,16 +346,35 @@ If `passed: false`, PAS suggests how to improve:
 
 ---
 
-## 📊 PAS vs Sequential Thinking
+## 📊 Architecture
 
-| Aspect | Sequential Thinking | PAS |
-|--------|---------------------|-----|
-| Structure | Linear chain | Bayesian Tree |
-| Scoring | None | Prior × Likelihood = Posterior |
-| Self-Critique | None | Tiered penalties |
-| Quality Gate | None | 0.9 score, 0.1 gap |
-| Self-Learning | None | Laws + failure memory |
-| Output | Final thought | Ranked recommendation + gaps |
+### Module Structure (v39)
+
+```
+server.py              Main MCP server (5389 lines)
+├── errors.py          Exception hierarchy (~200 lines)
+├── utils.py           DB, embeddings, validation (~185 lines)
+├── reasoning_helpers.py   Bayesian scoring, quality (~310 lines)
+├── learning_helpers.py    RLVR, terminal parsing (~240 lines)
+├── interview_helpers.py   Interview flow (~220 lines)
+├── codebase_helpers.py    Symbol extraction (~260 lines)
+└── sessions_helpers.py    Session lifecycle (~270 lines)
+```
+
+### Database Tables
+
+| Table | Purpose |
+|-------|---------|
+| `reasoning_sessions` | Session state, goal, context |
+| `thought_nodes` | Hypothesis tree with Bayesian scores |
+| `critique_results` | Counterarguments and penalties |
+| `scientific_laws` | Grounding laws with weights |
+| `outcome_records` | Success/failure for learning |
+| `user_trait_profiles` | Persistent user preferences |
+| `interview_history` | Archived Q&A for learning |
+| `file_registry` | Indexed project files |
+| `file_symbols` | Extracted symbols |
+| `lsif_references` | LSIF index data |
 
 ---
 
@@ -281,7 +408,7 @@ PAS includes 15+ established laws to ground reasoning:
 
 See [CHANGELOG.md](CHANGELOG.md) for version history.
 
-Current version: **v38**
+Current version: **v39**
 
 ---
 
