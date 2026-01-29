@@ -15,6 +15,16 @@ All notable changes to PAS (Scientific Reasoning MCP) are documented here.
 
 ---
 
+## [v31b] - 2026-01-29
+
+### Added
+- **Past Failure Surfacing** - Proactive warnings in `prepare_expansion` and `prepare_critique`
+  - `KEYWORD_FAILURE_PATTERNS` dict: 16 keywords → 4 patterns (SCHEMA_BEFORE_CODE, RESTART_BEFORE_VERIFY, ENV_CHECK_FIRST, RESPECT_QUALITY_GATE)
+  - `_search_relevant_failures()` helper: hybrid keyword + semantic matching
+  - Returns `past_failure_warnings` array when matches found
+
+---
+
 ## [v34] - 2026-01-29
 
 ### Added

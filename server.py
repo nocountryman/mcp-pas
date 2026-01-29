@@ -146,6 +146,106 @@ CONSTITUTIONAL_PRINCIPLES = [
 
 
 # =============================================================================
+# v31: Past Failure Surfacing - Keyword Patterns
+# =============================================================================
+
+# Derived from actual outcome_records failures
+KEYWORD_FAILURE_PATTERNS: dict[str, tuple[str, str]] = {
+    # SCHEMA_BEFORE_CODE pattern
+    'schema': ('SCHEMA_BEFORE_CODE', 'Run schema migration before deploying code changes'),
+    'table': ('SCHEMA_BEFORE_CODE', 'Verify table exists in database before querying'),
+    'column': ('SCHEMA_BEFORE_CODE', 'Check column exists before referencing in code'),
+    'migration': ('SCHEMA_BEFORE_CODE', 'Apply database migrations before testing'),
+    'alter': ('SCHEMA_BEFORE_CODE', 'Database schema change requires migration first'),
+    
+    # RESTART_BEFORE_VERIFY pattern
+    'restart': ('RESTART_BEFORE_VERIFY', 'Restart MCP server after code changes'),
+    'mcp': ('RESTART_BEFORE_VERIFY', 'MCP server needs restart to pick up new tools'),
+    'server': ('RESTART_BEFORE_VERIFY', 'Server restart may be needed after changes'),
+    
+    # ENV_CHECK_FIRST pattern
+    'venv': ('ENV_CHECK_FIRST', 'Verify .venv exists and is activated before pip commands'),
+    'pip': ('ENV_CHECK_FIRST', 'Use project venv for pip installs, not system Python'),
+    'install': ('ENV_CHECK_FIRST', 'Check virtual environment before installing packages'),
+    
+    # RESPECT_QUALITY_GATE pattern
+    'quality': ('RESPECT_QUALITY_GATE', 'Do not skip quality gate checks'),
+    'threshold': ('RESPECT_QUALITY_GATE', 'Respect score/gap thresholds before proceeding'),
+    'gate': ('RESPECT_QUALITY_GATE', 'Quality gate must pass before implementation'),
+}
+
+
+def _search_relevant_failures(
+    text: str,
+    semantic_threshold: float = 0.55,
+    limit: int = 3
+) -> list[dict]:
+    """
+    v31: Search for past failures relevant to the given text.
+    
+    Combines:
+    1. Semantic search on failure_reason_embedding
+    2. Keyword pattern matching for deterministic warnings
+    
+    Returns list of warnings with source and details.
+    """
+    warnings = []
+    text_lower = text.lower()
+    
+    # Part 1: Keyword pattern matching (fast, deterministic)
+    seen_patterns: set[str] = set()
+    for keyword, (pattern, warning_text) in KEYWORD_FAILURE_PATTERNS.items():
+        if keyword in text_lower and pattern not in seen_patterns:
+            warnings.append({
+                'pattern': pattern,
+                'source': 'keyword',
+                'warning': warning_text,
+                'triggered_by': keyword
+            })
+            seen_patterns.add(pattern)
+    
+    # Part 2: Semantic search (broader, probabilistic)
+    if len(warnings) < limit:
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # Generate embedding for the text
+            embedding = get_embedding(text[:1000])
+            
+            cur.execute(
+                """
+                SELECT failure_reason, 
+                       1 - (failure_reason_embedding <=> %s::vector) as similarity,
+                       notes
+                FROM outcome_records
+                WHERE outcome = 'failure' 
+                  AND failure_reason_embedding IS NOT NULL
+                  AND 1 - (failure_reason_embedding <=> %s::vector) > %s
+                ORDER BY failure_reason_embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (embedding, embedding, semantic_threshold, embedding, limit - len(warnings))
+            )
+            
+            for row in cur.fetchall():
+                # Avoid duplicates if semantic matches keyword pattern
+                if not any(w.get('triggered_by') and w['triggered_by'] in row['failure_reason'].lower() for w in warnings):
+                    warnings.append({
+                        'pattern': 'SEMANTIC_MATCH',
+                        'source': 'semantic',
+                        'warning': row['failure_reason'],
+                        'similarity': round(float(row['similarity']), 3)
+                    })
+            
+            safe_close_connection(conn)
+        except Exception as e:
+            logger.warning(f"Semantic failure search failed: {e}")
+    
+    return warnings[:limit]
+
+
+# =============================================================================
 # v10b: Critic Ensemble Personas
 # =============================================================================
 
@@ -728,7 +828,13 @@ async def prepare_expansion(session_id: str, parent_node_id: str | None = None) 
         
         instructions = base_instructions + trait_guidance
         
-        return {
+        # =====================================================================
+        # v31: Past Failure Surfacing
+        # Search for relevant past failures to warn agent before hypothesis generation
+        # =====================================================================
+        past_failure_warnings = _search_relevant_failures(parent_content)
+        
+        response = {
             "success": True,
             "session_id": session_id,
             "parent_node_id": parent_node_id,
@@ -739,6 +845,13 @@ async def prepare_expansion(session_id: str, parent_node_id: str | None = None) 
             "instructions": instructions,
             "latent_traits": latent_traits if latent_traits else None  # v21: Include for transparency
         }
+        
+        # v31: Add warnings if any found
+        if past_failure_warnings:
+            response["past_failure_warnings"] = past_failure_warnings
+            logger.info(f"v31: Surfaced {len(past_failure_warnings)} failure warning(s)")
+        
+        return response
         
     except Exception as e:
         logger.error(f"prepare_expansion failed: {e}")
@@ -1150,8 +1263,22 @@ Be specific and constructive. Focus on what could go wrong."""
         logger.info(f"v32: Returning prompt for agent to process (mode: {critique_mode})")
 
         
-        # v27: Surface past failures matching this hypothesis content
+        # v27 -> v31: Surface past failures matching this hypothesis content
+        # v31 Enhancement: Add keyword pattern matching in addition to semantic search
         past_failures = []
+        
+        # v31: First check keyword patterns (fast, deterministic)
+        keyword_warnings = _search_relevant_failures(node["content"], semantic_threshold=0.55, limit=3)
+        for w in keyword_warnings:
+            if w.get('source') == 'keyword':
+                past_failures.append({
+                    "pattern": w.get('pattern'),
+                    "warning": w.get('warning'),
+                    "source": "keyword",
+                    "triggered_by": w.get('triggered_by')
+                })
+        
+        # v27: Then add semantic matches
         try:
             # Get embedding for current node content
             node_embedding = get_embedding(node["content"][:1000])
@@ -1162,20 +1289,23 @@ Be specific and constructive. Focus on what could go wrong."""
                 JOIN reasoning_sessions s ON o.session_id = s.id
                 WHERE o.outcome != 'success'
                 AND o.failure_reason_embedding IS NOT NULL
-                AND 1 - (o.failure_reason_embedding <=> %s::vector) > 0.25
+                AND 1 - (o.failure_reason_embedding <=> %s::vector) > 0.5
                 ORDER BY similarity DESC
                 LIMIT 3
             """, (node_embedding, node_embedding))
             for r in cur.fetchall():
-                past_failures.append({
-                    "failure_reason": r["failure_reason"][:200],
-                    "session_goal": r["goal"][:100],
-                    "similarity": round(float(r["similarity"]), 3)
-                })
+                # Avoid duplicates from keyword matches
+                if not any(r["failure_reason"][:50] in str(pf.get('warning', '')) for pf in past_failures):
+                    past_failures.append({
+                        "failure_reason": r["failure_reason"][:200],
+                        "session_goal": r["goal"][:100],
+                        "similarity": round(float(r["similarity"]), 3),
+                        "source": "semantic"
+                    })
             if past_failures:
-                logger.info(f"v27: Found {len(past_failures)} related past failures for node {node_id}")
+                logger.info(f"v31: Found {len(past_failures)} failure warning(s) for node {node_id}")
         except Exception as e:
-            logger.warning(f"v27 past_failures lookup failed: {e}")
+            logger.warning(f"v31 past_failures lookup failed: {e}")
         
         # v29: Assumption Surfacing - return prompt for client LLM to extract assumptions
         # NOTE: MCP sampling via create_message is not supported by all clients,
