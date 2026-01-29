@@ -25,6 +25,27 @@ from mcp.types import (
     CreateMessageResult,
 )
 
+# v39: Modularized imports
+from reasoning_helpers import (
+    apply_heuristic_penalties as _apply_heuristic_penalties,
+    get_outcome_multiplier as _get_outcome_multiplier,
+    compute_critique_accuracy as _compute_critique_accuracy,
+    compute_law_effective_weight as _compute_law_effective_weight,
+    compute_ensemble_prior as _compute_ensemble_prior,
+    generate_suggested_tags as _generate_suggested_tags,
+    compute_decision_quality as _compute_decision_quality,
+    apply_uct_tiebreaking as _apply_uct_tiebreaking,
+    build_processed_candidate as _build_processed_candidate,
+    infer_traits_from_hidden_values as _infer_traits_from_hidden_values,
+    # Constants
+    HEURISTIC_PENALTIES,
+    DEPTH_BONUS_PER_LEVEL,
+    ROLLOUT_WEIGHT,
+    UCT_THRESHOLD,
+    UCT_EXPLORATION_C,
+    DOMAIN_PATTERNS,
+)
+
 # Load environment variables
 load_dotenv()
 
@@ -2797,296 +2818,17 @@ def _infer_traits_from_hidden_values(
 
 
 # =============================================================================
-# Pure Utility: Heuristic Penalty Application (v35 extraction)
+# v39: Pure helper functions moved to reasoning_helpers.py
+# - _apply_heuristic_penalties
+# - _get_outcome_multiplier
+# - _compute_critique_accuracy
+# - _compute_law_effective_weight
+# - _compute_ensemble_prior
+# - _generate_suggested_tags
+# - _compute_decision_quality
+# - _apply_uct_tiebreaking
+# - _build_processed_candidate
 # =============================================================================
-
-def _apply_heuristic_penalties(
-    node: dict[str, Any],
-    sibling_counts: dict[str, int],
-    law_diversity: dict[str, tuple[int, int]]
-) -> tuple[float, list[str]]:
-    """
-    Pure function: Apply penalties to candidate score.
-    
-    Args:
-        node: Candidate node from DB (needs posterior_score, likelihood, depth, path)
-        sibling_counts: Dict of parent_path -> count of siblings at that level
-        law_diversity: Dict of parent_path -> (unique_laws, total_siblings)
-    
-    Returns:
-        Tuple of (adjusted_score, list_of_penalties_applied)
-    """
-    original_score = float(node["posterior_score"])
-    adjusted_score = original_score
-    penalties: list[str] = []
-    
-    # Unchallenged penalty: if likelihood is suspiciously round
-    likelihood = float(node["likelihood"])
-    if str(likelihood).endswith(('0', '5')) and likelihood in [0.8, 0.85, 0.9, 0.95, 0.88, 0.92]:
-        adjusted_score -= HEURISTIC_PENALTIES["unchallenged"]
-        penalties.append("unchallenged_penalty")
-    
-    # Depth bonus (deeper = more refined)
-    depth = int(node["depth"])
-    if depth > 2:
-        bonus = (depth - 2) * DEPTH_BONUS_PER_LEVEL
-        adjusted_score += bonus
-        if bonus > 0:
-            penalties.append(f"depth_bonus_+{bonus:.2f}")
-    
-    # Shallow alternatives penalty: if <2 sibling hypotheses at same level
-    node_path = str(node["path"])
-    parent_path = ".".join(node_path.split(".")[:-1]) if "." in node_path else ""
-    sibling_count = sibling_counts.get(parent_path, 1)
-    if sibling_count < 2:
-        adjusted_score -= HEURISTIC_PENALTIES["shallow_alternatives"]
-        penalties.append("shallow_alternatives_penalty")
-    
-    # v13b: Monoculture penalty - if all siblings match same law, penalize
-    if parent_path in law_diversity:
-        unique_laws, total_siblings = law_diversity[parent_path]
-        if total_siblings >= 2 and unique_laws == 1:
-            adjusted_score -= HEURISTIC_PENALTIES["monoculture"]
-            penalties.append("monoculture_penalty")
-    
-    # Ensure score stays in valid range
-    adjusted_score = max(0.1, min(1.0, adjusted_score))
-    
-    return adjusted_score, penalties
-
-
-def _get_outcome_multiplier(outcome: str) -> float:
-    """
-    v35: Pure function for outcome-based weighting.
-    
-    Returns multiplier for trait persistence based on outcome.
-    """
-    if outcome == "success":
-        return 1.2
-    elif outcome == "failure":
-        return 0.8
-    return 1.0
-
-
-def _compute_critique_accuracy(
-    node_path: str,
-    winning_path: str,
-    outcome: str
-) -> Optional[bool]:
-    """
-    v35: Pure function to determine if critique was accurate.
-    
-    Args:
-        node_path: Path of the critiqued node
-        winning_path: Path of the winning hypothesis
-        outcome: Session outcome ('success', 'partial', 'failure')
-    
-    Returns:
-        True if critique was accurate, False if not, None if indeterminate
-    """
-    is_winner = str(node_path).startswith(str(winning_path)) or str(winning_path).startswith(str(node_path))
-    
-    if is_winner:
-        # If winner was critiqued and outcome is failure, critique was accurate
-        return outcome == 'failure'
-    else:
-        # If non-winner was critiqued and outcome is success, critique may have been accurate
-        return outcome == 'success'
-
-
-def _compute_law_effective_weight(
-    base_weight: float,
-    selection_count: int,
-    success_count: int,
-    negation_asymmetry: bool
-) -> tuple[float, float]:
-    """
-    v35: Pure function for Thompson sampling law weight.
-    
-    Args:
-        base_weight: Scientific weight from law
-        selection_count: Times this law was selected
-        success_count: Times it led to success
-        negation_asymmetry: If hypothesis negation mismatches law
-    
-    Returns:
-        Tuple of (effective_weight, thompson_sample)
-    """
-    import random
-    
-    alpha = success_count + 1
-    beta_param = selection_count - success_count + 1
-    thompson_sample = random.betavariate(alpha, beta_param)
-    
-    effective_weight = 0.7 * base_weight + 0.3 * thompson_sample
-    negation_penalty = 0.15 if negation_asymmetry else 0.0
-    effective_weight = max(0.1, effective_weight - negation_penalty)
-    
-    return effective_weight, thompson_sample
-
-
-def _compute_ensemble_prior(
-    matching_laws: list[dict],
-    hypothesis_text: str
-) -> tuple[float, list[int], str | None]:
-    """
-    v35: Pure function to compute ensemble prior from multiple laws.
-    
-    Args:
-        matching_laws: List of law dicts with similarity, scientific_weight, etc
-        hypothesis_text: The hypothesis text (for negation check)
-    
-    Returns:
-        Tuple of (prior, supporting_law_ids, primary_law_name)
-    """
-    if not matching_laws:
-        return 0.5, [], None
-    
-    total_weighted = 0.0
-    total_similarity = 0.0
-    supporting_law_ids = []
-    law_names = []
-    
-    for law in matching_laws:
-        # Negation detection
-        hyp_negations = detect_negation(hypothesis_text)
-        law_negations = detect_negation(law["definition"]) if law.get("definition") else set()
-        negation_asymmetry = bool(hyp_negations) != bool(law_negations)
-        
-        # Compute effective weight
-        effective_weight, _ = _compute_law_effective_weight(
-            float(law["scientific_weight"]),
-            law.get("selection_count", 0) or 0,
-            law.get("success_count", 0) or 0,
-            negation_asymmetry
-        )
-        
-        similarity = float(law["similarity"])
-        total_weighted += effective_weight * similarity
-        total_similarity += similarity
-        
-        supporting_law_ids.append(law["id"])
-        law_names.append(law["law_name"])
-    
-    # Ensemble prior = Σ(weight × similarity) / Σ(similarity)
-    prior = (total_weighted / total_similarity * 0.6) + (matching_laws[0]["similarity"] * 0.4)
-    prior = max(0.1, min(0.95, prior))
-    
-    return prior, supporting_law_ids, law_names[0] if law_names else None
-
-
-# v35b: Pure helper for tag generation
-DOMAIN_PATTERNS: list[tuple[str, list[str]]] = [
-    ("database", ["db", "schema", "table", "sql", "postgres", "column"]),
-    ("api", ["api", "endpoint", "route", "request", "response"]),
-    ("backend", ["server", "backend", "service", "logic"]),
-    ("frontend", ["ui", "ux", "frontend", "component", "page"]),
-    ("testing", ["test", "pytest", "verify", "validation"]),
-    ("bugfix", ["bug", "fix", "error", "failure"]),
-    ("feature", ["feature", "implement", "add", "new"]),
-    ("refactor", ["refactor", "cleanup", "improve", "optimize"]),
-]
-
-def _generate_suggested_tags(goal: str, winning_content: str, max_tags: int = 5) -> list[str]:
-    """Generate suggested tags based on goal and winning content. Pure function."""
-    combined_text = f"{goal} {winning_content}".lower()
-    tags = []
-    for tag, keywords in DOMAIN_PATTERNS:
-        if any(kw in combined_text for kw in keywords):
-            tags.append(tag)
-    return tags[:max_tags]
-
-
-# v35b: Pure helper for decision quality computation
-def _compute_decision_quality(
-    gap: float,
-    rec_conf: float,
-    run_conf: float,
-    uct_applied: bool = False
-) -> tuple[str, str]:
-    """
-    Compute decision quality and gap analysis message. Pure function.
-    Returns (decision_quality, gap_analysis).
-    """
-    if gap < 0.03:
-        decision_quality = "low"
-        gap_analysis = f"Very close decision (gap: {gap:.3f}). Consider both options."
-    elif gap < 0.10:
-        decision_quality = "medium"
-        gap_analysis = f"Moderate confidence (gap: {gap:.3f}). Winner is better but runner-up has merit."
-    else:
-        decision_quality = "high"
-        gap_analysis = f"Clear winner (gap: {gap:.3f}). High confidence in recommendation."
-    
-    # v14a.1: Confidence-weighted gap
-    weighted_gap = gap * min(rec_conf, run_conf)
-    
-    if decision_quality == "high" and weighted_gap < 0.05:
-        decision_quality = "medium"
-        gap_analysis += f" [v14a.1: Downgraded - low confidence (wgap: {weighted_gap:.3f})]"
-    elif decision_quality == "medium" and weighted_gap < 0.02:
-        decision_quality = "low"
-        gap_analysis += f" [v14a.1: Downgraded - low confidence (wgap: {weighted_gap:.3f})]"
-    
-    if uct_applied:
-        gap_analysis += " [v11a: UCT exploration applied]"
-    
-    return decision_quality, gap_analysis
-
-
-# v35b: Pure helper for UCT tiebreaking
-def _apply_uct_tiebreaking(
-    rec_score: float,
-    rec_depth: int,
-    run_score: float,
-    run_depth: int
-) -> tuple[bool, bool]:
-    """
-    Apply UCT exploration bonus for close decisions. Pure function.
-    Returns (should_swap, uct_was_applied).
-    """
-    import math
-    
-    gap = rec_score - run_score
-    if gap >= UCT_THRESHOLD:
-        return False, False
-    
-    rec_visits = max(1, rec_depth)
-    run_visits = max(1, run_depth)
-    total_visits = rec_visits + run_visits
-    
-    rec_uct = rec_score + UCT_EXPLORATION_C * math.sqrt(math.log(total_visits) / rec_visits)
-    run_uct = run_score + UCT_EXPLORATION_C * math.sqrt(math.log(total_visits) / run_visits)
-    
-    return run_uct > rec_uct, True
-
-
-# v35b: Pure helper to build processed candidate dict
-def _build_processed_candidate(
-    node: dict,
-    adjusted_score: float,
-    penalties: list[str],
-    rollout_score: float
-) -> dict[str, Any]:
-    """Build a processed candidate dict for finalize_session. Pure function."""
-    original_score = float(node["posterior_score"])
-    depth = int(node["depth"])
-    final_score = (1 - ROLLOUT_WEIGHT) * adjusted_score + ROLLOUT_WEIGHT * rollout_score
-    
-    return {
-        "node_id": str(node["id"]),
-        "path": node["path"],
-        "content": node["content"],
-        "depth": depth,
-        "prior_score": round(float(node["prior_score"]), 4),
-        "likelihood": round(float(node["likelihood"]), 4),
-        "confidence": round(float(node["prior_score"]) * float(node["likelihood"]), 4),
-        "original_score": round(original_score, 4),
-        "adjusted_score": round(adjusted_score, 4),
-        "rollout_score": round(rollout_score, 4),
-        "final_score": round(final_score, 4),
-        "penalties_applied": penalties
-    }
 
 
 # =============================================================================
