@@ -46,6 +46,31 @@ from reasoning_helpers import (
     DOMAIN_PATTERNS,
 )
 
+from learning_helpers import (
+    parse_terminal_signals,
+    extract_failure_reason,
+    signal_to_outcome,
+    compute_trait_reinforcement,
+    compute_law_success_rate,
+    # Patterns (constants)
+    SUCCESS_PATTERNS,
+    FAILURE_PATTERNS,
+    FAILURE_REASON_PATTERNS,
+)
+
+from interview_helpers import (
+    get_interview_context,
+    extract_domain_from_goal,
+    process_interview_answer,
+    format_question_for_display,
+    compute_interview_progress,
+    extract_hidden_context_from_interview,
+    # Config constants
+    DEFAULT_INTERVIEW_CONFIG,
+    DEFAULT_QUALITY_THRESHOLDS,
+    DOMAIN_KEYWORDS,
+)
+
 # Load environment variables
 load_dotenv()
 
@@ -1891,41 +1916,9 @@ async def get_best_path(session_id: str) -> dict[str, Any]:
 
 
 # =============================================================================
-# Interview Tools - Smart Question Flow (Phase 2)
+# v39: Interview constants and get_interview_context moved to interview_helpers.py
+# - DEFAULT_INTERVIEW_CONFIG, DEFAULT_QUALITY_THRESHOLDS, get_interview_context
 # =============================================================================
-
-DEFAULT_INTERVIEW_CONFIG = {
-    "max_questions": 15,
-    "max_depth": 3,
-    "questions_answered": 0,
-    "questions_remaining": 0
-}
-
-# =============================================================================
-# v20: Adaptive Depth Quality Thresholds
-# =============================================================================
-
-DEFAULT_QUALITY_THRESHOLDS = {
-    "gap_score": 0.10,           # Winner must be ≥10% better than runner-up
-    "critique_coverage": 0.66,   # ≥66% of top candidates must be critiqued
-    "min_depth": 2,              # Must explore at least 2 levels deep
-    "max_confidence_variance": 0.25,  # Variance ≤0.25 for stability
-    "max_iterations": 5          # Safeguard: max expansion cycles
-}
-
-
-def get_interview_context(session_context: dict) -> dict:
-    """Extract or initialize interview context from session."""
-    if not session_context:
-        session_context = {}
-    
-    if "interview" not in session_context:
-        session_context["interview"] = {
-            "config": DEFAULT_INTERVIEW_CONFIG.copy(),
-            "pending_questions": [],
-            "answer_history": []
-        }
-    return session_context["interview"]
 
 
 def archive_interview_to_history(cur, session_id: str, goal: str, interview: dict):
@@ -3847,65 +3840,9 @@ async def record_outcome(
 
 
 # =============================================================================
-# v17a: RLVR Auto-Outcome Detection
+# v39: RLVR patterns moved to learning_helpers.py
+# - SUCCESS_PATTERNS, FAILURE_PATTERNS, FAILURE_REASON_PATTERNS
 # =============================================================================
-
-import re
-
-# Domain-agnostic patterns for success/failure detection
-SUCCESS_PATTERNS = [
-    r'\bPASS(?:ED)?\b',
-    r'\bOK\b',
-    r'\bSUCCESS(?:FUL)?\b',
-    r'✓',
-    r'\bAll tests passed\b',
-    r'\bBuild succeeded\b',
-    r'\bexit code 0\b',
-    r'\b0 failed\b',
-    r'\bno errors\b',
-    r'\bcompleted successfully\b',
-]
-
-FAILURE_PATTERNS = [
-    r'\bFAIL(?:ED|URE)?\b',
-    r'\bERROR\b',
-    r'\bException\b',
-    r'✗',
-    r'\bAssertionError\b',
-    r'\bBuild failed\b',
-    r'exit code [1-9]\d*',
-    r'\bTraceback\b',
-    r'\bSyntaxError\b',
-    r'\bTypeError\b',
-    r'\bValueError\b',
-    r'\bAttributeError\b',
-    r'\bImportError\b',
-    r'\bRuntimeError\b',
-    r'\bCRITICAL\b',
-    r'\bFATAL\b',
-]
-
-# v17b.2: Patterns to extract failure reasons for semantic learning
-# Each pattern has a named group 'reason' to capture the error message
-FAILURE_REASON_PATTERNS = [
-    # Python exceptions with message: "ValueError: invalid literal for int()"
-    r'(?P<type>\w+Error):\s*(?P<reason>.+?)(?:\n|$)',
-    # Python exceptions: "Exception: something went wrong"
-    r'(?P<type>Exception):\s*(?P<reason>.+?)(?:\n|$)',
-    # Assertion failures: "AssertionError: expected X but got Y"
-    r'AssertionError:\s*(?P<reason>.+?)(?:\n|$)',
-    # pytest/jest assertion: "assert x == y" or "Expected X to equal Y"
-    r'(?:assert|Assert)\s+(?P<reason>.+?)(?:\n|$)',
-    r'Expected\s+(?P<reason>.+?)(?:\n|$)',
-    # Build errors: "error: cannot find module 'X'"
-    r'error:\s*(?P<reason>.+?)(?:\n|$)',
-    # Compilation errors: "fatal error: file not found"
-    r'fatal error:\s*(?P<reason>.+?)(?:\n|$)',
-    # npm/node errors: "Error: Cannot find module"
-    r'Error:\s*(?P<reason>.+?)(?:\n|$)',
-    # Generic test failure with name: "FAILED test_foo - reason"
-    r'FAILED\s+\S+\s*[-:]\s*(?P<reason>.+?)(?:\n|$)',
-]
 
 
 @mcp.tool()
