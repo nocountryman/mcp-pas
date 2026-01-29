@@ -2,6 +2,34 @@
 
 All notable changes to PAS (Scientific Reasoning MCP) are documented here.
 
+## [v39] - 2026-01-30
+
+### Added
+- **Modularization Phase 0-2a** - Beginning server.py decomposition
+  - `errors.py` - Standardized exception hierarchy (~200 lines)
+    - `PASError` base class with `to_dict()` for MCP responses
+    - Session, Node, Database, Validation, Quality Gate, Codebase, Sampling errors
+  - `utils.py` - Shared utilities (~185 lines)
+    - `get_db_connection()`, `safe_close_connection()`
+    - `get_embedding()` with lazy model loading
+    - Validation helpers: `validate_uuid()`, `validate_confidence()`, `validate_outcome()`
+    - `detect_negation()` for NLI
+  - `reasoning_helpers.py` - Pure reasoning functions (~310 lines)
+    - `apply_heuristic_penalties()`, `compute_ensemble_prior()`
+    - `compute_decision_quality()`, `apply_uct_tiebreaking()`
+    - `build_processed_candidate()`, `generate_suggested_tags()`
+    - Constants: `HEURISTIC_PENALTIES`, `ROLLOUT_WEIGHT`, `UCT_THRESHOLD`
+
+### Changed
+- `server.py` reduced from 5773 to 5493 lines (-280, 4.8%)
+- Pure helper functions now imported from `reasoning_helpers.py`
+
+### Technical
+- PAS self-analysis session `8fbb42ab` (score: 0.913, quality gate passed)
+- "Logic-Only Module Extraction" pattern: MCP decorators stay in server.py as thin wrappers
+
+---
+
 ## [v38] - 2026-01-29
 
 ### Added
