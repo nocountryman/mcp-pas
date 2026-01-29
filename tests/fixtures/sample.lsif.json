@@ -1,0 +1,56 @@
+[
+    {
+        "id": 1,
+        "type": "vertex",
+        "label": "document",
+        "uri": "file:///home/nocoma/Documents/MCP/PAS/server.py"
+    },
+    {
+        "id": 2,
+        "type": "vertex",
+        "label": "range",
+        "start": {
+            "line": 100,
+            "character": 0
+        },
+        "end": {
+            "line": 100,
+            "character": 20
+        }
+    },
+    {
+        "id": 3,
+        "type": "vertex",
+        "label": "range",
+        "start": {
+            "line": 200,
+            "character": 0
+        },
+        "end": {
+            "line": 200,
+            "character": 15
+        }
+    },
+    {
+        "id": 4,
+        "type": "edge",
+        "label": "contains",
+        "outV": 1,
+        "inVs": [
+            2,
+            3
+        ]
+    },
+    {
+        "id": 5,
+        "type": "vertex",
+        "label": "referenceResult"
+    },
+    {
+        "id": 6,
+        "type": "edge",
+        "label": "textDocument/references",
+        "outV": 2,
+        "inV": 5
+    }
+]

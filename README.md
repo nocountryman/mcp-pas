@@ -7,7 +7,7 @@ A Model Context Protocol (MCP) server that brings structured, Bayesian reasoning
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-blue)](https://modelcontextprotocol.io)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/downloads/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16+-blue.svg)](https://www.postgresql.org/)
-[![Version](https://img.shields.io/badge/version-v32-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v38-orange.svg)](CHANGELOG.md)
 
 ---
 
@@ -36,6 +36,8 @@ Instead of producing a single answer, PAS builds a **reasoning tree** where each
 | **RLVR Self-Learning** | Auto-detect success/failure from terminal output |
 | **Session Tagging** | Organize sessions with tags for retrieval |
 | **Past Failures Surfacing** | Learn from similar past failures during critique |
+| **Live Code Navigation** | Find references/definitions via Jedi (v38) |
+| **Symbol Suggestions** | Auto-suggest symbols during hypothesis generation |
 
 ---
 
@@ -89,6 +91,16 @@ Instead of producing a single answer, PAS builds a **reasoning tree** where each
 | `refresh_law_weights` | Update law weights based on outcomes |
 | `log_conversation` | Store user input for semantic search |
 | `search_conversation_log` | Find past context by similarity |
+
+### Code Navigation (v38)
+| Tool | Description |
+|------|-------------|
+| `sync_project` | Index a project for symbol search |
+| `query_codebase` | Semantic search over indexed files |
+| `find_references` | Find all references to a symbol (live Jedi) |
+| `go_to_definition` | Jump to symbol definition |
+| `call_hierarchy` | Build caller/callee tree |
+| `import_lsif` | Import LSIF index (optional fallback) |
 
 ---
 
@@ -269,7 +281,7 @@ PAS includes 15+ established laws to ground reasoning:
 
 See [CHANGELOG.md](CHANGELOG.md) for version history.
 
-Current version: **v32**
+Current version: **v38**
 
 ---
 

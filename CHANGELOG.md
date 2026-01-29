@@ -2,6 +2,68 @@
 
 All notable changes to PAS (Scientific Reasoning MCP) are documented here.
 
+## [v38] - 2026-01-29
+
+### Added
+- **LSIF Integration** - Precision code navigation via Language Server Index Format
+  - `import_lsif(project_id, lsif_path)` - Import LSIF JSON from Pyright
+  - `find_references(project_id, symbol_name)` - Find all references to a symbol
+  - `go_to_definition(project_id, file, line)` - Jump to symbol definition
+  - `call_hierarchy(project_id, symbol_name, direction)` - Build caller/callee tree
+  - New `symbol_references` table with 4 indexes for fast querying
+  - Batch insert (1000/batch) for large codebases
+
+- **v38b: Live Jedi Integration** - Always-fresh references without regeneration
+  - `find_references` now uses live Jedi analysis (no LSIF needed)
+  - Automatic fallback to LSIF if Jedi fails
+  - Returns `source: "jedi"` or `source: "lsif"` to indicate data source
+  - Added `jedi` to requirements.txt
+
+- **v38c: Semi-Auto Reference Integration** - Symbol suggestions in prepare_expansion
+  - Added optional `project_id` parameter to `prepare_expansion`
+  - Extracts snake_case/CamelCase patterns from goal/parent text
+  - Validates against `file_symbols` table (requires synced project)
+  - Returns `suggested_lookups` array with symbol, file, line for agent to explore
+  - Explicit instruction nudge: "⚠️ SUGGESTED: Before generating hypotheses, call find_references..."
+  - Added Rule 7 to GEMINI.md for enforcement
+  - PAS session `8abf2f83` passed quality gate (score: 0.9615)
+
+
+### Discovered
+- **Pyright lacks LSIF export** - Neither pip nor npm pyright has `--outputtype lsif`
+  - Logged as partial outcome in session `bf627e62`
+
+
+
+---
+
+## [v37] - 2026-01-29
+
+
+### Enforced
+- **Mandatory Sequential Gap Analysis** - `prepare_sequential_analysis` + `store_sequential_analysis` must be called before `finalize_session`
+  - Adversarial (critique) + Constructive (gaps) = complete analysis
+  - 5-layer gap check: CODE, DEPENDENCIES, DATA FLOW, INTERFACES, WORKFLOWS
+  - `skip_sequential_analysis=True` for explicit opt-out (like `skip_quality_gate`)
+  - Persists `sequential_analyzed` flag in thought_nodes metadata
+
+### Fixed
+- **Interview `choices` KeyError** - `get_next_question` no longer fails when question lacks `choices` field
+  - Added `choices: []` to historical questions in `identify_gaps`
+  - Defensive `.get("choices", [])` in `get_next_question`
+
+---
+
+## [v36] - 2026-01-29
+
+### Added
+- **Externalized Config** - Quality gate params in `config.yaml`
+  - `load_config()` loads from YAML, env vars override (e.g., `PAS_QUALITY_GATE_MIN_SCORE_THRESHOLD`)
+  - `PAS_CONFIG` global loaded at startup
+  - `finalize_session` now uses config defaults instead of hardcoded values
+
+---
+
 ## [v35] - 2026-01-29
 
 ### Added
@@ -12,6 +74,37 @@ All notable changes to PAS (Scientific Reasoning MCP) are documented here.
 ### Changed
 - **Complexity Reduction** - Average 15.75 → 13.74 (↓13%)
 - **Type Safety** - mypy errors 53 → 3 (↓94%)
+
+---
+
+## [v35c] - 2026-01-29
+
+### Changed
+- **Quality Gate Tuning** - Lowered `min_gap_threshold` from 0.10 to 0.08
+  - v32b planning consistently hit ~0.08 gap with thorough exploration
+  - 0.10 was too strict for practical use
+
+---
+
+## [v32] - 2026-01-29
+
+### Added
+- **Dynamic Failure Pattern Discovery** - Patterns now stored in database
+  - New `failure_patterns` table: pattern_name, keywords, warning_text, auto_derived
+  - `_search_relevant_failures()` queries DB instead of hardcoded dict
+  - Fallback to legacy dict if DB unavailable
+  - Seeded with 4 patterns: SCHEMA_BEFORE_CODE, RESTART_BEFORE_VERIFY, ENV_CHECK_FIRST, RESPECT_QUALITY_GATE
+
+---
+
+## [v32b] - 2026-01-29
+
+### Added
+- **Warning Persistence** - `finalize_session` now surfaces past failure warnings
+  - Dual-source search: goal + recommendation content
+  - Dedupe by pattern, add to `warnings_surfaced` array
+  - **Prepend ⚠️ items to `implementation_checklist`**
+  - Agent gets both structured data AND visible checklist items
 
 ---
 

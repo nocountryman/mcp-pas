@@ -1,0 +1,16 @@
+# PAS Configuration
+# Quality gate parameters - modify without code changes
+
+quality_gate:
+  min_score_threshold: 0.9
+  min_gap_threshold: 0.08  # v35c: lowered from 0.10
+
+# Failure surfacing thresholds
+failure_surfacing:
+  semantic_threshold: 0.55
+  max_warnings: 3
+
+# Session defaults
+session:
+  max_depth: 10
+  default_top_n: 3

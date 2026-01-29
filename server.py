@@ -33,6 +33,73 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pas-server")
 
 # =============================================================================
+# v36: Configuration Management
+# =============================================================================
+
+import yaml
+from pathlib import Path
+
+def load_config() -> dict:
+    """Load configuration from config.yaml, with env var overrides."""
+    config_path = Path(__file__).parent / "config.yaml"
+    
+    # Default config (fallback if file doesn't exist)
+    config = {
+        "quality_gate": {
+            "min_score_threshold": 0.9,
+            "min_gap_threshold": 0.08,
+        },
+        "failure_surfacing": {
+            "semantic_threshold": 0.55,
+            "max_warnings": 3,
+        },
+        "session": {
+            "max_depth": 10,
+            "default_top_n": 3,
+        }
+    }
+    
+    # Load from YAML file if exists
+    if config_path.exists():
+        try:
+            with open(config_path, 'r') as f:
+                file_config = yaml.safe_load(f)
+                if file_config:
+                    # Deep merge
+                    for section, values in file_config.items():
+                        if section in config and isinstance(values, dict):
+                            config[section].update(values)
+                        else:
+                            config[section] = values
+            logger.info(f"Loaded config from {config_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load config.yaml: {e}, using defaults")
+    
+    # Env var overrides (e.g., PAS_QUALITY_GATE_MIN_SCORE_THRESHOLD=0.85)
+    for section, values in config.items():
+        if isinstance(values, dict):
+            for key, default in values.items():
+                env_key = f"PAS_{section.upper()}_{key.upper()}"
+                env_val = os.getenv(env_key)
+                if env_val:
+                    try:
+                        # Type coercion based on default type
+                        if isinstance(default, float):
+                            config[section][key] = float(env_val)
+                        elif isinstance(default, int):
+                            config[section][key] = int(env_val)
+                        else:
+                            config[section][key] = env_val
+                        logger.info(f"Config override: {env_key}={env_val}")
+                    except ValueError:
+                        pass
+    
+    return config
+
+# Global config - loaded once at startup
+PAS_CONFIG = load_config()
+
+# =============================================================================
 # Database Connection
 # =============================================================================
 
@@ -147,31 +214,14 @@ CONSTITUTIONAL_PRINCIPLES = [
 
 # =============================================================================
 # v31: Past Failure Surfacing - Keyword Patterns
-# =============================================================================
-
-# Derived from actual outcome_records failures
+# v32: Legacy fallback - kept for offline mode only
+# Primary source is now failure_patterns table
 KEYWORD_FAILURE_PATTERNS: dict[str, tuple[str, str]] = {
-    # SCHEMA_BEFORE_CODE pattern
     'schema': ('SCHEMA_BEFORE_CODE', 'Run schema migration before deploying code changes'),
     'table': ('SCHEMA_BEFORE_CODE', 'Verify table exists in database before querying'),
-    'column': ('SCHEMA_BEFORE_CODE', 'Check column exists before referencing in code'),
-    'migration': ('SCHEMA_BEFORE_CODE', 'Apply database migrations before testing'),
-    'alter': ('SCHEMA_BEFORE_CODE', 'Database schema change requires migration first'),
-    
-    # RESTART_BEFORE_VERIFY pattern
     'restart': ('RESTART_BEFORE_VERIFY', 'Restart MCP server after code changes'),
-    'mcp': ('RESTART_BEFORE_VERIFY', 'MCP server needs restart to pick up new tools'),
-    'server': ('RESTART_BEFORE_VERIFY', 'Server restart may be needed after changes'),
-    
-    # ENV_CHECK_FIRST pattern
-    'venv': ('ENV_CHECK_FIRST', 'Verify .venv exists and is activated before pip commands'),
-    'pip': ('ENV_CHECK_FIRST', 'Use project venv for pip installs, not system Python'),
-    'install': ('ENV_CHECK_FIRST', 'Check virtual environment before installing packages'),
-    
-    # RESPECT_QUALITY_GATE pattern
+    'venv': ('ENV_CHECK_FIRST', 'Verify .venv exists and is activated'),
     'quality': ('RESPECT_QUALITY_GATE', 'Do not skip quality gate checks'),
-    'threshold': ('RESPECT_QUALITY_GATE', 'Respect score/gap thresholds before proceeding'),
-    'gate': ('RESPECT_QUALITY_GATE', 'Quality gate must pass before implementation'),
 }
 
 
@@ -181,28 +231,60 @@ def _search_relevant_failures(
     limit: int = 3
 ) -> list[dict]:
     """
-    v31: Search for past failures relevant to the given text.
+    v32: Search for past failures relevant to the given text.
     
     Combines:
-    1. Semantic search on failure_reason_embedding
-    2. Keyword pattern matching for deterministic warnings
+    1. Keyword pattern matching from failure_patterns table (or fallback dict)
+    2. Semantic search on failure_reason_embedding
     
     Returns list of warnings with source and details.
     """
     warnings = []
     text_lower = text.lower()
-    
-    # Part 1: Keyword pattern matching (fast, deterministic)
     seen_patterns: set[str] = set()
-    for keyword, (pattern, warning_text) in KEYWORD_FAILURE_PATTERNS.items():
-        if keyword in text_lower and pattern not in seen_patterns:
-            warnings.append({
-                'pattern': pattern,
-                'source': 'keyword',
-                'warning': warning_text,
-                'triggered_by': keyword
-            })
-            seen_patterns.add(pattern)
+    
+    # Part 1: Keyword pattern matching from DB (v32) or fallback dict
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # v32: Query failure_patterns table
+        cur.execute("""
+            SELECT pattern_name, keywords, warning_text
+            FROM failure_patterns
+            WHERE enabled = true
+        """)
+        
+        for row in cur.fetchall():
+            pattern_name = row['pattern_name']
+            keywords = row['keywords']  # TEXT[] array
+            warning_text = row['warning_text']
+            
+            # Check if any keyword matches
+            for keyword in keywords:
+                if keyword.lower() in text_lower and pattern_name not in seen_patterns:
+                    warnings.append({
+                        'pattern': pattern_name,
+                        'source': 'keyword',
+                        'warning': warning_text,
+                        'triggered_by': keyword
+                    })
+                    seen_patterns.add(pattern_name)
+                    break
+        
+        safe_close_connection(conn)
+    except Exception as e:
+        logger.warning(f"v32 DB pattern lookup failed, using fallback: {e}")
+        # Fallback to hardcoded dict
+        for keyword, (pattern, warning_text) in KEYWORD_FAILURE_PATTERNS.items():
+            if keyword in text_lower and pattern not in seen_patterns:
+                warnings.append({
+                    'pattern': pattern,
+                    'source': 'keyword',
+                    'warning': warning_text,
+                    'triggered_by': keyword
+                })
+                seen_patterns.add(pattern)
     
     # Part 2: Semantic search (broader, probabilistic)
     if len(warnings) < limit:
@@ -679,7 +761,11 @@ def get_embedding(text: str) -> list[float]:
 
 
 @mcp.tool()
-async def prepare_expansion(session_id: str, parent_node_id: str | None = None) -> dict[str, Any]:
+async def prepare_expansion(
+    session_id: str,
+    parent_node_id: str | None = None,
+    project_id: Optional[str] = None  # v38c: For symbol suggestion lookups
+) -> dict[str, Any]:
     """
     Prepare context for thought expansion. Returns parent content, session goal, 
     and relevant scientific laws so the LLM can generate hypotheses.
@@ -689,10 +775,12 @@ async def prepare_expansion(session_id: str, parent_node_id: str | None = None) 
     Args:
         session_id: The reasoning session UUID
         parent_node_id: Parent thought UUID (None to expand from root/goal)
+        project_id: Optional project ID for symbol suggestions (v38c)
         
     Returns:
         Context dict with parent_content, goal, relevant_laws for hypothesis generation
     """
+
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -851,7 +939,66 @@ async def prepare_expansion(session_id: str, parent_node_id: str | None = None) 
             response["past_failure_warnings"] = past_failure_warnings
             logger.info(f"v31: Surfaced {len(past_failure_warnings)} failure warning(s)")
         
+        # =====================================================================
+        # v38c: Semi-Auto Reference Integration
+        # Extract symbol patterns from goal/parent and suggest lookups
+        # =====================================================================
+        if project_id:
+            try:
+                import re
+                # Extract snake_case and CamelCase patterns from text
+                text_to_search = f"{session['goal']} {parent_content}"
+                
+                # Pattern for Python identifiers (snake_case and CamelCase)
+                # Must have at least one underscore OR be CamelCase with 2+ capital letters
+                snake_pattern = r'\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b'  # snake_case
+                camel_pattern = r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b'    # CamelCase
+                
+                candidates = set()
+                candidates.update(re.findall(snake_pattern, text_to_search))
+                candidates.update(re.findall(camel_pattern, text_to_search))
+                
+                # Remove common false positives
+                false_positives = {'should_be', 'will_be', 'may_be', 'can_be', 'must_be'}
+                candidates = candidates - false_positives
+                
+                if candidates:
+                    # Validate against file_symbols table
+                    cur.execute(
+                        """
+                        SELECT fs.symbol_name, fr.file_path, fs.line_start
+                        FROM file_symbols fs
+                        JOIN file_registry fr ON fs.file_id = fr.id
+                        WHERE fr.project_id = %s AND fs.symbol_name = ANY(%s)
+                        ORDER BY fs.symbol_name, fr.file_path
+                        LIMIT 20
+                        """,
+                        (project_id, list(candidates))
+                    )
+                    
+                    symbol_rows = cur.fetchall()
+                    if symbol_rows:
+                        suggested_lookups = []
+                        for row in symbol_rows:
+                            suggested_lookups.append({
+                                "symbol": row["symbol_name"],
+                                "file": row["file_path"],
+                                "line": row["line_start"],
+                                "match_type": "exact"
+                            })
+                        response["suggested_lookups"] = suggested_lookups
+                        
+                        # v38c: Add explicit instruction to call find_references
+                        symbol_names = [s["symbol"] for s in suggested_lookups[:3]]
+                        response["instructions"] += f"\n\n⚠️ SUGGESTED: Before generating hypotheses, call find_references(project_id='{project_id}', symbol_name='...') for: {', '.join(symbol_names)}. This will show all callers/usages to inform your scope."
+                        
+                        logger.info(f"v38c: Found {len(suggested_lookups)} symbol suggestions for project {project_id}")
+            except Exception as e:
+                logger.warning(f"v38c: Symbol suggestion failed (non-fatal): {e}")
+        
         return response
+
+
         
     except Exception as e:
         logger.error(f"prepare_expansion failed: {e}")
@@ -1595,6 +1742,20 @@ async def store_sequential_analysis(
             threshold = len(parsed_results) * 0.5
             systemic_gaps = [g for g, c in gap_counts.items() if c >= threshold]
         
+        # v37: Mark nodes as sequential_analyzed in DB for finalize_session check
+        conn = get_db_connection()
+        cur = conn.cursor()
+        for result in parsed_results:
+            node_id = result.get("node_id")
+            if node_id:
+                cur.execute("""
+                    UPDATE thought_nodes 
+                    SET metadata = COALESCE(metadata, '{}'::jsonb) || '{"sequential_analyzed": "true"}'::jsonb
+                    WHERE id = %s
+                """, (node_id,))
+        conn.commit()
+        safe_close_connection(conn)
+        
         logger.info(f"v32: Stored sequential analysis - {len(parsed_results)} candidates, {len(systemic_gaps)} systemic gaps")
         
         return {
@@ -1882,6 +2043,7 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
                         "id": f"hist_{len(historical_questions)+1}",
                         "question_text": f"A similar goal '{row['goal'][:50]}...' failed because: {reason[:100]}. How will you address this?",
                         "question_type": "open",
+                        "choices": [],  # v37 FIX: Required for get_next_question
                         "priority": 5,  # High priority - show first
                         "depth": 1,
                         "depends_on": [],
@@ -2183,7 +2345,7 @@ async def get_next_question(session_id: str) -> dict[str, Any]:
                         "id": q["id"],
                         "text": q["question_text"],
                         "type": q.get("question_type", "single_choice"),
-                        "choices": q["choices"]
+                        "choices": q.get("choices", [])  # v37 FIX: Defensive access
                     }
                 }
         
@@ -3041,11 +3203,13 @@ async def finalize_session(
     terminal_output: Optional[str] = None,  # v17b: RLVR auto-record
     # v31b: Exhaustive gap check (sequential-thinking style)
     exhaustive_check: bool = True,
-    # v31d: Quality thresholds
-    min_score_threshold: float = 0.9,
-    min_gap_threshold: float = 0.1,
+    # v36: Quality thresholds from config (defaults from PAS_CONFIG)
+    min_score_threshold: Optional[float] = None,
+    min_gap_threshold: Optional[float] = None,
     # v33: Quality gate enforcement (opt-out, not opt-in)
-    skip_quality_gate: bool = False
+    skip_quality_gate: bool = False,
+    # v37: Sequential analysis enforcement (opt-out, not opt-in)
+    skip_sequential_analysis: bool = False
 ) -> dict[str, Any]:
     """
     Finalize a reasoning session by auto-critiquing top hypotheses.
@@ -3060,13 +3224,40 @@ async def finalize_session(
         terminal_output: v17b - Raw terminal output to auto-parse and record outcome
         exhaustive_check: v31b - Run layer-by-layer gap analysis on recommendation
         min_score_threshold: v31d - Minimum score required (default: 0.9)
-        min_gap_threshold: v31d - Minimum gap between top candidates (default: 0.1)
+        min_gap_threshold: v31d - Minimum gap between top candidates (default: 0.08)
         skip_quality_gate: v33 - If True, bypass enforcement (for debugging only)
+        skip_sequential_analysis: v37 - If True, skip sequential gap analysis check
         
     Returns:
         Final recommendation with adjusted score and decision quality
     """
     try:
+        # v37: Enforce sequential analysis (hard gate with override)
+        if not skip_sequential_analysis:
+            # Check if store_sequential_analysis was called for this session
+            conn_check = get_db_connection()
+            cur_check = conn_check.cursor()
+            cur_check.execute(
+                "SELECT COUNT(*) as cnt FROM thought_nodes WHERE session_id = %s AND metadata->>'sequential_analyzed' = 'true'",
+                (session_id,)
+            )
+            result = cur_check.fetchone()
+            safe_close_connection(conn_check)
+            
+            # If no sequential analysis found, block
+            if not result or result['cnt'] == 0:
+                return {
+                    "success": False,
+                    "sequential_analysis_required": True,
+                    "error": "Sequential gap analysis not done. Call prepare_sequential_analysis + store_sequential_analysis first, or pass skip_sequential_analysis=True to bypass.",
+                    "next_step": f"mcp_pas-server_prepare_sequential_analysis(session_id='{session_id}', top_n=3)"
+                }
+
+        # v36: Apply config defaults if not provided
+        if min_score_threshold is None:
+            min_score_threshold = PAS_CONFIG["quality_gate"]["min_score_threshold"]
+        if min_gap_threshold is None:
+            min_gap_threshold = PAS_CONFIG["quality_gate"]["min_gap_threshold"]
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -3274,6 +3465,36 @@ async def finalize_session(
             "[ ] Verify changes work as expected"
         ])
         
+        # =====================================================================
+        # v32b: Warning Persistence - Dual-Source Search with Checklist Injection
+        # Search BOTH goal and recommendation, dedupe, inject into checklist
+        # =====================================================================
+        warnings_surfaced: list[dict[str, Any]] = []
+        try:
+            # Search goal for warnings
+            goal_warnings = _search_relevant_failures(session["goal"])
+            # Search recommendation content for warnings  
+            rec_warnings = _search_relevant_failures(recommendation["content"])
+            
+            # Dedupe by pattern
+            seen_patterns: set[str] = set()
+            for w in goal_warnings + rec_warnings:
+                pattern = w.get("pattern", "")
+                if pattern and pattern not in seen_patterns:
+                    seen_patterns.add(pattern)
+                    warnings_surfaced.append(w)
+            
+            # Prepend ⚠️ items to implementation_checklist
+            for w in reversed(warnings_surfaced):
+                pattern = w.get("pattern", "UNKNOWN")
+                warning_text = w.get("warning", "Review this warning")
+                implementation_checklist.insert(0, f"[ ] ⚠️ {pattern}: {warning_text}")
+            
+            if warnings_surfaced:
+                logger.info(f"v32b: Surfaced {len(warnings_surfaced)} warning(s) in finalize_session")
+        except Exception as e:
+            logger.warning(f"v32b warning surfacing failed: {e}")
+        
         # v26/v35b: Suggest tags based on goal and recommendation (using pure helper)
         suggested_tags: list[str] = []
         try:
@@ -3476,6 +3697,7 @@ Focus on OMISSIONS, not flaws.""",
             "next_step": next_step,
             "outcome_prompt": outcome_prompt if not rlvr_result else None,  # v17b: suppress if auto-recorded
             "implementation_checklist": implementation_checklist,
+            "warnings_surfaced": warnings_surfaced,  # v32b: past failure warnings found
             "scope_guidance": scope_guidance,  # v15b
             "rlvr_result": rlvr_result,  # v17b: auto-outcome detection result
             # v20: Adaptive depth quality metrics
@@ -4671,13 +4893,15 @@ def _compute_file_hash(file_path: Path) -> str:
 def _extract_symbols(content: str, language: str) -> list[dict]:
     """Extract function/class symbols using tree-sitter."""
     try:
-        import tree_sitter_languages
+        # v37b: Package renamed from tree_sitter_languages to tree_sitter_language_pack
+        import tree_sitter_language_pack as ts_pack
+        from tree_sitter import Parser
     except ImportError:
-        logger.warning("tree-sitter-languages not installed, skipping symbol extraction")
+        logger.warning("tree-sitter-language-pack not installed, skipping symbol extraction")
         return []
     
     try:
-        parser = tree_sitter_languages.get_parser(language)
+        parser = Parser(ts_pack.get_language(language))
         tree = parser.parse(content.encode())
         
         symbols = []
@@ -5047,8 +5271,474 @@ async def query_codebase(
 
 
 # =============================================================================
+# v38: LSIF Integration Tools
+# =============================================================================
+
+
+@mcp.tool()
+async def import_lsif(
+    project_id: str,
+    lsif_path: str,
+    clear_existing: bool = True
+) -> dict[str, Any]:
+    """
+    Import LSIF index for precision code navigation.
+
+    LSIF (Language Server Index Format) provides pre-computed references,
+    definitions, and call hierarchies. Generate with: pyright --outputtype lsif
+
+    Args:
+        project_id: Project identifier for isolation
+        lsif_path: Absolute path to LSIF JSON file
+        clear_existing: If True, delete existing references for project first
+
+    Returns:
+        Import stats with count of references imported
+    """
+    import json as json_module
+    from pathlib import Path as PathLib
+    
+    try:
+        # Validate file exists
+        path = PathLib(lsif_path)
+        if not path.exists():
+            return {"success": False, "error": f"File not found: {lsif_path}"}
+        
+        if not path.suffix.lower() == '.json':
+            return {"success": False, "error": "LSIF file must be JSON format"}
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Clear existing if requested
+        if clear_existing:
+            cur.execute(
+                "DELETE FROM symbol_references WHERE project_id = %s",
+                (project_id,)
+            )
+            deleted = cur.rowcount
+        else:
+            deleted = 0
+        
+        # Parse LSIF file
+        with open(path, 'r') as f:
+            lsif_data = json_module.load(f)
+        
+        if not isinstance(lsif_data, list):
+            return {"success": False, "error": "Invalid LSIF format: expected array"}
+        
+        # Build lookup tables for vertices
+        documents = {}  # id -> uri
+        ranges = {}     # id -> {start: {line, char}, end: ...}
+        
+        # First pass: collect vertices
+        for item in lsif_data:
+            if item.get('type') != 'vertex':
+                continue
+            
+            vid = item.get('id')
+            label = item.get('label')
+            
+            if label == 'document':
+                documents[vid] = item.get('uri', '')
+            elif label == 'range':
+                ranges[vid] = {
+                    'start': item.get('start', {}),
+                    'end': item.get('end', {})
+                }
+        
+        # Second pass: collect edges and build references
+        references_list = []
+        range_to_doc = {}
+        
+        for item in lsif_data:
+            if item.get('type') != 'edge':
+                continue
+            
+            label = item.get('label')
+            
+            if label == 'contains':
+                out_v = item.get('outV')
+                in_vs = item.get('inVs', [])
+                if out_v in documents:
+                    for range_id in in_vs:
+                        range_to_doc[range_id] = out_v
+            
+            elif label == 'textDocument/references':
+                out_v = item.get('outV')
+                in_v = item.get('inV')
+                if out_v in ranges and in_v:
+                    references_list.append({
+                        'source_range': out_v,
+                        'result_id': in_v
+                    })
+        
+        # Batch insert references
+        inserted = 0
+        batch = []
+        
+        for ref in references_list:
+            source_range = ranges.get(ref['source_range'])
+            if not source_range:
+                continue
+            
+            source_doc_id = range_to_doc.get(ref['source_range'])
+            source_file = documents.get(source_doc_id, 'unknown')
+            source_line = source_range.get('start', {}).get('line', 0)
+            source_symbol = f"range_{ref['source_range']}"
+            
+            batch.append((
+                project_id, source_file, source_line, source_symbol,
+                None, None, source_file, source_line, source_symbol, 'reference'
+            ))
+            
+            if len(batch) >= 1000:
+                cur.executemany(
+                    """
+                    INSERT INTO symbol_references 
+                    (project_id, source_file, source_line, source_symbol, 
+                     symbol_qualified_name, symbol_type, target_file, target_line, 
+                     target_symbol, relation_type)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    batch
+                )
+                inserted += len(batch)
+                batch = []
+        
+        if batch:
+            cur.executemany(
+                """
+                INSERT INTO symbol_references 
+                (project_id, source_file, source_line, source_symbol, 
+                 symbol_qualified_name, symbol_type, target_file, target_line, 
+                 target_symbol, relation_type)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                batch
+            )
+            inserted += len(batch)
+        
+        conn.commit()
+        
+        return {
+            "success": True,
+            "project_id": project_id,
+            "deleted_existing": deleted,
+            "references_imported": inserted,
+            "documents_found": len(documents),
+            "ranges_parsed": len(ranges),
+            "message": f"Imported {inserted} references from {len(documents)} documents"
+        }
+        
+    except Exception as e:
+        if 'conn' in locals():
+            conn.rollback()
+        logger.error(f"import_lsif failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def find_references(
+    project_id: str,
+    symbol_name: str,
+    include_definitions: bool = False
+) -> dict[str, Any]:
+    """
+    Find all references to a symbol in the codebase.
+
+    Args:
+        project_id: Project identifier
+        symbol_name: Symbol to find references for (partial match supported)
+        include_definitions: If True, also include definitions
+
+    Returns:
+        List of locations where symbol is referenced
+    """
+    from pathlib import Path as PathLib
+    
+    # v38b: Try live Jedi first (always fresh), fall back to LSIF
+    references = []
+    source_used = "jedi"
+    
+    try:
+        import jedi
+        
+        # Get files from file_registry
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT file_path FROM file_registry WHERE project_id = %s AND file_path LIKE %s",
+            (project_id, "%.py")
+        )
+        rows = cur.fetchall()
+        if not rows:
+            safe_close_connection(conn)
+            return {"success": False, "error": f"No Python files found for project '{project_id}'"}
+        
+        rel_paths = [r['file_path'] for r in rows]
+        safe_close_connection(conn)
+        
+        # Try to find project root by checking if relative paths exist from cwd
+        # This is a heuristic - assumes cwd is project root or files are absolute
+        project_root = None
+        for potential_root in [PathLib.cwd(), PathLib.home()]:
+            test_path = potential_root / rel_paths[0]
+            if test_path.exists():
+                project_root = potential_root
+                break
+        
+        # If not found, check common paths
+        if not project_root:
+            # Check if paths might already be absolute
+            if PathLib(rel_paths[0]).exists():
+                project_root = PathLib("")  # Empty means paths are absolute
+            else:
+                # Last resort: try deriving from project_id
+                # mcp-pas often means /home/*/Documents/MCP/PAS
+                possible_roots = [
+                    PathLib("/home") / "nocoma" / "Documents" / "MCP" / "PAS",
+                ]
+                for root in possible_roots:
+                    if (root / rel_paths[0]).exists():
+                        project_root = root
+                        break
+        
+        if not project_root:
+            source_used = "lsif"
+            # Fall through to LSIF fallback
+        else:
+            # Search each Python file for symbol references using Jedi
+            for rel_path in rel_paths:
+                file_path = project_root / rel_path if project_root else PathLib(rel_path)
+                
+                if not file_path.exists():
+                    continue
+                
+                try:
+                    with open(file_path, 'r') as f:
+                        source = f.read()
+                    
+                    script = jedi.Script(source, path=file_path)
+                    
+                    # Use string search to find lines with symbol, then use Jedi
+                    for i, line in enumerate(source.splitlines(), 1):
+                        if symbol_name in line:
+                            col = line.find(symbol_name)
+                            if col >= 0:
+                                try:
+                                    refs = script.get_references(line=i, column=col, scope='file')
+                                    for ref in refs:
+                                        if ref.name == symbol_name:
+                                            references.append({
+                                                "file": str(file_path),
+                                                "line": ref.line,
+                                                "symbol": ref.name,
+                                                "relation": "definition" if ref.is_definition() else "reference"
+                                            })
+                                    break  # Found refs for this file
+                                except Exception:
+                                    continue
+                except Exception:
+                    continue
+
+        
+        # Deduplicate
+        seen = set()
+        unique_refs = []
+        for ref in references:
+            key = (ref['file'], ref['line'], ref['symbol'])
+            if key not in seen:
+                seen.add(key)
+                if include_definitions or ref['relation'] != 'definition':
+                    unique_refs.append(ref)
+        references = unique_refs
+        
+    except ImportError:
+        source_used = "lsif"
+        # Fall back to LSIF if Jedi not available
+        pass
+    except Exception as e:
+        logger.warning(f"Jedi analysis failed, falling back to LSIF: {e}")
+        source_used = "lsif"
+    
+    # If Jedi found nothing or failed, try LSIF
+    if not references and source_used == "lsif":
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            relation_filter = "IN ('reference', 'definition')" if include_definitions else "= 'reference'"
+            
+            cur.execute(
+                f"""
+                SELECT source_file, source_line, source_symbol, 
+                       symbol_qualified_name, symbol_type, relation_type
+                FROM symbol_references
+                WHERE project_id = %s
+                  AND (source_symbol ILIKE %s OR symbol_qualified_name ILIKE %s)
+                  AND relation_type {relation_filter}
+                ORDER BY source_file, source_line
+                LIMIT 100
+                """,
+                (project_id, f"%{symbol_name}%", f"%{symbol_name}%")
+            )
+            
+            rows = cur.fetchall()
+            references = [{"file": r['source_file'], "line": r['source_line'], 
+                           "symbol": r['source_symbol'], "relation": r['relation_type']} for r in rows]
+            
+        except Exception as e:
+            logger.error(f"find_references LSIF fallback failed: {e}")
+            return {"success": False, "error": str(e)}
+        finally:
+            if 'conn' in locals():
+                safe_close_connection(conn)
+    
+    if not references:
+        return {
+            "success": True, "project_id": project_id, "symbol_name": symbol_name,
+            "references": [], "count": 0, "source": source_used,
+            "note": "No references found. Ensure project is synced with sync_project."
+        }
+    
+    return {"success": True, "project_id": project_id, "symbol_name": symbol_name,
+            "references": references[:100], "count": len(references), "source": source_used}
+
+
+
+@mcp.tool()
+async def go_to_definition(
+    project_id: str,
+    file_path: str,
+    line: int,
+    column: int = 0
+) -> dict[str, Any]:
+    """
+    Jump to the definition of a symbol at a given location.
+
+    Args:
+        project_id: Project identifier
+        file_path: File containing the reference
+        line: Line number (0-indexed)
+        column: Column number (0-indexed, optional)
+
+    Returns:
+        Definition location if found
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute(
+            """
+            SELECT target_file, target_line, target_symbol, symbol_qualified_name, symbol_type
+            FROM symbol_references
+            WHERE project_id = %s AND source_file LIKE %s AND source_line = %s
+              AND relation_type = 'definition'
+            LIMIT 1
+            """,
+            (project_id, f"%{file_path}%", line)
+        )
+        
+        row = cur.fetchone()
+        
+        if not row:
+            return {"success": True, "project_id": project_id,
+                    "location": {"file": file_path, "line": line},
+                    "definition": None, "note": "No definition found in LSIF index."}
+        
+        return {"success": True, "project_id": project_id,
+                "location": {"file": file_path, "line": line},
+                "definition": {"file": row['target_file'], "line": row['target_line'],
+                               "symbol": row['target_symbol']}}
+        
+    except Exception as e:
+        logger.error(f"go_to_definition failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def call_hierarchy(
+    project_id: str,
+    symbol_name: str,
+    direction: str = "incoming",
+    max_depth: int = 3
+) -> dict[str, Any]:
+    """
+    Build call hierarchy for a symbol.
+
+    Args:
+        project_id: Project identifier
+        symbol_name: Symbol to analyze
+        direction: "incoming" (callers) or "outgoing" (callees)
+        max_depth: Maximum depth to traverse (default 3)
+
+    Returns:
+        Hierarchical tree of callers or callees
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        if direction not in ("incoming", "outgoing"):
+            return {"success": False, "error": "direction must be 'incoming' or 'outgoing'"}
+        
+        if direction == "incoming":
+            cur.execute(
+                """
+                SELECT source_file, source_line, source_symbol,
+                       target_file, target_line, target_symbol
+                FROM symbol_references
+                WHERE project_id = %s AND target_symbol ILIKE %s AND relation_type = 'call'
+                ORDER BY source_file, source_line LIMIT 50
+                """,
+                (project_id, f"%{symbol_name}%")
+            )
+        else:
+            cur.execute(
+                """
+                SELECT source_file, source_line, source_symbol,
+                       target_file, target_line, target_symbol
+                FROM symbol_references
+                WHERE project_id = %s AND source_symbol ILIKE %s AND relation_type = 'call'
+                ORDER BY target_file, target_line LIMIT 50
+                """,
+                (project_id, f"%{symbol_name}%")
+            )
+        
+        rows = cur.fetchall()
+        
+        if not rows:
+            return {"success": True, "project_id": project_id, "symbol_name": symbol_name,
+                    "direction": direction, "hierarchy": [], "count": 0,
+                    "note": "No call hierarchy found in LSIF data."}
+        
+        hierarchy = [{"caller": {"file": r['source_file'], "line": r['source_line'], "symbol": r['source_symbol']},
+                      "callee": {"file": r['target_file'], "line": r['target_line'], "symbol": r['target_symbol']}} 
+                     for r in rows]
+        
+        return {"success": True, "project_id": project_id, "symbol_name": symbol_name,
+                "direction": direction, "hierarchy": hierarchy, "count": len(hierarchy)}
+        
+    except Exception as e:
+        logger.error(f"call_hierarchy failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+# =============================================================================
 # Entry Point
 # =============================================================================
+
 
 
 def main():

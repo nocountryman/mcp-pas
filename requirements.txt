@@ -4,4 +4,6 @@ pgvector
 pydantic
 numpy
 sentence-transformers
-tree-sitter-languages>=1.10.0
+tree-sitter-language-pack>=0.13.0
+pyyaml>=6.0
+jedi

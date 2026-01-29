@@ -136,3 +136,85 @@ You **MUST** explain why you are proceeding with an unverified recommendation:
 ```
 
 > **v33 Change**: Quality gate is now enforced by default (opt-out, not opt-in).
+
+---
+
+## Rule 6: Mandatory Sequential Gap Analysis 🔍 (v37)
+
+**Before calling `finalize_session`, you MUST run constructive gap analysis:**
+
+```python
+# REQUIRED before finalize_session
+mcp_pas-server_prepare_sequential_analysis(session_id="...", top_n=3)
+# Process each prompt, then store results
+mcp_pas-server_store_sequential_analysis(session_id="...", results="[...]")
+# NOW you can finalize
+mcp_pas-server_finalize_session(session_id="...")
+```
+
+### Why This Matters
+
+| Approach | Mode | Question |
+|----------|------|----------|
+| **PAS Critique** | Adversarial | "What's wrong?" |
+| **Sequential Analysis** | Constructive | "What's missing?" |
+
+Both are needed. Critique finds flaws. Sequential analysis finds gaps.
+
+### The 5-Layer Gap Check
+
+Sequential analysis asks about each layer:
+1. **CODE STRUCTURE**: What code changes are needed?
+2. **DEPENDENCIES**: What packages/systems are assumed?
+3. **DATA FLOW**: What data moves where?
+4. **INTERFACES**: What APIs/contracts are affected?
+5. **WORKFLOWS**: What user/system flows change?
+
+### Skip Criteria
+
+Only skip sequential analysis if:
+- Trivial change (< 10 lines, single file)
+- User explicitly says "just do it"
+- You document why you're skipping
+
+> **v37 Change**: Sequential gap analysis is now mandatory for PAS planning.
+
+---
+
+## Rule 7: Use Symbol Lookups for Scope Accuracy 🔍 (v38c)
+
+**When `prepare_expansion` returns `suggested_lookups`, call `find_references` BEFORE generating hypotheses.**
+
+### Why This Matters
+
+`suggested_lookups` contains symbols extracted from your goal/parent text that exist in the synced project. Calling `find_references` on these symbols reveals:
+- How many places use the symbol
+- Which files would be affected by changes
+- Accurate scope for your hypotheses
+
+### Workflow
+
+```python
+# 1. Call prepare_expansion with project_id
+result = mcp_pas-server_prepare_expansion(session_id="...", project_id="mcp-pas")
+
+# 2. If suggested_lookups present, explore them
+if result.get("suggested_lookups"):
+    for lookup in result["suggested_lookups"]:
+        refs = mcp_pas-server_find_references(
+            project_id="mcp-pas", 
+            symbol_name=lookup["symbol"]
+        )
+        # Now you know the impact scope
+
+# 3. Generate hypotheses with informed scope
+```
+
+### Skip Criteria
+
+- No `suggested_lookups` in response (no symbols found)
+- `project_id` not provided to `prepare_expansion`
+- Trivial change where scope is obvious
+
+> **TODO**: Integrate into `/pas-planning` workflow for explicit enforcement.
+

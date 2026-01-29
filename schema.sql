@@ -92,6 +92,9 @@ CREATE TABLE thought_nodes (
     -- Semantic embedding for similarity search
     embedding       vector(768),
     
+    -- v37: Flexible metadata storage (e.g., sequential_analyzed flag)
+    metadata        JSONB DEFAULT '{}'::jsonb,
+    
     -- References to supporting laws
     supporting_laws INTEGER[] DEFAULT '{}',
     
@@ -233,8 +236,39 @@ CREATE INDEX IF NOT EXISTS idx_critique_accuracy_session
 CREATE INDEX IF NOT EXISTS idx_critique_accuracy_persona 
     ON critique_accuracy(persona);
 
+-- ============================================================================
+-- Table: failure_patterns (v32)
+-- Stores keyword patterns for failure warning surfacing
+-- Auto-derived patterns can be learned from recorded failures
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS failure_patterns (
+    id              SERIAL PRIMARY KEY,
+    pattern_name    VARCHAR(100) NOT NULL UNIQUE,
+    keywords        TEXT[] NOT NULL,  -- words that trigger this pattern
+    warning_text    TEXT NOT NULL,
+    auto_derived    BOOLEAN DEFAULT false,  -- true if ML-generated
+    source_count    INTEGER DEFAULT 1,  -- how many failures contributed
+    enabled         BOOLEAN DEFAULT true,
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
 
--- Table: outcome_records
+-- Seed with current KEYWORD_FAILURE_PATTERNS from v31
+INSERT INTO failure_patterns (pattern_name, keywords, warning_text, auto_derived) VALUES
+('SCHEMA_BEFORE_CODE', ARRAY['schema', 'table', 'column', 'migration', 'database'], 
+ 'Run schema migration before deploying code changes', false),
+('RESTART_BEFORE_VERIFY', ARRAY['restart', 'reload', 'refresh', 'server'], 
+ 'Restart server after config changes', false),
+('ENV_CHECK_FIRST', ARRAY['env', 'environment', 'config', 'variable', 'secret'], 
+ 'Verify environment variables are set', false),
+('RESPECT_QUALITY_GATE', ARRAY['quality', 'gate', 'threshold', 'score'], 
+ 'Pass quality gate before proceeding', false)
+ON CONFLICT (pattern_name) DO NOTHING;
+
+CREATE INDEX IF NOT EXISTS idx_failure_patterns_keywords 
+    ON failure_patterns USING gin (keywords);
+
+
 -- Tracks session outcomes for learning
 CREATE TABLE IF NOT EXISTS outcome_records (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -684,3 +718,40 @@ CREATE INDEX IF NOT EXISTS idx_file_symbols_file
 
 CREATE INDEX IF NOT EXISTS idx_file_symbols_type
     ON file_symbols(symbol_type);
+
+-- v38: symbol_references: LSIF-imported cross-file references
+CREATE TABLE IF NOT EXISTS symbol_references (
+    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id            TEXT NOT NULL,
+    
+    -- Source location (where the reference appears)
+    source_file           TEXT NOT NULL,
+    source_line           INTEGER NOT NULL,
+    source_symbol         TEXT NOT NULL,
+    symbol_qualified_name TEXT,           -- e.g., 'module.class.method'
+    symbol_type           TEXT CHECK (symbol_type IN ('function','class','method','variable','import')),
+    
+    -- Target location (what is being referenced)
+    target_file           TEXT NOT NULL,
+    target_line           INTEGER NOT NULL,
+    target_symbol         TEXT NOT NULL,
+    
+    -- Relation type
+    relation_type         TEXT NOT NULL CHECK (relation_type IN ('reference','definition','call')),
+    
+    -- Metadata
+    created_at            TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for efficient querying
+CREATE INDEX IF NOT EXISTS idx_symbol_refs_project
+    ON symbol_references(project_id);
+
+CREATE INDEX IF NOT EXISTS idx_symbol_refs_qualified
+    ON symbol_references(project_id, symbol_qualified_name);
+
+CREATE INDEX IF NOT EXISTS idx_symbol_refs_source
+    ON symbol_references(project_id, source_symbol);
+
+CREATE INDEX IF NOT EXISTS idx_symbol_refs_target
+    ON symbol_references(project_id, target_symbol);
