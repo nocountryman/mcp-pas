@@ -1073,7 +1073,10 @@ async def store_expansion(
 
 
 @mcp.tool()
-async def prepare_critique(node_id: str) -> dict[str, Any]:
+async def prepare_critique(
+    node_id: str,
+    critique_mode: str = "standard"  # v31a: 'standard' or 'negative_space'
+) -> dict[str, Any]:
     """
     Prepare context for critiquing a thought node. Returns node content and 
     supporting laws so the LLM can generate counterarguments.
@@ -1082,10 +1085,12 @@ async def prepare_critique(node_id: str) -> dict[str, Any]:
     
     Args:
         node_id: The thought node UUID to critique
+        critique_mode: v31a - 'standard' (what's wrong?) or 'negative_space' (what's missing?)
         
     Returns:
         Context dict with node_content, supporting_laws for critique generation
     """
+
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -1114,8 +1119,38 @@ async def prepare_critique(node_id: str) -> dict[str, Any]:
                 })
         
         # v16c: LLM Critique Synthesis - generate suggested critique
+        # v31a: Support critique_mode for different critique perspectives
         suggested_critique = None
-        try:
+        negative_space_gaps = None  # v31a: Gaps found in negative_space mode
+        
+        # v31a: Select prompt based on critique mode
+        if critique_mode == "negative_space":
+            critique_prompt = f"""Analyze what this hypothesis does NOT address:
+
+Hypothesis: {node["content"]}
+
+Session Goal: {node["goal"]}
+
+For EACH component of the goal, answer:
+1. Is this component fully addressed by the hypothesis?
+2. What aspects are MISSING or assumed?
+3. What adjacent concerns are NOT considered?
+
+Return ONLY a valid JSON object:
+{{
+  "gaps": [
+    {{"component": "...", "addressed": true/false, "missing": "what's not covered"}},
+    ...
+  ],
+  "blind_spots": ["things taken for granted"],
+  "boundary_issues": ["where the hypothesis ends but the goal continues"],
+  "overall_coverage": 0.8
+}}
+
+Focus on OMISSIONS, not flaws in what IS proposed."""
+            system = "You are a gap analyst. Find what's MISSING, not what's wrong. Return only valid JSON."
+        else:
+            # Standard critique mode (existing behavior)
             critique_prompt = f"""Critique this hypothesis:
 {node["content"]}
 
@@ -1133,27 +1168,19 @@ Return ONLY a valid JSON object:
 }}
 
 Be specific and constructive. Focus on what could go wrong."""
-            
-            response = await mcp.request_context.session.create_message(
-                CreateMessageRequestParams(
-                    messages=[SamplingMessage(role="user", content=TextContent(type="text", text=critique_prompt))],
-                    max_tokens=500,
-                    system_prompt="You are a hypothesis critic. Return only valid JSON."
-                )
-            )
-            
-            if response and response.content and response.content.text:
-                response_text = response.content.text.strip()
-                # Handle markdown code blocks
-                if response_text.startswith("```"):
-                    response_text = response_text.split("```")[1]
-                    if response_text.startswith("json"):
-                        response_text = response_text[4:]
-                    response_text = response_text.strip()
-                suggested_critique = json.loads(response_text)
-                logger.info(f"v16c: Generated suggested critique for node {node_id}")
-        except Exception as e:
-            logger.warning(f"v16c critique generation failed: {e}")
+            system = "You are a hypothesis critic. Return only valid JSON."
+
+        
+        # v32 FIX: MCP sampling not supported by clients
+        # Instead of calling LLM directly, return prompts for agent to process
+        # Agent will call LLM externally and pass results to store_critique
+        llm_prompt = {
+            "prompt": critique_prompt,
+            "system": system,
+            "expected_format": "JSON object with counterargument/severity/flaws" if critique_mode == "standard" else "JSON object with gaps/blind_spots/boundary_issues"
+        }
+        logger.info(f"v32: Returning prompt for agent to process (mode: {critique_mode})")
+
         
         # v27: Surface past failures matching this hypothesis content
         past_failures = []
@@ -1182,30 +1209,54 @@ Be specific and constructive. Focus on what could go wrong."""
         except Exception as e:
             logger.warning(f"v27 past_failures lookup failed: {e}")
         
+        # v29: Assumption Surfacing - return prompt for client LLM to extract assumptions
+        # NOTE: MCP sampling via create_message is not supported by all clients,
+        # so we return the prompt for the calling LLM to process directly
+        assumption_extraction_prompt = f"""Analyze this hypothesis and extract 2-3 IMPLICIT ASSUMPTIONS that must be true for it to work:
+
+Hypothesis: {node["content"]}
+
+For each assumption, answer:
+1. What is the assumption? (something taken for granted)
+2. When could this assumption be FALSE? (challenge it)
+3. What happens if this assumption fails? (the risk)
+
+Focus on hidden dependencies, preconditions, and things taken for granted.
+Format your response as a numbered list."""
+        
+
         return {
             "success": True,
             "node_id": node_id,
             "path": node["path"],
             "node_content": node["content"],
             "session_goal": node["goal"],
+            # v31a: Include critique mode used
+            "critique_mode": critique_mode,
             "current_scores": {
                 "prior": float(node["prior_score"]),
                 "likelihood": float(node["likelihood"]),
                 "posterior": float(node["posterior_score"]) if node["posterior_score"] else None
             },
             "supporting_laws": laws_text,
-            # v16c: LLM-generated critique suggestion
-            "suggested_critique": suggested_critique,
+            # v32: LLM prompt for agent to process (replaces broken MCP sampling)
+            "llm_prompt": llm_prompt,
+            # v16c/v31a: These are now populated by agent after processing llm_prompt
+            "suggested_critique": None,
+            "negative_space_gaps": None,
             # v27: Past failures matching this hypothesis
             "past_failures": past_failures,
-            # v14c.1: Enhanced instructions with failure mode guidance
-            "instructions": "Challenge this hypothesis. Use the failure_modes from supporting laws as targeted challenge prompts. What could go wrong? What would make it STRONGER? Generate critique with counterargument and severity_score (0.0-1.0). Call store_critique(node_id=..., counterargument=..., severity_score=..., logical_flaws='flaw1, flaw2', edge_cases='case1, case2').",
+            # v29: Assumption Surfacing - prompt for client LLM to extract and challenge assumptions
+            "assumption_extraction_prompt": assumption_extraction_prompt,
+            # v32: Updated instructions for two-step workflow
+            "instructions": f"Process the llm_prompt to generate critique. Mode: {critique_mode}. After generating, call store_critique(node_id='{node_id}', counterargument=..., severity_score=..., logical_flaws='...', edge_cases='...').",
             # v9b: Constitutional Principles for structured critique
             "constitutional_principles": CONSTITUTIONAL_PRINCIPLES,
             # v10b: Critic Ensemble Personas
             "critic_personas": CRITIC_PERSONAS,
             "aggregation_guidance": AGGREGATION_GUIDANCE
         }
+
         
     except Exception as e:
         logger.error(f"prepare_critique failed: {e}")
@@ -1319,6 +1370,149 @@ async def store_critique(
     finally:
         if 'conn' in locals():
             safe_close_connection(conn)
+
+
+@mcp.tool()
+async def prepare_sequential_analysis(
+    session_id: str,
+    top_n: int = 5
+) -> dict[str, Any]:
+    """
+    v32: Prepare adversarial gap analysis prompts for top candidates.
+    
+    Returns prompts for agent to process. Agent should analyze each
+    candidate and call store_sequential_analysis with results.
+    
+    Args:
+        session_id: The reasoning session UUID
+        top_n: Number of top candidates to analyze (max 5)
+        
+    Returns:
+        Prompts for each candidate for agent to process
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Get session goal
+        cur.execute(
+            "SELECT goal FROM reasoning_sessions WHERE id = %s",
+            (session_id,)
+        )
+        session = cur.fetchone()
+        if not session:
+            return {"success": False, "error": "Session not found"}
+        
+        # Get top candidates
+        cur.execute(
+            """
+            SELECT id, content, posterior_score
+            FROM thought_nodes
+            WHERE session_id = %s AND node_type = 'hypothesis'
+            ORDER BY posterior_score DESC
+            LIMIT %s
+            """,
+            (session_id, min(top_n, 5))
+        )
+        candidates = cur.fetchall()
+        
+        if not candidates:
+            return {"success": False, "error": "No candidates to analyze"}
+        
+        # v32 FIX: Return prompts for agent to process (no MCP sampling)
+        candidate_prompts = []
+        for candidate in candidates:
+            seq_prompt = f"""What gaps exist between this hypothesis and the goal?
+
+GOAL: {session["goal"]}
+HYPOTHESIS: {candidate["content"]}
+
+Return ONLY valid JSON:
+{{"gaps": ["gap1", "gap2"], "revisions_needed": ["revision1"]}}
+
+Focus on what's MISSING, not what's wrong."""
+            
+            candidate_prompts.append({
+                "node_id": str(candidate["id"]),
+                "content": candidate["content"][:100],
+                "score": float(candidate["posterior_score"]) if candidate["posterior_score"] else 0.0,
+                "prompt": seq_prompt
+            })
+        
+        logger.info(f"v32: Returning {len(candidate_prompts)} prompts for sequential analysis")
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "system_prompt": "Find what's MISSING. Be adversarial. Return only valid JSON.",
+            "candidate_prompts": candidate_prompts,
+            "instructions": f"Process each prompt and call store_sequential_analysis(session_id='{session_id}', results='[{{\"node_id\": \"...\", \"gaps\": [...], \"revisions_needed\": [...]}}]')"
+        }
+        
+    except Exception as e:
+        logger.error(f"prepare_sequential_analysis failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def store_sequential_analysis(
+    session_id: str,
+    results: str  # JSON array: [{"node_id": "...", "gaps": [...], "revisions_needed": [...]}]
+) -> dict[str, Any]:
+    """
+    v32: Store sequential analysis results from agent.
+    
+    Called after agent processes prompts from prepare_sequential_analysis.
+    Aggregates systemic gaps and stores for finalize_session.
+    
+    Args:
+        session_id: The reasoning session UUID
+        results: JSON array of gap analysis per candidate
+        
+    Returns:
+        Confirmation with systemic gaps detected
+    """
+    try:
+        # Parse results
+        parsed_results = json.loads(results)
+        
+        if not isinstance(parsed_results, list):
+            return {"success": False, "error": "results must be a JSON array"}
+        
+        # Collect all gaps for systemic detection
+        all_gaps = []
+        for result in parsed_results:
+            gaps = result.get("gaps", [])
+            if isinstance(gaps, list):
+                all_gaps.extend(gaps)
+        
+        # Detect systemic gaps (>50% candidates have same gap)
+        systemic_gaps = []
+        if all_gaps and len(parsed_results) > 1:
+            from collections import Counter
+            gap_counts = Counter(all_gaps)
+            threshold = len(parsed_results) * 0.5
+            systemic_gaps = [g for g, c in gap_counts.items() if c >= threshold]
+        
+        logger.info(f"v32: Stored sequential analysis - {len(parsed_results)} candidates, {len(systemic_gaps)} systemic gaps")
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "candidates_analyzed": len(parsed_results),
+            "sequential_analysis": parsed_results,
+            "systemic_gaps": systemic_gaps,
+            "next_step": f"Call finalize_session(session_id='{session_id}')"
+        }
+        
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Invalid JSON: {e}"}
+    except Exception as e:
+        logger.error(f"store_sequential_analysis failed: {e}")
+        return {"success": False, "error": str(e)}
 
 
 @mcp.tool()
@@ -1752,45 +1946,19 @@ Return format:
 
 Return [] if goal is specific enough. Return ONLY the JSON array."""
             
-            # Use sampling to generate questions
-            from mcp.types import SamplingMessage, TextContent
-            response = await mcp.request_context.session.create_message(
-                CreateMessageRequestParams(
-                    messages=[SamplingMessage(role="user", content=TextContent(type="text", text=goal_prompt))],
-                    max_tokens=1000,
-                    system_prompt="You are a structured question generator. Return only valid JSON arrays."
-                )
-            )
+            # v32 FIX: MCP sampling not supported by clients
+            # Return prompt for agent to process - agent stores questions via store_gaps_questions
+            llm_question_prompt = {
+                "prompt": goal_prompt,
+                "system": "You are a structured question generator. Return only valid JSON arrays.",
+                "max_questions": 3
+            }
+            logger.info(f"v32: Returning question generation prompt for agent")
             
-            if response and response.content and response.content.text:
-                # Try to parse JSON from response
-                import json as json_parser
-                response_text = response.content.text.strip()
-                # Handle potential markdown code blocks
-                if response_text.startswith("```"):
-                    response_text = response_text.split("```")[1]
-                    if response_text.startswith("json"):
-                        response_text = response_text[4:]
-                    response_text = response_text.strip()
-                
-                parsed = json_parser.loads(response_text)
-                for i, q in enumerate(parsed[:3]):  # Limit to 3 questions
-                    goal_questions.append({
-                        "id": f"goal_{i+1}",
-                        "question_text": q.get("question_text", ""),
-                        "question_type": "single_choice",
-                        "choices": q.get("choices", []),
-                        "priority": 3 + i,  # Priority 3-5, after historical but before generic
-                        "depth": 1,
-                        "depends_on": [],
-                        "follow_up_rules": [],
-                        "answered": False,
-                        "answer": None,
-                        "source": "goal_derived"
-                    })
-                logger.info(f"v16d.1: Generated {len(goal_questions)} goal-derived questions")
+            # Don't wait for LLM - just return the prompt for agent to process
+            # Agent will call store_gaps_questions after processing
         except Exception as e:
-            logger.warning(f"v16d.1 goal question generation failed: {e}")
+            logger.warning(f"v16d.1 goal question prompt setup failed: {e}")
         
         # v19: Prefer domain questions over LLM-generated questions
         # Priority: 1) domain dimensions, 2) goal-derived LLM, 3) catch-all
@@ -2457,7 +2625,12 @@ async def finalize_session(
     session_id: str,
     top_n: int = 3,
     deep_critique: bool = False,
-    terminal_output: str = None  # v17b: RLVR auto-record
+    terminal_output: str = None,  # v17b: RLVR auto-record
+    # v31b: Exhaustive gap check (sequential-thinking style)
+    exhaustive_check: bool = True,
+    # v31d: Quality thresholds
+    min_score_threshold: float = 0.9,
+    min_gap_threshold: float = 0.1
 ) -> dict[str, Any]:
     """
     Finalize a reasoning session by auto-critiquing top hypotheses.
@@ -2470,11 +2643,15 @@ async def finalize_session(
         top_n: Number of top candidates to consider (default: 3)
         deep_critique: If True, returns critique requests for LLM
         terminal_output: v17b - Raw terminal output to auto-parse and record outcome
+        exhaustive_check: v31b - Run layer-by-layer gap analysis on recommendation
+        min_score_threshold: v31d - Minimum score required (default: 0.9)
+        min_gap_threshold: v31d - Minimum gap between top candidates (default: 0.1)
         
     Returns:
         Final recommendation with adjusted score and decision quality
     """
     try:
+
         conn = get_db_connection()
         cur = conn.cursor()
         
@@ -2856,6 +3033,78 @@ async def finalize_session(
                 logger.warning(f"v17b RLVR auto-record failed: {e}")
                 rlvr_result = {"success": False, "error": str(e)}
         
+        # v31b: Exhaustive Check - layer-by-layer gap analysis
+        # v32 FIX: MCP sampling not supported - return prompt for agent to process
+        exhaustive_gaps = None
+        exhaustive_prompt = None
+        if exhaustive_check and recommendation:
+            exhaustive_prompt = {
+                "prompt": f"""Analyze this recommendation for what it does NOT address:
+
+Recommendation: {recommendation["content"]}
+Goal: {session["goal"]}
+
+For EACH of these layers, identify what's covered vs missing:
+1. CODE STRUCTURE: What code changes are needed? Any not mentioned?
+2. DEPENDENCIES: What packages/systems are assumed but not stated?
+3. DATA FLOW: What data moves where? Any gaps in the data path?
+4. INTERFACES: What APIs/contracts are affected? Any missing?
+5. WORKFLOWS: What user/system flows change? Any not addressed?
+
+Return ONLY a valid JSON object:
+{{
+  "gaps": [
+    {{"layer": "...", "covered": "...", "missing": "..."}}
+  ],
+  "critical_gaps": ["gaps that could cause failure"],
+  "overall_coverage": 0.8
+}}
+
+Focus on OMISSIONS, not flaws.""",
+                "system": "You are a gap analyst. Find what's MISSING, not what's wrong. Return only valid JSON.",
+                "instructions": "Process this prompt and review the gaps. If critical gaps found, consider deepening your analysis."
+            }
+            logger.info(f"v32: Returning exhaustive_prompt for agent to process")
+
+        
+        # v32: Sequential analysis moved to run_sequential_analysis tool
+        # Call run_sequential_analysis(session_id) BEFORE finalize_session for gap analysis
+        sequential_analysis = []  # Populated by run_sequential_analysis if called
+        systemic_gaps = []
+        
+        # v31d: Quality Gate - check score and gap thresholds
+        winner_score = recommendation["adjusted_score"]
+        runner_up_score = runner_up["adjusted_score"] if runner_up else 0.0
+        gap = winner_score - runner_up_score if runner_up else 1.0
+        
+        quality_gate = {
+            "score": round(winner_score, 4),
+            "score_threshold": min_score_threshold,
+            "score_ok": winner_score >= min_score_threshold,
+            "gap": round(gap, 4),
+            "gap_threshold": min_gap_threshold,
+            "gap_ok": gap >= min_gap_threshold,
+            "passed": winner_score >= min_score_threshold and gap >= min_gap_threshold
+        }
+        
+        # v31e: Score Improvement Suggestions
+        score_improvement_suggestions = []
+        if not quality_gate["passed"]:
+            if not quality_gate["score_ok"]:
+                score_improvement_suggestions.append({
+                    "lever": "score",
+                    "current": round(winner_score, 3),
+                    "threshold": min_score_threshold,
+                    "action": "Expand deeper with higher confidence (0.9+) or address critique penalties"
+                })
+            if not quality_gate["gap_ok"]:
+                score_improvement_suggestions.append({
+                    "lever": "gap",
+                    "current": round(gap, 3),
+                    "threshold": min_gap_threshold,
+                    "action": "Explore more diverse alternatives to differentiate the best solution"
+                })
+        
         return {
             "success": True,
             "session_id": session_id,
@@ -2885,8 +3134,19 @@ async def finalize_session(
             "quality_breakdown": quality_result["metrics"],
             "deepen_suggestions": quality_result["suggestions"] if not quality_result["sufficient"] else [],
             # v26: Suggested tags for session organization
-            "suggested_tags": suggested_tags
+            "suggested_tags": suggested_tags,
+            # v31b/v32: Exhaustive gap check - prompt for agent to process if needed
+            "exhaustive_gaps": exhaustive_gaps,
+            "exhaustive_prompt": exhaustive_prompt,  # v32: LLM prompt for agent to process
+            # v31d: Quality gate (score + gap thresholds)
+            "quality_gate": quality_gate,
+            # v31e: How to improve if gate not passed
+            "score_improvement_suggestions": score_improvement_suggestions,
+            # v32: Always-on sequential analysis
+            "sequential_analysis": sequential_analysis,
+            "systemic_gaps": systemic_gaps
         }
+
 
         
     except Exception as e:

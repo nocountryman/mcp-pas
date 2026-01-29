@@ -7,6 +7,7 @@ A Model Context Protocol (MCP) server that brings structured, Bayesian reasoning
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-blue)](https://modelcontextprotocol.io)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/downloads/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16+-blue.svg)](https://www.postgresql.org/)
+[![Version](https://img.shields.io/badge/version-v32-orange.svg)](CHANGELOG.md)
 
 ---
 
@@ -28,15 +29,17 @@ Instead of producing a single answer, PAS builds a **reasoning tree** where each
 |---------|-------------|
 | **Bayesian Tree of Thoughts** | Build reasoning trees with posterior probability scoring |
 | **Scientific Law Grounding** | 15+ laws (CAP Theorem, Occam's Razor, etc.) inform priors |
-| **Smart Interview Pattern** | Structured Q&A to gather missing context |
-| **Interview Self-Learning** | Archive Q&A patterns for effectiveness analysis |
-| **Auto-Finalization** | Heuristic penalties + comparative critique for decisions |
-| **Self-Learning** | Track outcomes to improve law weights over time |
-| **Session Lifecycle** | Semantic deduplication, continuation, and inheritance |
+| **Quality Gate** | 0.9 score + 0.1 gap thresholds with improvement suggestions |
+| **Negative Space Critique** | Find what's MISSING, not just what's wrong |
+| **Smart Interview Pattern** | Psychology-based Q&A to gather missing context |
+| **Domain Detection** | Auto-detect problem domain for tailored questions |
+| **RLVR Self-Learning** | Auto-detect success/failure from terminal output |
+| **Session Tagging** | Organize sessions with tags for retrieval |
+| **Past Failures Surfacing** | Learn from similar past failures during critique |
 
 ---
 
-## 🛠️ Tools (18 Total)
+## 🛠️ Tools (25+ Total)
 
 ### Session Management
 | Tool | Description |
@@ -46,22 +49,29 @@ Instead of producing a single answer, PAS builds a **reasoning tree** where each
 | `find_or_create_session` | Smart router - finds existing or creates new session |
 | `complete_session` | Explicitly close a session |
 | `resume_session` | Continue a completed session with inheritance |
+| `tag_session` | Add tags for organization |
 
 ### Reasoning (Expand & Critique)
 | Tool | Description |
 |------|-------------|
 | `prepare_expansion` | Get context + relevant laws for hypothesis generation |
-| `store_expansion` | Store 3 hypotheses with Bayesian scoring |
-| `prepare_critique` | Get node context for generating counterarguments |
-| `store_critique` | Store critique and update likelihood scores |
+| `store_expansion` | Store 1-3 hypotheses with Bayesian scoring |
+| `prepare_critique` | Get node context + LLM prompt for counterarguments |
+| `store_critique` | Store critique with tiered penalties (major/minor) |
 | `search_relevant_laws` | Find scientific laws by semantic similarity |
+
+### Sequential Analysis (v32)
+| Tool | Description |
+|------|-------------|
+| `prepare_sequential_analysis` | Get prompts for gap analysis on top candidates |
+| `store_sequential_analysis` | Store gap analysis, detect systemic gaps |
 
 ### Tree Navigation
 | Tool | Description |
 |------|-------------|
 | `get_reasoning_tree` | View full tree structure with scores |
 | `get_best_path` | Find highest-scoring reasoning path |
-| `finalize_session` | Auto-critique top candidates, return recommendation |
+| `finalize_session` | Auto-critique, quality gate, return recommendation |
 
 ### Smart Interview
 | Tool | Description |
@@ -75,13 +85,10 @@ Instead of producing a single answer, PAS builds a **reasoning tree** where each
 | Tool | Description |
 |------|-------------|
 | `record_outcome` | Record success/failure with attribution |
+| `parse_terminal_output` | Auto-detect success/failure signals |
 | `refresh_law_weights` | Update law weights based on outcomes |
-
-### Analytics (Views)
-| View | Description |
-|------|-------------|
-| `interview_effectiveness` | Question→outcome correlation by domain |
-| `law_domain_stats` | Law success rates per domain |
+| `log_conversation` | Store user input for semantic search |
+| `search_conversation_log` | Find past context by similarity |
 
 ---
 
@@ -97,13 +104,12 @@ Instead of producing a single answer, PAS builds a **reasoning tree** where each
 ### Step 1: Clone & Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/mcp-pas.git
+git clone https://github.com/nocountryman/mcp-pas.git
 cd mcp-pas
 
 # Create virtual environment
 python -m venv .venv
 source .venv/bin/activate  # Linux/Mac
-# .venv\Scripts\activate   # Windows
 
 # Install dependencies
 pip install -r requirements.txt
@@ -122,8 +128,9 @@ sudo -u postgres psql -d mcp_pas -c "CREATE EXTENSION IF NOT EXISTS ltree;"
 # Run schema
 psql -d mcp_pas -f schema.sql
 
-# Seed scientific laws
+# Seed scientific laws and domains
 python seed_laws.py
+python seed_domains_v2.py
 ```
 
 ### Step 3: Environment Configuration
@@ -135,15 +142,16 @@ cp env.template .env
 
 ```env
 DATABASE_URL=postgresql://user:password@localhost:5432/mcp_pas
+OPENAI_API_KEY=sk-...  # For embeddings
 ```
 
 ---
 
 ## 🔌 IDE Integration
 
-### VS Code (with Claude/Gemini Extension)
+### VS Code / Cursor (with Claude/Gemini Extension)
 
-Add to your MCP configuration (`~/.gemini/antigravity/mcp_config.json` or similar):
+Add to your MCP configuration:
 
 ```json
 {
@@ -159,11 +167,7 @@ Add to your MCP configuration (`~/.gemini/antigravity/mcp_config.json` or simila
 }
 ```
 
-### Cursor / Other IDEs
-
-Similar configuration - point to `server.py` with the virtual environment's Python interpreter.
-
-**After configuration**: Restart your IDE for the MCP server to be detected.
+**After configuration**: Restart your IDE (`Ctrl+Shift+P` → Reload Window).
 
 ---
 
@@ -173,79 +177,65 @@ Similar configuration - point to `server.py` with the virtual environment's Pyth
 
 ```
 1. Start session
-   → mcp_pas-server_start_reasoning_session(user_goal="Design a caching layer")
+   → start_reasoning_session(user_goal="Design a caching layer")
 
-2. Expand hypotheses
-   → mcp_pas-server_prepare_expansion(session_id="...")
-   → mcp_pas-server_store_expansion(session_id="...", hypotheses=[...])
+2. Expand hypotheses (3 alternatives)
+   → prepare_expansion(session_id="...")
+   → store_expansion(session_id="...", h1_text="...", h1_confidence=0.85, ...)
 
 3. Critique top hypothesis
-   → mcp_pas-server_prepare_critique(node_id="...")
-   → mcp_pas-server_store_critique(node_id="...", critique={...})
+   → prepare_critique(node_id="...")  # Returns llm_prompt
+   → [Process prompt]
+   → store_critique(node_id="...", counterargument="...", severity_score=0.3)
 
-4. Get recommendation
-   → mcp_pas-server_finalize_session(session_id="...")
+4. Deepen if score < 0.9 or gap < 0.1
+   → store_expansion(parent_node_id="...", h1_text="Improved approach...", h1_confidence=0.95)
+
+5. Get recommendation
+   → finalize_session(session_id="...")
+   # Returns: quality_gate, exhaustive_prompt, recommendation
 ```
 
-### Smart Interview Pattern
+### Quality Gate (v31)
 
-```
-1. Identify knowledge gaps
-   → mcp_pas-server_identify_gaps(session_id="...")
-
-2. Ask questions one at a time
-   → mcp_pas-server_get_next_question(session_id="...")
-   → mcp_pas-server_submit_answer(session_id="...", question_id="...", answer="B")
-
-3. Check completion
-   → mcp_pas-server_check_interview_complete(session_id="...")
-```
-
-### Session Lifecycle
-
-```
-# Smart routing - finds/creates/continues automatically
-→ mcp_pas-server_find_or_create_session(goal_text="Design Dill UI")
-
-# Returns:
-# - action: "existing" (active session found)
-# - action: "continuation" (completed session, new linked session created)
-# - action: "new" (no match, fresh session)
-```
-
----
-
-## 📊 Example Output
+PAS won't accept low-quality decisions:
 
 ```json
 {
-  "recommendation": {
-    "content": "Write-Through Cache with Redis: All writes update both cache and DB...",
-    "original_score": 0.9494,
-    "adjusted_score": 0.9494,
-    "penalties_applied": []
-  },
-  "runner_up": {
-    "content": "In-Memory Cache with TTL...",
-    "adjusted_score": 0.9054
-  },
-  "decision_quality": "medium",
-  "gap_analysis": "Moderate confidence (gap: 0.044)"
+  "quality_gate": {
+    "score": 0.95,
+    "score_threshold": 0.9,
+    "score_ok": true,
+    "gap": 0.12,
+    "gap_threshold": 0.1,
+    "gap_ok": true,
+    "passed": true
+  }
+}
+```
+
+If `passed: false`, PAS suggests how to improve:
+```json
+{
+  "score_improvement_suggestions": [
+    {"lever": "score", "action": "Expand deeper with higher confidence (0.9+)"},
+    {"lever": "gap", "action": "Explore more diverse alternatives"}
+  ]
 }
 ```
 
 ---
 
-## 🧪 Model Compatibility
+## 📊 PAS vs Sequential Thinking
 
-Tested with the following LLM models:
-
-| Model | Status |
-|-------|--------|
-| Claude Opus 4.5 | ✅ Works |
-| Claude Sonnet 4.5 | ✅ Works |
-| Gemini 3 Flash | ✅ Works |
-| Gemini 3 Pro | ⚠️ Tool call format issues |
+| Aspect | Sequential Thinking | PAS |
+|--------|---------------------|-----|
+| Structure | Linear chain | Bayesian Tree |
+| Scoring | None | Prior × Likelihood = Posterior |
+| Self-Critique | None | Tiered penalties |
+| Quality Gate | None | 0.9 score, 0.1 gap |
+| Self-Learning | None | Laws + failure memory |
+| Output | Final thought | Ranked recommendation + gaps |
 
 ---
 
@@ -258,43 +248,28 @@ PAS includes 15+ established laws to ground reasoning:
 - **Conway's Law** - System structure mirrors organization
 - **Hyrum's Law** - All observable behaviors will be depended on
 - **Brooks' Law** - Adding people to late projects makes them later
+- **Amdahl's Law** - Parallel speedup limits
 - **Hofstadter's Law** - It always takes longer than expected
 - *...and more*
 
 ---
 
-## 📊 Benchmark Framework
+## 🧪 Model Compatibility
 
-PAS includes a quality benchmark for comparing LLMs and prompt variants.
+| Model | Status |
+|-------|--------|
+| Claude Opus 4.5 | ✅ Works |
+| Claude Sonnet 4.5 | ✅ Works |
+| Gemini 3 Flash | ✅ Works |
+| Gemini 3 Pro | ⚠️ Tool call format issues |
 
-### Metrics
-| Metric | Weight | Description |
-|--------|--------|-------------|
-| Scope Accuracy | 40% | Jaccard similarity: declared vs expected scope |
-| Hypothesis Relevance | 30% | Embedding similarity to goal |
-| Critique Coverage | 20% | % of hypotheses critiqued |
-| Tree Depth | 10% | Reasoning exploration depth |
+---
 
-### Test Suite (10 cases)
-- **Refactoring** (3): Multi-file scope detection
-- **New Feature** (2): Completeness of considerations
-- **Bug Fix** (2): Root cause identification
-- **API Design** (2): Constraint awareness
-- **Edge Case** (1): Minimal scope (shouldn't over-analyze)
+## 📈 Changelog
 
-### Running Benchmarks
-```bash
-# Run benchmark for a model/variant
-python benchmark_runner.py --model claude-sonnet --variant v1
+See [CHANGELOG.md](CHANGELOG.md) for version history.
 
-# Compare results
-psql -d mcp_pas -c "SELECT * FROM benchmark_summary;"
-```
-
-### Database Views
-| View | Description |
-|------|-------------|
-| `benchmark_summary` | Aggregate scores by model/variant |
+Current version: **v32**
 
 ---
 
@@ -304,8 +279,8 @@ Contributions welcome! Areas of interest:
 
 - Additional scientific laws
 - New reasoning patterns
+- Domain-specific question sets
 - Performance optimizations
-- Documentation improvements
 
 ---
 

@@ -68,3 +68,44 @@ mcp_pas-server_record_outcome(
 | seed scripts | Run script + verify data |
 
 **Never mark complete without empirical evidence.**
+
+---
+
+## Rule 4: Quality Gate for New Features 🚦
+
+**For NEW FEATURES or LARGE WORK, do NOT proceed if decision quality is low.**
+
+### Thresholds
+
+| Work Type | Required Gap | Quality Level |
+|-----------|--------------|---------------|
+| New feature | ≥ 0.1 | High |
+| Large refactor | ≥ 0.1 | High |
+| Schema change | ≥ 0.1 | High |
+| Bug fix | ≥ 0.05 | Medium |
+| Small change | Any | Low OK |
+
+### When Quality is LOW
+
+If `finalize_session` returns `decision_quality: "low"` for a new feature:
+
+1. **DO NOT PROCEED** with implementation
+2. **Follow PAS suggestion**: e.g., "expand_alternatives"
+3. **Generate more hypotheses** until gap ≥ 0.1
+4. **Re-finalize** and verify quality is now HIGH
+
+```python
+# Check quality before proceeding
+result = mcp_pas-server_finalize_session(session_id="...")
+if result["decision_quality"] == "low" and is_new_feature:
+    # DO NOT IMPLEMENT - need more hypotheses
+    # Follow result["deepen_suggestions"]
+```
+
+### Why This Matters
+
+- Low quality = hypotheses too similar or untested
+- Proceeding anyway leads to preventable failures
+- PAS learned this from the v22 duplication bug
+
+> **Mantra**: "If quality is low, more thinking is needed."
