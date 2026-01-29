@@ -71,6 +71,20 @@ from interview_helpers import (
     DOMAIN_KEYWORDS,
 )
 
+from codebase_helpers import (
+    extract_symbols as _extract_symbols,
+    get_language_from_path,
+    should_skip_file,
+    compute_file_hash,
+    derive_project_id,
+    extract_symbol_patterns_from_text,
+    build_reference_summary,
+    # Constants
+    LANGUAGE_MAP,
+    SKIP_EXTENSIONS,
+    SKIP_DIRS,
+)
+
 # Load environment variables
 load_dotenv()
 
@@ -4569,82 +4583,9 @@ def _compute_file_hash(file_path: Path) -> str:
     return hasher.hexdigest()
 
 
-def _extract_symbols(content: str, language: str) -> list[dict]:
-    """Extract function/class symbols using tree-sitter."""
-    try:
-        # v37b: Package renamed from tree_sitter_languages to tree_sitter_language_pack
-        import tree_sitter_language_pack as ts_pack
-        from tree_sitter import Parser
-    except ImportError:
-        logger.warning("tree-sitter-language-pack not installed, skipping symbol extraction")
-        return []
-    
-    try:
-        parser = Parser(ts_pack.get_language(language))
-        tree = parser.parse(content.encode())
-        
-        symbols = []
-        
-        # Walk the tree looking for function/class definitions
-        def walk_node(node, parent_name=None):
-            node_type = node.type
-            
-            # Python-specific
-            if node_type == 'function_definition':
-                name_node = node.child_by_field_name('name')
-                if name_node:
-                    sym = {
-                        'type': 'function',
-                        'name': name_node.text.decode(),
-                        'line_start': node.start_point[0] + 1,
-                        'line_end': node.end_point[0] + 1,
-                        'signature': content[node.start_byte:node.end_byte].split('\n')[0],
-                    }
-                    # Extract docstring if present
-                    if node.child_count > 0:
-                        for child in node.children:
-                            if child.type == 'expression_statement':
-                                expr = child.child(0)
-                                if expr and expr.type == 'string':
-                                    sym['docstring'] = expr.text.decode().strip('"""\'\'\'')
-                                    break
-                    symbols.append(sym)
-            
-            elif node_type == 'class_definition':
-                name_node = node.child_by_field_name('name')
-                if name_node:
-                    sym = {
-                        'type': 'class',
-                        'name': name_node.text.decode(),
-                        'line_start': node.start_point[0] + 1,
-                        'line_end': node.end_point[0] + 1,
-                        'signature': content[node.start_byte:node.end_byte].split('\n')[0],
-                    }
-                    symbols.append(sym)
-            
-            # JavaScript/TypeScript function
-            elif node_type in ('function_declaration', 'method_definition', 'arrow_function'):
-                name_node = node.child_by_field_name('name')
-                if name_node:
-                    symbols.append({
-                        'type': 'function',
-                        'name': name_node.text.decode(),
-                        'line_start': node.start_point[0] + 1,
-                        'line_end': node.end_point[0] + 1,
-                        'signature': content[node.start_byte:node.end_byte].split('\n')[0][:200],
-                    })
-            
-            # Recurse children
-            for child in node.children:
-                walk_node(child, parent_name)
-        
-        walk_node(tree.root_node)
-        return symbols
-        
-    except Exception as e:
-        logger.warning(f"Symbol extraction failed for {language}: {e}")
-        return []
-
+# =============================================================================
+# v39: _extract_symbols moved to codebase_helpers.py
+# =============================================================================
 
 @mcp.tool()
 async def sync_project(
