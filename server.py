@@ -103,6 +103,52 @@ from sessions_helpers import (
     VALID_SESSION_STATES,
 )
 
+# v40: Hybrid synthesis helpers (complementarity detection)
+from hybrid_helpers import (
+    detect_complementarity,
+    synthesize_hypothesis_text,
+    extract_addressed_goals,
+    merge_scopes,
+)
+
+# v40 Phase 1: Purpose inference helpers
+from purpose_helpers import (
+    build_purpose_prompt,
+    parse_purpose_response,
+    validate_purpose_cache,
+    build_purpose_context_entry,
+    summarize_purposes_for_prompt,
+    # v40 Phase 1.5: Module aggregation
+    build_module_aggregation_prompt,
+    parse_module_response,
+)
+
+# v40 Phase 2: Metacognitive 5-stage prompting
+from metacognitive_helpers import (
+    METACOGNITIVE_STAGES,
+    get_stage_info,
+    get_stage_prompt,
+    validate_stage_progression,
+    get_calibration_guidance,
+    format_stage_status,
+)
+
+# v40 Phase 3: CSR Calibration
+from calibration_helpers import (
+    OUTCOME_MAPPING,
+    map_outcome_to_numeric,
+    compute_calibration_stats,
+    format_calibration_for_response,
+)
+
+# v40 Phase 4: Self-Awareness
+from self_awareness_helpers import (
+    ARCHITECTURE_MAP,
+    get_schema_info,
+    get_tool_registry,
+    get_session_statistics,
+)
+
 # Load environment variables
 load_dotenv()
 
@@ -306,20 +352,39 @@ KEYWORD_FAILURE_PATTERNS: dict[str, tuple[str, str]] = {
 def _search_relevant_failures(
     text: str,
     semantic_threshold: float = 0.55,
-    limit: int = 3
+    limit: int = 3,
+    context_type: str = "goal",  # v42b: "goal", "scope", "critique"
+    schema_check_required: bool = False,  # v42b: boost schema failures
+    exclude_ids: set = None  # v42b: deduplication
 ) -> list[dict]:
     """
-    v32: Search for past failures relevant to the given text.
+    v32/v42b: Search for past failures relevant to the given text.
     
     Combines:
     1. Keyword pattern matching from failure_patterns table (or fallback dict)
     2. Semantic search on failure_reason_embedding
     
+    v42b enhancements:
+    - context_type: adjusts threshold (0.45 for scope, 0.55 for goal)
+    - schema_check_required: boosts schema-related failures
+    - exclude_ids: skip already-surfaced warnings for deduplication
+    
     Returns list of warnings with source and details.
     """
+    # v42b: Adjust threshold based on context
+    if context_type == "scope":
+        semantic_threshold = 0.45  # Lower threshold for scope matching
+    
+    # v42b: Boost schema failures when relevant
+    search_text = text
+    if schema_check_required and "schema" not in text.lower():
+        search_text = f"{text} schema table migration CREATE ALTER"
+    
     warnings = []
-    text_lower = text.lower()
+    text_lower = search_text.lower()
     seen_patterns: set[str] = set()
+    exclude_ids = exclude_ids or set()
+
     
     # Part 1: Keyword pattern matching from DB (v32) or fallback dict
     try:
@@ -671,7 +736,10 @@ async def start_reasoning_session(user_goal: str) -> dict[str, Any]:
             "goal": row["goal"],
             "state": row["state"],
             "created_at": row["created_at"].isoformat(),
-            "message": f"Reasoning session started. Use this session_id for subsequent reasoning operations."
+            "message": f"Reasoning session started. Use this session_id for subsequent reasoning operations.",
+            # v40 Phase 2: Metacognitive 5-stage
+            "metacognitive_stage": 0,
+            "first_stage_prompt": get_stage_prompt(1)
         }
         
         if persistent_traits:
@@ -679,6 +747,7 @@ async def start_reasoning_session(user_goal: str) -> dict[str, Any]:
             response["message"] += f" Loaded {len(persistent_traits)} persistent trait(s) from history."
         
         return response
+
         
     except Exception as e:
         logger.error(f"Failed to create session: {e}")
@@ -1074,7 +1143,79 @@ async def prepare_expansion(
             except Exception as e:
                 logger.warning(f"v38c: Symbol suggestion failed (non-fatal): {e}")
         
+        # =====================================================================
+        # v41: Preflight Enforcement - SQL Detection
+        # =====================================================================
+        try:
+            from preflight_helpers import detect_sql_operations, log_tool_call
+            
+            # Detect SQL operations in goal or parent content
+            combined_text = f"{session['goal']} {parent_content}"
+            if detect_sql_operations(combined_text):
+                response["schema_check_required"] = True
+                response["instructions"] += "\n\n⚠️ SQL OPERATIONS DETECTED: Call get_self_awareness() to verify schema before writing SQL queries."
+                logger.info("v41: SQL operations detected, schema_check_required=True")
+            
+            # Log this prepare_expansion call
+            log_tool_call(cur, session_id, "prepare_expansion", {
+                "has_suggested_lookups": "suggested_lookups" in response,
+                "has_failure_warnings": "past_failure_warnings" in response,
+                "schema_check_required": response.get("schema_check_required", False),
+                "has_project_id": project_id is not None  # v42a: Track for preflight
+            })
+            conn.commit()
+        except Exception as e:
+            logger.warning(f"v41: Preflight detection failed (non-fatal): {e}")
+        
+        # =====================================================================
+        # v42a: Auto Semantic Search for Related Modules
+        # Search codebase using goal keywords to surface existing functionality
+        # =====================================================================
+        if project_id:
+            try:
+                goal_text = session["goal"]
+                # Semantic search on file_registry
+                goal_embedding = get_embedding(goal_text[:1000])
+                cur.execute(
+                    """
+                    SELECT file_path, purpose_cache,
+                           1 - (content_embedding <=> %s::vector) as similarity
+                    FROM file_registry
+                    WHERE project_id = %s
+                      AND content_embedding IS NOT NULL
+                    ORDER BY content_embedding <=> %s::vector
+                    LIMIT 5
+                    """,
+                    (goal_embedding, project_id, goal_embedding)
+                )
+                related_rows = cur.fetchall()
+                
+                if related_rows:
+                    related_modules = []
+                    for row in related_rows:
+                        module_info = {
+                            "file": row["file_path"],
+                            "similarity": round(row["similarity"], 3) if row["similarity"] else None
+                        }
+                        # Include purpose if cached
+                        if row.get("purpose_cache"):
+                            try:
+                                import json
+                                cache = row["purpose_cache"] if isinstance(row["purpose_cache"], dict) else json.loads(row["purpose_cache"])
+                                if cache.get("module_purpose"):
+                                    module_info["purpose"] = cache["module_purpose"][:100]
+                            except:
+                                pass
+                        related_modules.append(module_info)
+                    
+                    response["related_modules"] = related_modules
+                    response["instructions"] += f"\n\n📂 EXISTING MODULES FOUND: Review these {len(related_modules)} related files before hypothesizing: " + ", ".join([m['file'] for m in related_modules[:3]])
+                    logger.info(f"v42a: Found {len(related_modules)} related modules for goal")
+            except Exception as e:
+                logger.warning(f"v42a: Auto semantic search failed (non-fatal): {e}")
+        
         return response
+
 
 
         
@@ -1107,7 +1248,9 @@ async def store_expansion(
     revises_node_id: Optional[str] = None,
     # v25: Conversation logging
     source_text: Optional[str] = None,
-    user_id: Optional[str] = None
+    user_id: Optional[str] = None,
+    # v41: Preflight enforcement
+    skip_preflight: bool = False
 ) -> dict[str, Any]:
     """
     Store generated hypotheses with Bayesian scoring.
@@ -1356,6 +1499,112 @@ async def store_expansion(
             conn.rollback()  # Clear any transaction issues
             logger.warning(f"v21: Scope-based failure matching failed: {e}")
         
+        # =====================================================================
+        # v41: Preflight Enforcement Check
+        # =====================================================================
+        preflight_warnings = []
+        preflight_bypassed = False
+        try:
+            from preflight_helpers import check_preflight_conditions, log_tool_call
+            
+            if skip_preflight:
+                # Log bypass for outcome correlation
+                log_tool_call(cur, session_id, "store_expansion_bypass", {"reason": "skip_preflight=True"})
+                preflight_bypassed = True
+                logger.info("v41: Preflight check bypassed via skip_preflight=True")
+            else:
+                # Get preflight context from session metadata
+                cur.execute(
+                    "SELECT call_metadata FROM session_call_log WHERE session_id = %s AND tool_name = 'prepare_expansion' ORDER BY created_at DESC LIMIT 1",
+                    (session_id,)
+                )
+                prep_call = cur.fetchone()
+                
+                if prep_call and prep_call.get("call_metadata"):
+                    import json
+                    metadata = prep_call["call_metadata"] if isinstance(prep_call["call_metadata"], dict) else json.loads(prep_call["call_metadata"])
+                    
+                    # Check conditions
+                    preflight_warnings = check_preflight_conditions(
+                        cur,
+                        session_id,
+                        has_suggested_lookups=bool(metadata.get("has_suggested_lookups")),
+                        schema_check_required=metadata.get("schema_check_required", False),
+                        has_failure_warnings=bool(metadata.get("has_failure_warnings")),
+                        has_project_id=bool(metadata.get("has_project_id"))  # v42a: Codebase research check
+                    )
+                    
+                    if preflight_warnings:
+                        logger.warning(f"v41: Preflight warnings: {[w['type'] for w in preflight_warnings]}")
+            
+            # Log this store_expansion call
+            log_tool_call(cur, session_id, "store_expansion", {
+                "node_count": len(created_nodes),
+                "preflight_bypassed": preflight_bypassed,
+                "preflight_warning_count": len(preflight_warnings)
+            })
+            conn.commit()
+        except Exception as e:
+            logger.warning(f"v41: Preflight check failed (non-fatal): {e}")
+        
+        # =====================================================================
+        # v42b: Scope-Based Failure Surfacing
+        # Search failures against hypothesis declared_scope, not just goal text
+        # =====================================================================
+        scope_failure_warnings = []
+        try:
+            # Get schema_check_required from session call log
+            schema_check = False
+            try:
+                cur.execute(
+                    "SELECT call_metadata FROM session_call_log WHERE session_id = %s AND tool_name = 'prepare_expansion' ORDER BY created_at DESC LIMIT 1",
+                    (session_id,)
+                )
+                prep_call = cur.fetchone()
+                if prep_call and prep_call.get("call_metadata"):
+                    import json
+                    metadata = prep_call["call_metadata"] if isinstance(prep_call["call_metadata"], dict) else json.loads(prep_call["call_metadata"])
+                    schema_check = metadata.get("schema_check_required", False)
+            except:
+                pass
+            
+            # Get already-surfaced warning IDs for deduplication
+            cur.execute("SELECT COALESCE(surfaced_warning_ids, '{}') FROM reasoning_sessions WHERE id = %s", (session_id,))
+            surfaced_row = cur.fetchone()
+            exclude_ids = set(surfaced_row[0]) if surfaced_row and surfaced_row[0] else set()
+            
+            # Search failures for each hypothesis scope
+            new_surfaced_ids = []
+            for node in created_nodes:
+                scope = node.get("declared_scope", "")
+                if scope:
+                    failures = _search_relevant_failures(
+                        scope,
+                        context_type="scope",
+                        schema_check_required=schema_check,
+                        exclude_ids=exclude_ids
+                    )
+                    for f in failures:
+                        f["hypothesis_path"] = node["path"]
+                        f["matched_scope"] = scope
+                        scope_failure_warnings.append(f)
+                        # Track for deduplication (only if has an ID)
+                        if f.get("id"):
+                            new_surfaced_ids.append(f["id"])
+            
+            # Update surfaced_warning_ids for future deduplication
+            if new_surfaced_ids:
+                cur.execute(
+                    "UPDATE reasoning_sessions SET surfaced_warning_ids = COALESCE(surfaced_warning_ids, '{}') || %s WHERE id = %s",
+                    (new_surfaced_ids, session_id)
+                )
+                conn.commit()
+            
+            if scope_failure_warnings:
+                logger.info(f"v42b: Surfaced {len(scope_failure_warnings)} scope-matched failure(s)")
+        except Exception as e:
+            logger.warning(f"v42b: Scope failure surfacing failed (non-fatal): {e}")
+        
         return {
             "success": True, 
             "session_id": session_id, 
@@ -1365,7 +1614,10 @@ async def store_expansion(
             "confidence_nudge": confidence_nudge,
             "revision_info": revision_info,
             "revision_nudge": revision_nudge,
-            "scope_warnings": scope_warnings if scope_warnings else None  # v21: Historical failure warnings
+            "scope_warnings": scope_warnings if scope_warnings else None,  # v21: Historical failure warnings
+            "scope_failure_warnings": scope_failure_warnings if scope_failure_warnings else None,  # v42b: Scope-based surfacing
+            "preflight_warnings": preflight_warnings if preflight_warnings else None,  # v41: Preflight enforcement
+            "preflight_bypassed": preflight_bypassed if preflight_bypassed else None  # v41: Track bypasses
         }
         
     except Exception as e:
@@ -1547,6 +1799,40 @@ For each assumption, answer:
 Focus on hidden dependencies, preconditions, and things taken for granted.
 Format your response as a numbered list."""
         
+        # =====================================================================
+        # v42b: Past Critiques Surfacing
+        # Find critiques from similar hypotheses to inform current critique
+        # =====================================================================
+        past_critiques = []
+        try:
+            node_embedding = get_embedding(node["content"][:1000])
+            cur.execute("""
+                SELECT t.content AS hypothesis, t.critique, t.critique_severity,
+                       1 - (t.embedding <=> %s::vector) as similarity,
+                       s.goal
+                FROM thought_nodes t
+                JOIN reasoning_sessions s ON t.session_id = s.id
+                WHERE t.critique IS NOT NULL
+                  AND t.embedding IS NOT NULL
+                  AND t.id != %s
+                  AND 1 - (t.embedding <=> %s::vector) > 0.65
+                ORDER BY similarity DESC
+                LIMIT 3
+            """, (node_embedding, node_id, node_embedding))
+            
+            for r in cur.fetchall():
+                past_critiques.append({
+                    "similar_hypothesis": r["hypothesis"][:150] + "..." if len(r["hypothesis"]) > 150 else r["hypothesis"],
+                    "critique": r["critique"],
+                    "severity": float(r["critique_severity"]) if r["critique_severity"] else None,
+                    "similarity": round(float(r["similarity"]), 3),
+                    "session_goal": r["goal"][:100]
+                })
+            
+            if past_critiques:
+                logger.info(f"v42b: Found {len(past_critiques)} past critique(s) for similar hypotheses")
+        except Exception as e:
+            logger.warning(f"v42b: Past critiques lookup failed: {e}")
 
         return {
             "success": True,
@@ -3124,6 +3410,33 @@ async def finalize_session(
         # Sort by final score (includes rollout blending)
         processed.sort(key=lambda x: x["final_score"], reverse=True)
         
+        # v40: Complementarity Detection - check if top candidates address different goals
+        complementarity_result = None
+        if len(processed) >= 2:
+            # Build candidate list for complementarity check
+            comp_candidates = [
+                {"content": p["content"], "scope": p.get("declared_scope", "")}
+                for p in processed[:top_n]
+            ]
+            is_complementary, covered_goals, avg_overlap = detect_complementarity(
+                comp_candidates, threshold=0.5
+            )
+            
+            if is_complementary:
+                logger.info(f"v40: Complementarity detected in session {session_id}: {covered_goals}")
+                # Store goals addressed by each candidate
+                for p in processed:
+                    goals = extract_addressed_goals(p["content"], p.get("declared_scope", ""))
+                    p["addressed_goals"] = goals
+                
+                complementarity_result = {
+                    "detected": True,
+                    "covered_goals": covered_goals,
+                    "avg_overlap": round(avg_overlap, 3),
+                    "synthesis_suggestion": "Top candidates are complementary, not competitive. Consider using synthesize_hypotheses() to create a unified approach.",
+                    "synthesis_prompt": synthesize_hypothesis_text(comp_candidates)
+                }
+        
         # Deep critique mode - return requests for LLM
         if deep_critique and len(processed) >= 1:
             critique_requests = []
@@ -3482,13 +3795,740 @@ Focus on OMISSIONS, not flaws.""",
             "score_improvement_suggestions": score_improvement_suggestions,
             # v32: Always-on sequential analysis
             "sequential_analysis": sequential_analysis,
-            "systemic_gaps": systemic_gaps
+            "systemic_gaps": systemic_gaps,
+            # v40: Complementarity detection
+            "complementarity": complementarity_result
         }
 
 
         
     except Exception as e:
         logger.error(f"finalize_session failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+# =============================================================================
+# v40: Hybrid Synthesis Tools (Complementarity Detection)
+# =============================================================================
+
+
+@mcp.tool()
+async def synthesize_hypotheses(
+    session_id: str,
+    node_ids: list[str]
+) -> dict[str, Any]:
+    """
+    Combine complementary hypotheses into a unified hybrid.
+    
+    Use this when finalize_session returns complementarity_detected=True,
+    indicating that top candidates address different goals and should be
+    combined rather than selected winner-takes-all.
+    
+    Args:
+        session_id: The reasoning session UUID
+        node_ids: List of hypothesis node IDs to synthesize (2-5 nodes)
+        
+    Returns:
+        Created hybrid node with synthesis lineage
+    """
+    if len(node_ids) < 2:
+        return {"success": False, "error": "Need at least 2 nodes to synthesize"}
+    if len(node_ids) > 5:
+        return {"success": False, "error": "Maximum 5 nodes for synthesis"}
+    
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Validate session
+        cur.execute(
+            "SELECT id, goal FROM reasoning_sessions WHERE id = %s",
+            (session_id,)
+        )
+        session = cur.fetchone()
+        if not session:
+            return {"success": False, "error": "Session not found"}
+        
+        # Fetch source nodes
+        cur.execute(
+            """
+            SELECT id, path, content, prior_score, likelihood, posterior_score,
+                   supporting_laws, metadata
+            FROM thought_nodes
+            WHERE id = ANY(%s::uuid[]) AND session_id = %s
+            """,
+            (node_ids, session_id)
+        )
+        source_nodes = cur.fetchall()
+        
+        if len(source_nodes) != len(node_ids):
+            found_ids = [str(n["id"]) for n in source_nodes]
+            missing = [nid for nid in node_ids if nid not in found_ids]
+            return {"success": False, "error": f"Nodes not found: {missing}"}
+        
+        # Build candidate dicts for synthesis
+        candidates = []
+        all_supporting_laws = set()
+        for node in source_nodes:
+            # Get declared scope from metadata if present
+            metadata = node.get("metadata") or {}
+            scope = metadata.get("declared_scope", "")
+            
+            candidates.append({
+                "content": node["content"],
+                "scope": scope,
+                "node_id": str(node["id"]),
+                "score": float(node["posterior_score"] or 0.5)
+            })
+            
+            if node["supporting_laws"]:
+                all_supporting_laws.update(node["supporting_laws"])
+        
+        # Generate hybrid content
+        hybrid_content = synthesize_hypothesis_text(candidates, include_details=True)
+        merged_scope = merge_scopes(candidates)
+        
+        # Calculate hybrid prior (average of source posteriors)
+        avg_posterior = sum(c["score"] for c in candidates) / len(candidates)
+        
+        # Determine hybrid path (sibling of first source node)
+        first_path = str(source_nodes[0]["path"])
+        if "." in first_path:
+            parent_path = ".".join(first_path.rsplit(".", 1)[:-1])
+        else:
+            parent_path = "root"
+        hybrid_path = f"{parent_path}.hybrid_1"
+        
+        # Generate embedding for hybrid
+        embedding = get_embedding(hybrid_content)
+        
+        # Store hybrid node
+        cur.execute(
+            """
+            INSERT INTO thought_nodes (
+                session_id, path, content, node_type,
+                prior_score, likelihood, embedding,
+                supporting_laws, synthesized_from, metadata
+            ) VALUES (%s, %s, %s, 'hypothesis', %s, %s, %s, %s, %s::uuid[], %s)
+            RETURNING id, path, posterior_score
+            """,
+            (
+                session_id,
+                hybrid_path,
+                hybrid_content,
+                avg_posterior,  # Prior is average of source posteriors
+                0.85,  # Initial likelihood (starts high, can be critiqued)
+                embedding,
+                list(all_supporting_laws) if all_supporting_laws else [],
+                node_ids,  # synthesized_from tracks lineage
+                json.dumps({
+                    "declared_scope": merged_scope,
+                    "is_hybrid": True,
+                    "source_count": len(node_ids),
+                    "addressed_goals": list(set(
+                        g for c in candidates 
+                        for g in extract_addressed_goals(c["content"], c.get("scope", ""))
+                    ))
+                })
+            )
+        )
+        hybrid = cur.fetchone()
+        conn.commit()
+        
+        logger.info(f"v40: Created hybrid hypothesis {hybrid['id']} from {len(node_ids)} sources")
+        
+        return {
+            "success": True,
+            "hybrid_node": {
+                "node_id": str(hybrid["id"]),
+                "path": str(hybrid["path"]),
+                "content": hybrid_content,
+                "posterior_score": float(hybrid["posterior_score"]),
+                "synthesized_from": node_ids,
+                "declared_scope": merged_scope
+            },
+            "source_nodes": [
+                {"node_id": c["node_id"], "score": c["score"]} 
+                for c in candidates
+            ],
+            "next_step": f"Critique the hybrid hypothesis. Call prepare_critique(node_id='{hybrid['id']}')"
+        }
+        
+    except Exception as e:
+        logger.error(f"synthesize_hypotheses failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def infer_file_purpose(
+    project_id: str,
+    file_path: str,
+    force_refresh: bool = False
+) -> dict[str, Any]:
+    """
+    Get or infer 3-tier purpose for a file.
+    
+    Returns cached purpose if available, or a prompt for LLM inference.
+    After LLM processes the prompt, call store_file_purpose with the result.
+    
+    Args:
+        project_id: Project identifier
+        file_path: Path to the file (relative or absolute)
+        force_refresh: If True, ignore cache and return inference prompt
+        
+    Returns:
+        Cached purpose or inference prompt
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Normalize file path
+        if not file_path.startswith('/'):
+            # Try to find in file_registry
+            cur.execute(
+                "SELECT file_path FROM file_registry WHERE project_id = %s AND file_path LIKE %s LIMIT 1",
+                (project_id, f'%{file_path}%')
+            )
+            result = cur.fetchone()
+            if result:
+                file_path = result["file_path"]
+        
+        # Get file from registry
+        cur.execute(
+            """
+            SELECT file_path, file_hash, content, purpose_cache
+            FROM file_registry
+            WHERE project_id = %s AND file_path = %s
+            """,
+            (project_id, file_path)
+        )
+        file_record = cur.fetchone()
+        
+        if not file_record:
+            return {"success": False, "error": f"File not found in registry: {file_path}. Run sync_project first."}
+        
+        current_hash = file_record["file_hash"]
+        cached = file_record["purpose_cache"]
+        
+        # Check cache validity
+        if not force_refresh and validate_purpose_cache(cached, current_hash):
+            purposes = cached.get("purposes", {})
+            return {
+                "success": True,
+                "status": "cached",
+                "file_path": file_path,
+                "file_hash": current_hash,
+                "purposes": purposes,
+                "purpose_context": build_purpose_context_entry(file_path, purposes, "cached")
+            }
+        
+        # Cache miss or force refresh - return prompt for LLM
+        content = file_record.get("content") or ""
+        prompt = build_purpose_prompt(file_path, content)
+        
+        return {
+            "success": True,
+            "status": "needs_inference",
+            "file_path": file_path,
+            "file_hash": current_hash,
+            "inference_prompt": prompt,
+            "instructions": f"Process this prompt with LLM, then call store_file_purpose(project_id='{project_id}', file_path='{file_path}', purpose_data='<JSON result>')"
+        }
+        
+    except Exception as e:
+        logger.error(f"infer_file_purpose failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def store_file_purpose(
+    project_id: str,
+    file_path: str,
+    purpose_data: str  # JSON string for universal LLM compatibility
+) -> dict[str, Any]:
+    """
+    Store LLM-inferred purpose in the file registry cache.
+    
+    Args:
+        project_id: Project identifier
+        file_path: Path to the file
+        purpose_data: JSON string with function_purposes, module_purpose, project_contribution
+        
+    Returns:
+        Confirmation with stored purpose summary
+    """
+    try:
+        # Parse purpose data
+        purposes = parse_purpose_response(purpose_data)
+        if purposes is None:
+            return {"success": False, "error": "Failed to parse purpose_data. Ensure valid JSON with function_purposes, module_purpose, project_contribution."}
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Get current file hash
+        cur.execute(
+            "SELECT file_hash FROM file_registry WHERE project_id = %s AND file_path = %s",
+            (project_id, file_path)
+        )
+        file_record = cur.fetchone()
+        
+        if not file_record:
+            return {"success": False, "error": f"File not found: {file_path}"}
+        
+        file_hash = file_record["file_hash"]
+        
+        # Build cache entry
+        cache_entry = {
+            "file_hash": file_hash,
+            "purposes": purposes,
+            "inferred_at": datetime.now().isoformat()
+        }
+        
+        # Store in purpose_cache
+        cur.execute(
+            """
+            UPDATE file_registry
+            SET purpose_cache = %s
+            WHERE project_id = %s AND file_path = %s
+            """,
+            (json.dumps(cache_entry), project_id, file_path)
+        )
+        conn.commit()
+        
+        logger.info(f"v40: Stored purpose for {file_path} in project {project_id}")
+        
+        module_purpose = purposes.get("module_purpose", {})
+        
+        return {
+            "success": True,
+            "file_path": file_path,
+            "file_hash": file_hash,
+            "purpose_summary": {
+                "problem": module_purpose.get("problem", "")[:200],
+                "user_need": module_purpose.get("user_need", "")[:200],
+                "function_count": len(purposes.get("function_purposes", []))
+            },
+            "purpose_context": build_purpose_context_entry(file_path, purposes, "cached")
+        }
+        
+    except Exception as e:
+        logger.error(f"store_file_purpose failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def infer_module_purpose(
+    project_id: str,
+    directory_path: str,
+    max_files: int = 10
+) -> dict[str, Any]:
+    """
+    Aggregate file purposes into module-level purpose.
+    
+    Scans files in directory, uses cached file purposes, and returns
+    an aggregation prompt for LLM synthesis.
+    
+    Args:
+        project_id: Project identifier
+        directory_path: Path to directory/module
+        max_files: Maximum files to include (default 10)
+        
+    Returns:
+        Aggregation prompt or cached module purpose
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Find files in this directory
+        cur.execute(
+            """
+            SELECT file_path, purpose_cache
+            FROM file_registry
+            WHERE project_id = %s 
+              AND file_path LIKE %s
+              AND file_path NOT LIKE %s
+            ORDER BY file_path
+            LIMIT %s
+            """,
+            (project_id, f'{directory_path}%', f'{directory_path}%/%', max_files)
+        )
+        files = cur.fetchall()
+        
+        if not files:
+            return {
+                "success": False, 
+                "error": f"No files found in {directory_path}. Run sync_project first."
+            }
+        
+        # Collect file purposes
+        file_purposes = []
+        needs_inference = []
+        
+        for f in files:
+            file_path = f["file_path"]
+            cache = f["purpose_cache"]
+            
+            if cache and cache.get("purposes"):
+                purposes = cache["purposes"]
+                module_purpose = purposes.get("module_purpose", {})
+                file_purposes.append({
+                    "file": file_path,
+                    "problem": module_purpose.get("problem", ""),
+                    "user_need": module_purpose.get("user_need", "")
+                })
+            else:
+                needs_inference.append(file_path)
+        
+        # If any files need inference, return that info first
+        if needs_inference and len(needs_inference) > len(file_purposes):
+            return {
+                "success": True,
+                "status": "files_need_inference",
+                "directory_path": directory_path,
+                "files_ready": len(file_purposes),
+                "files_pending": needs_inference[:5],  # Show first 5
+                "instructions": f"Call infer_file_purpose for pending files, then retry infer_module_purpose"
+            }
+        
+        # Build aggregation prompt
+        prompt = build_module_aggregation_prompt(directory_path, file_purposes)
+        
+        return {
+            "success": True,
+            "status": "ready_for_aggregation",
+            "directory_path": directory_path,
+            "file_count": len(file_purposes),
+            "aggregation_prompt": prompt,
+            "instructions": f"Process this prompt with LLM, then call store_module_purpose(project_id='{project_id}', directory_path='{directory_path}', purpose_data='<JSON result>')"
+        }
+        
+    except Exception as e:
+        logger.error(f"infer_module_purpose failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def store_module_purpose(
+    project_id: str,
+    directory_path: str,
+    purpose_data: str  # JSON string
+) -> dict[str, Any]:
+    """
+    Store aggregated module-level purpose.
+    
+    Args:
+        project_id: Project identifier
+        directory_path: Path to the module directory
+        purpose_data: JSON with module_purpose, user_need, architecture_role
+        
+    Returns:
+        Confirmation with stored purpose
+    """
+    try:
+        # Parse purpose data
+        purposes = parse_module_response(purpose_data)
+        if purposes is None:
+            return {
+                "success": False, 
+                "error": "Failed to parse purpose_data. Ensure valid JSON with module_purpose, user_need, architecture_role."
+            }
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Store as a special entry in file_registry with directory path
+        # Use a hash of the directory path as file_hash
+        import hashlib
+        dir_hash = hashlib.sha256(directory_path.encode()).hexdigest()[:16]
+        
+        cache_entry = {
+            "file_hash": dir_hash,
+            "scope_type": "module",
+            "purposes": purposes,
+            "inferred_at": datetime.now().isoformat()
+        }
+        
+        # Check if entry exists
+        cur.execute(
+            "SELECT id FROM file_registry WHERE project_id = %s AND file_path = %s",
+            (project_id, directory_path)
+        )
+        existing = cur.fetchone()
+        
+        if existing:
+            cur.execute(
+                "UPDATE file_registry SET purpose_cache = %s WHERE project_id = %s AND file_path = %s",
+                (json.dumps(cache_entry), project_id, directory_path)
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO file_registry (project_id, file_path, file_hash, purpose_cache)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (project_id, directory_path, dir_hash, json.dumps(cache_entry))
+            )
+        
+        conn.commit()
+        logger.info(f"v40: Stored module purpose for {directory_path} in project {project_id}")
+        
+        return {
+            "success": True,
+            "directory_path": directory_path,
+            "scope_type": "module",
+            "purpose_summary": {
+                "module_purpose": purposes.get("module_purpose", "")[:200],
+                "architecture_role": purposes.get("architecture_role", "")[:200]
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"store_module_purpose failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def advance_metacognitive_stage(
+    session_id: str,
+    target_stage: int = None  # None = advance by 1
+) -> dict[str, Any]:
+    """
+    Advance session to next metacognitive stage.
+    
+    Based on arXiv:2308.05342v4 5-stage metacognitive prompting.
+    Stages: 1=Understanding, 2=Preliminary, 3=Critical, 4=Final, 5=Confidence
+    
+    Args:
+        session_id: The reasoning session UUID
+        target_stage: Specific stage to advance to (default: current + 1)
+        
+    Returns:
+        Stage info with prompt for the new stage
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Get current stage
+        cur.execute(
+            "SELECT metacognitive_stage, state FROM reasoning_sessions WHERE id = %s",
+            (session_id,)
+        )
+        session = cur.fetchone()
+        
+        if not session:
+            return {"success": False, "error": f"Session not found: {session_id}"}
+        
+        current_stage = session["metacognitive_stage"] or 0
+        
+        # Determine target stage
+        if target_stage is None:
+            target_stage = current_stage + 1
+        
+        # Validate progression
+        validation = validate_stage_progression(current_stage, target_stage)
+        if not validation["valid"]:
+            return {
+                "success": False,
+                "error": validation["reason"],
+                "current_stage": current_stage,
+                "current_stage_info": format_stage_status(current_stage)
+            }
+        
+        # Update stage
+        cur.execute(
+            "UPDATE reasoning_sessions SET metacognitive_stage = %s WHERE id = %s",
+            (target_stage, session_id)
+        )
+        conn.commit()
+        
+        # Get stage info
+        stage_info = get_stage_info(target_stage)
+        
+        logger.info(f"v40: Session {session_id[:8]} advanced to metacognitive stage {target_stage}")
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "previous_stage": current_stage,
+            "current_stage": target_stage,
+            "stage_name": stage_info.get("name"),
+            "stage_prompt": stage_info.get("prompt"),
+            "required_output": stage_info.get("required_output"),
+            "calibration_guidance": get_calibration_guidance(0.7) if target_stage == 5 else None
+        }
+        
+    except Exception as e:
+        logger.error(f"advance_metacognitive_stage failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def get_metacognitive_status(
+    session_id: str
+) -> dict[str, Any]:
+    """
+    Get current metacognitive stage for a session.
+    
+    Args:
+        session_id: The reasoning session UUID
+        
+    Returns:
+        Current stage info and progress
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute(
+            "SELECT metacognitive_stage, state FROM reasoning_sessions WHERE id = %s",
+            (session_id,)
+        )
+        session = cur.fetchone()
+        
+        if not session:
+            return {"success": False, "error": f"Session not found: {session_id}"}
+        
+        stage = session["metacognitive_stage"] or 0
+        stage_info = get_stage_info(stage)
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "current_stage": stage,
+            "stage_name": stage_info.get("name"),
+            "progress": f"{stage}/5",
+            "stages_remaining": 5 - stage,
+            "next_stage_prompt": get_stage_prompt(stage + 1) if stage < 5 else None
+        }
+        
+    except Exception as e:
+        logger.error(f"get_metacognitive_status failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def get_calibration_stats(
+    min_samples: int = 10
+) -> dict[str, Any]:
+    """
+    Get current calibration metrics for CSR self-evaluation.
+    
+    Computes Brier score (lower = better calibration) and 
+    overconfidence bias (positive = overconfident).
+    
+    Args:
+        min_samples: Minimum samples required for stats (default: 10)
+        
+    Returns:
+        Calibration statistics with warnings if overconfident
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Get recent calibration records
+        cur.execute(
+            """
+            SELECT predicted_confidence, actual_outcome
+            FROM calibration_records
+            ORDER BY recorded_at DESC
+            LIMIT 100
+            """
+        )
+        records = [{"predicted_confidence": r["predicted_confidence"], "actual_outcome": r["actual_outcome"]} for r in cur.fetchall()]
+        
+        if len(records) < min_samples:
+            return {
+                "success": True,
+                "sample_count": len(records),
+                "sufficient_samples": False,
+                "message": f"Need {min_samples} samples for calibration stats, have {len(records)}"
+            }
+        
+        stats = compute_calibration_stats(records)
+        
+        logger.info(f"v40: Calibration stats computed - Brier: {stats['brier_score']}, Bias: {stats['overconfidence_bias']}")
+        
+        return {
+            "success": True,
+            **format_calibration_for_response(stats)
+        }
+        
+    except Exception as e:
+        logger.error(f"get_calibration_stats failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def get_self_awareness() -> dict[str, Any]:
+    """
+    Get PAS self-knowledge: schema, tools, statistics, architecture.
+    
+    Enables PAS to understand its own capabilities and structure.
+    Part of v40 Phase 4 Self-Awareness implementation.
+    
+    Returns:
+        Combined self-awareness info including schema, tools, stats, architecture
+    """
+    try:
+        conn = get_db_connection()
+        
+        # Get schema info
+        schema_info = get_schema_info(conn)
+        
+        # Get tool registry
+        tool_info = get_tool_registry(mcp)
+        
+        # Get session statistics
+        stats = get_session_statistics(conn)
+        
+        logger.info(f"v40: Self-awareness retrieved - {schema_info.get('table_count', 0)} tables, {len(tool_info)} tools")
+        
+        return {
+            "success": True,
+            "schema": schema_info,
+            "tools": {
+                "count": len(tool_info),
+                "categories": list(set(t.get("category") for t in tool_info if t.get("category"))),
+                "tools": tool_info
+            },
+            "statistics": stats,
+            "architecture": ARCHITECTURE_MAP
+        }
+        
+    except Exception as e:
+        logger.error(f"get_self_awareness failed: {e}")
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():
@@ -3753,6 +4793,37 @@ async def record_outcome(
                 (session_id,)
             )
             session_completed = True
+        
+        # =====================================================================
+        # v40 Phase 3: Log calibration data for CSR
+        # =====================================================================
+        try:
+            # Get the winning node's adjusted score from finalize_session
+            cur.execute(
+                """
+                SELECT tn.id, tn.posterior_score
+                FROM thought_nodes tn
+                WHERE tn.session_id = %s AND tn.path::text = %s
+                """,
+                (session_id, winning_path)
+            )
+            winning_node = cur.fetchone()
+            
+            if winning_node:
+                predicted_conf = winning_node["posterior_score"]
+                actual_outcome = map_outcome_to_numeric(outcome)
+                
+                cur.execute(
+                    """
+                    INSERT INTO calibration_records 
+                    (session_id, winning_node_id, predicted_confidence, actual_outcome)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (session_id, winning_node["id"], predicted_conf, actual_outcome)
+                )
+                logger.info(f"v40: Logged calibration record - predicted: {predicted_conf:.3f}, actual: {actual_outcome}")
+        except Exception as e:
+            logger.warning(f"v40: Calibration logging failed: {e}")
         
         # =====================================================================
         # v22 Feature 1b: Persist Traits to user_trait_profiles

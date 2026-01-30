@@ -1,0 +1,32 @@
+# Learning Flow Scenario
+# Tests the RLVR self-learning mechanism
+
+name: Learning Outcome Recording
+description: Test outcome recording and failure tracking for self-learning
+
+steps:
+  - tool: start_reasoning_session
+    args:
+      user_goal: "Debug failing database migration"
+    assert:
+      - success == true
+  
+  - tool: store_expansion
+    args:
+      session_id: "$session_id"
+      parent_node_id: null
+      h1_text: "Migration fails due to missing foreign key constraint in users table"
+      h1_confidence: 0.75
+      h1_scope: "[DB] migrations/20240130_users.sql"
+    assert:
+      - success == true
+  
+  - tool: record_outcome
+    args:
+      session_id: "$session_id"
+      outcome: failure
+      failure_reason: "DB: Foreign key constraint violation on user_preferences.user_id - users table empty during migration"
+    assert:
+      - success == true
+      - outcome == failure
+      - session_completed == true

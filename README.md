@@ -7,7 +7,7 @@ A Model Context Protocol (MCP) server that brings structured, Bayesian reasoning
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-blue)](https://modelcontextprotocol.io)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/downloads/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16+-blue.svg)](https://www.postgresql.org/)
-[![Version](https://img.shields.io/badge/version-v39-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v42-orange.svg)](CHANGELOG.md)
 
 ---
 
@@ -40,6 +40,9 @@ Instead of producing a single answer, PAS builds a **reasoning tree** where each
 | **Past Failures Surfacing** | Learn from similar past failures during critique |
 | **Live Code Navigation** | Find references/definitions via Jedi (v38) |
 | **Symbol Suggestions** | Auto-suggest symbols during hypothesis generation |
+| **Preflight Enforcement** | Structural guardrails at hypothesis storage (v41) |
+| **Self-Awareness** | PAS can introspect its own schema/tools/architecture (v40) |
+| **Self-Aware Test Suite** | 4-layer tests that log failures back to PAS (v42) |
 
 ---
 
@@ -348,17 +351,36 @@ If `passed: false`, PAS suggests how to improve:
 
 ## 📊 Architecture
 
-### Module Structure (v39)
+### Module Structure (v42)
 
 ```
-server.py              Main MCP server (5389 lines)
-├── errors.py          Exception hierarchy (~200 lines)
-├── utils.py           DB, embeddings, validation (~185 lines)
+server.py                  Main MCP server (~5400 lines)
+├── errors.py              Exception hierarchy (~200 lines)
+├── utils.py               DB, embeddings, validation (~185 lines)
 ├── reasoning_helpers.py   Bayesian scoring, quality (~310 lines)
 ├── learning_helpers.py    RLVR, terminal parsing (~240 lines)
 ├── interview_helpers.py   Interview flow (~220 lines)
 ├── codebase_helpers.py    Symbol extraction (~260 lines)
-└── sessions_helpers.py    Session lifecycle (~270 lines)
+├── sessions_helpers.py    Session lifecycle (~270 lines)
+├── metacognitive_helpers.py  5-stage prompting (~200 lines)
+├── preflight_helpers.py   Preflight enforcement (~180 lines)
+├── calibration_helpers.py CSR calibration (~180 lines)
+├── purpose_helpers.py     Hierarchical inference (~150 lines)
+├── hybrid_helpers.py      Hypothesis synthesis (~120 lines)
+└── self_awareness_helpers.py Schema introspection (~250 lines)
+
+tests/
+├── conftest.py            Fixtures + Layer 4 failure logging
+├── test_tools/            Layer 1: Static domain tests
+│   ├── test_reasoning.py  16 tests (9 tools)
+│   ├── test_learning.py   6 tests (4 tools)
+│   ├── test_codebase.py   8 tests (8 tools)
+│   ├── test_metacognitive.py 7 tests (3 tools)
+│   └── test_interview.py  5 tests (4 tools)
+├── scenarios/             Layer 2: YAML workflow tests
+├── test_scenarios.py      YAML runner
+├── test_coverage.py       Layer 3: Self-aware coverage
+└── test_server.py         Legacy v22/v23 tests
 ```
 
 ### Database Tables
@@ -393,7 +415,50 @@ PAS includes 15+ established laws to ground reasoning:
 
 ---
 
-## 🧪 Model Compatibility
+## 🧪 Testing
+
+PAS includes a **self-aware test suite** that tests itself and logs discovered bugs back into PAS for learning.
+
+### Test Suite Architecture (v42)
+
+| Layer | Purpose | File(s) |
+|-------|---------|---------|
+| **Layer 1** | Static unit tests for 38 tools | `tests/test_tools/*.py` |
+| **Layer 2** | YAML-defined workflow scenarios | `tests/scenarios/*.yaml` |
+| **Layer 3** | Self-aware coverage reporter | `tests/test_coverage.py` |
+| **Layer 4** | Failure logging to PAS | `tests/conftest.py` hooks |
+
+### Running Tests
+
+```bash
+# Full suite with PAS failure logging
+PAS_DB_NAME=mcp_pas pytest tests/ -v
+
+# Fast mode (no failure logging)
+PAS_DB_NAME=mcp_pas PAS_LOG_FAILURES=false pytest tests/ -v
+
+# Run only unit tests
+PAS_DB_NAME=mcp_pas pytest tests/test_tools/ -v
+
+# Run YAML scenarios
+PAS_DB_NAME=mcp_pas pytest tests/test_scenarios.py -v
+
+# Check coverage (fails if new tool lacks tests)
+PAS_DB_NAME=mcp_pas pytest tests/test_coverage.py -v
+```
+
+### Self-Aware Coverage
+
+When new tools are added, `test_coverage.py` automatically fails with:
+```
+Missing tests for: [new_tool_name]
+```
+
+This ensures test coverage grows with the codebase.
+
+---
+
+## 🤖 Model Compatibility
 
 | Model | Status |
 |-------|--------|
@@ -408,7 +473,7 @@ PAS includes 15+ established laws to ground reasoning:
 
 See [CHANGELOG.md](CHANGELOG.md) for version history.
 
-Current version: **v39**
+Current version: **v42-tests**
 
 ---
 

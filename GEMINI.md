@@ -218,3 +218,69 @@ if result.get("suggested_lookups"):
 
 > **TODO**: Integrate into `/pas-planning` workflow for explicit enforcement.
 
+---
+
+## Rule 8: Preflight Enforcement 🛫 (v41)
+
+**When `store_expansion` returns `preflight_warnings`, you MUST address them before proceeding.**
+
+### Warning Types
+
+| Warning | Meaning | Required Action |
+|---------|---------|-----------------|
+| `missing_schema_check` | SQL operations detected | Call `get_self_awareness()` |
+| `missing_find_references` | Symbol lookups suggested | Call `find_references()` |
+| `unacknowledged_warnings` | Past failures surfaced | Call `log_conversation()` |
+
+### The `skip_preflight` Escape Hatch
+
+**NEVER use `skip_preflight=True` without explicit user approval.**
+
+This parameter exists for:
+- Trivial bug-fix sessions (user-approved)
+- Debugging preflight system itself
+- Time-critical emergencies
+
+When used, it is logged for outcome correlation - PAS will learn if bypasses correlate with failures.
+
+> **v41 Change**: Preflight checks are now enforced at `store_expansion` time.
+
+---
+
+## Rule 9: Codebase Research Before Hypothesizing 🔍 (v42a)
+
+**Before calling `store_expansion`, you MUST search for existing related functionality.**
+
+### Mandatory Steps
+
+```python
+# 1. Call prepare_expansion (will auto-return related_modules now)
+result = mcp_pas-server_prepare_expansion(session_id="...", project_id="mcp-pas")
+
+# 2. Review related_modules returned (v42a automated search)
+if result.get("related_modules"):
+    for module in result["related_modules"]:
+        # Study these before hypothesizing
+        print(f"Existing: {module['file']} - {module['purpose']}")
+
+# 3. Optionally do deeper search
+mcp_pas-server_query_codebase(query="<goal keywords>", project_id="mcp-pas")
+
+# 4. ONLY NOW generate hypotheses that build on existing infrastructure
+```
+
+### Why This Matters
+
+Session `49ea0e60` showed that v42 Feature Tracker planning missed `purpose_helpers.py` because:
+- Goal keywords didn't match existing code semantically
+- Agent skipped `query_codebase` before hypothesizing
+
+### Enforcement
+
+| Layer | Mechanism |
+|-------|-----------|
+| **Soft** | This rule in GEMINI.md |
+| **Hard** | Preflight check: `missing_codebase_research` warning |
+| **Auto** | `prepare_expansion` returns `related_modules` from semantic search |
+
+> **v42a Change**: Codebase research is now mandatory before hypothesis generation.

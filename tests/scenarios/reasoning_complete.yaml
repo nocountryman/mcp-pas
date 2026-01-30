@@ -1,0 +1,71 @@
+# Complete Reasoning Flow Scenario
+# Tests the full PAS workflow from session start to outcome recording
+
+name: Complete Reasoning Flow
+description: Full planning cycle from session start to outcome
+
+steps:
+  - tool: start_reasoning_session
+    args:
+      user_goal: "Implement caching layer for API responses"
+    assert:
+      - success == true
+      - session_id != null
+      - state == active
+  
+  - tool: prepare_expansion
+    args:
+      session_id: "$session_id"
+    assert:
+      - success == true
+      - relevant_laws != null
+  
+  - tool: store_expansion
+    args:
+      session_id: "$session_id"
+      parent_node_id: null
+      h1_text: "Use Redis as a distributed cache with TTL-based invalidation"
+      h1_confidence: 0.85
+      h1_scope: "[INFRA] api/cache.py, config/redis.py"
+      h2_text: "Implement in-memory LRU cache using Python functools"
+      h2_confidence: 0.7
+    assert:
+      - success == true
+      - count == 2
+      - created_nodes.length >= 2
+    store:
+      h1_node_id: created_nodes.0.node_id
+  
+  - tool: prepare_critique
+    args:
+      node_id: "$h1_node_id"
+    assert:
+      - success == true
+      - node_content != null
+      - llm_prompt != null
+  
+  - tool: store_critique
+    args:
+      node_id: "$h1_node_id"
+      counterargument: "Redis adds infrastructure complexity and single point of failure"
+      severity_score: 0.4
+      minor_flaws: "Requires DevOps setup, network latency"
+    assert:
+      - success == true
+  
+  - tool: finalize_session
+    args:
+      session_id: "$session_id"
+      skip_sequential_analysis: true
+    assert:
+      - success == true
+      - recommendation != null
+  
+  - tool: record_outcome
+    args:
+      session_id: "$session_id"
+      outcome: success
+      notes: "Scenario test completed successfully"
+    assert:
+      - success == true
+      - session_completed == true

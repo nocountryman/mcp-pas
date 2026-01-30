@@ -2,7 +2,70 @@
 
 All notable changes to PAS (Scientific Reasoning MCP) are documented here.
 
+## [v42-tests] - 2026-01-30
+
+### Added
+- **Self-Aware Test Suite** - 4-layer test architecture for PAS
+  - **Layer 1**: Static domain tests in `test_tools/*.py` (40+ tests for 38 tools)
+  - **Layer 2**: YAML scenario runner (`test_scenarios.py`) with declarative workflow tests
+  - **Layer 3**: Self-aware coverage reporter using `get_self_awareness()` to auto-detect missing tests
+  - **Layer 4**: Pytest hooks in `conftest.py` that log test failures back to PAS for self-learning
+  - Failure categorization: LOGIC, DB, CODE, WORKFLOW, INFRA
+  - 58 tests discovered and passing
+- **Dogfooding Law** - New scientific law for self-referential systems
+  - "Internal tools should use their own capabilities"
+  - Surfaced during planning gap analysis for test suite design
+
+### Technical
+- PAS sessions: `52a28c18` (planning), `6c57a67b` (gap logging)
+- New directory structure: `tests/test_tools/`, `tests/scenarios/`
+
+---
+
+## [v42b] - 2026-01-30
+
+### Added
+- **Knowledge Surfacing Strategy** - Scope-based failure matching
+  - `store_expansion` now returns `scope_failure_warnings` based on declared scope
+  - `prepare_critique` returns `past_critiques` from similar hypotheses
+  - `surfaced_warning_ids` column for deduplication
+  - Context-aware thresholds in `_search_relevant_failures()`
+
+---
+
+## [v41] - 2026-01-30
+
+### Added
+- **Preflight Enforcement System** - Structural guardrails at `store_expansion`
+  - `preflight_helpers.py` - Preflight check logic (~180 lines)
+  - Warning types: `missing_schema_check`, `missing_find_references`, `unacknowledged_warnings`
+  - `skip_preflight=True` escape hatch (logged for outcome correlation)
+  - Rule 8 added to GEMINI.md for enforcement
+
+---
+
+## [v40] - 2026-01-30
+
+### Added
+- **Modularization Phase 7-12** - Further server.py decomposition
+  - `metacognitive_helpers.py` - 5-stage metacognitive prompting (~200 lines)
+  - `purpose_helpers.py` - Hierarchical purpose inference (~150 lines)
+  - `hybrid_helpers.py` - Hypothesis synthesis (~120 lines)
+  - `calibration_helpers.py` - CSR calibration logic (~180 lines)
+  - `self_awareness_helpers.py` - Schema introspection (~250 lines)
+- **Self-Awareness Tool** (`get_self_awareness`) - PAS can introspect its own:
+  - Database schema (29 tables)
+  - Tool catalog (38 tools with descriptions)
+  - Architecture (4 workflows: reasoning, learning, codebase, metacognitive)
+  - Metacognitive stages (5 stages per arXiv:2308.05342v4)
+
+### Technical
+- Major architectural milestone: PAS can now understand itself for meta-planning
+
+---
+
 ## [v39] - 2026-01-30
+
 
 ### Added
 - **Modularization Phase 0-6** - Major server.py decomposition

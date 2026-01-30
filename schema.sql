@@ -95,6 +95,9 @@ CREATE TABLE thought_nodes (
     -- v37: Flexible metadata storage (e.g., sequential_analyzed flag)
     metadata        JSONB DEFAULT '{}'::jsonb,
     
+    -- v40: Hybrid synthesis lineage (which nodes were combined to create this)
+    synthesized_from UUID[] DEFAULT NULL,
+    
     -- References to supporting laws
     supporting_laws INTEGER[] DEFAULT '{}',
     
@@ -755,3 +758,26 @@ CREATE INDEX IF NOT EXISTS idx_symbol_refs_source
 
 CREATE INDEX IF NOT EXISTS idx_symbol_refs_target
     ON symbol_references(project_id, target_symbol);
+
+-- ============================================================================
+-- Table: session_call_log (v41 Preflight Enforcement)
+-- Tracks tool calls per session for preflight validation
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS session_call_log (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id      UUID REFERENCES reasoning_sessions(id) ON DELETE CASCADE,
+    tool_name       TEXT NOT NULL,
+    call_metadata   JSONB DEFAULT '{}',  -- Optional: params, results summary
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Index for efficient lookup by session
+CREATE INDEX IF NOT EXISTS idx_session_call_log_session
+    ON session_call_log(session_id, tool_name);
+
+-- ============================================================================
+-- v42b: Knowledge Surfacing Deduplication
+-- Tracks warning IDs already surfaced to avoid repetition across stages
+-- ============================================================================
+ALTER TABLE reasoning_sessions ADD COLUMN IF NOT EXISTS
+    surfaced_warning_ids UUID[] DEFAULT '{}';
