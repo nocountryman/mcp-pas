@@ -822,3 +822,108 @@ CREATE INDEX IF NOT EXISTS idx_project_registry_project_id
 CREATE INDEX IF NOT EXISTS idx_project_registry_domain
     ON project_registry(detected_domain);
 
+-- ============================================================================
+-- v44b: Requirement Extraction Tables
+-- Stores extracted requirements from verbatim prompts with law citations
+-- ============================================================================
+
+-- Add law_domain for filtering psychology-related laws
+ALTER TABLE scientific_laws ADD COLUMN IF NOT EXISTS
+    law_domain VARCHAR(50);
+
+-- Table: extracted_requirements
+-- Stores requirements extracted by LLM from user prompts
+CREATE TABLE IF NOT EXISTS extracted_requirements (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id          UUID REFERENCES reasoning_sessions(id) ON DELETE CASCADE,
+    
+    -- Requirement content
+    requirement_text    TEXT NOT NULL,
+    requirement_type    VARCHAR(50) NOT NULL DEFAULT 'explicit'
+                        CHECK (requirement_type IN ('explicit', 'implicit', 'inferred')),
+    confidence          DECIMAL(3,2) DEFAULT 0.8
+                        CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    
+    -- Context and source
+    source_text         TEXT,               -- Original phrase that led to extraction
+    inferred_from       TEXT,               -- For implicit requirements, why it was inferred
+    
+    -- Semantic embedding for search
+    embedding           vector(768),
+    
+    -- Metadata
+    created_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Index for session lookups
+CREATE INDEX IF NOT EXISTS idx_extracted_requirements_session
+    ON extracted_requirements(session_id);
+
+-- HNSW index for semantic search on requirements
+CREATE INDEX IF NOT EXISTS idx_extracted_requirements_embedding
+    ON extracted_requirements
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+-- Table: requirement_law_citations
+-- Junction table linking requirements to the laws used to extract them
+CREATE TABLE IF NOT EXISTS requirement_law_citations (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    requirement_id      UUID REFERENCES extracted_requirements(id) ON DELETE CASCADE,
+    law_id              INTEGER REFERENCES scientific_laws(id) ON DELETE CASCADE,
+    confidence          DECIMAL(3,2) DEFAULT 0.8
+                        CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    application_context TEXT,               -- How the law was applied
+    
+    -- Metadata
+    created_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Index for requirement lookups
+CREATE INDEX IF NOT EXISTS idx_requirement_law_citations_requirement
+    ON requirement_law_citations(requirement_id);
+
+-- Index for law correlation queries
+CREATE INDEX IF NOT EXISTS idx_requirement_law_citations_law
+    ON requirement_law_citations(law_id);
+
+-- ============================================================================
+-- v44c: Pattern Analysis Tables
+-- Stores detected speech patterns (hesitation, enthusiasm, concern)
+-- ============================================================================
+
+-- Table: detected_patterns
+-- Stores patterns detected by LLM from user prompts
+CREATE TABLE IF NOT EXISTS detected_patterns (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id          UUID REFERENCES reasoning_sessions(id) ON DELETE CASCADE,
+    conversation_log_id UUID REFERENCES conversation_log(id) ON DELETE SET NULL,  -- v44d traceability
+    
+    -- Pattern content
+    pattern_type        VARCHAR(30) NOT NULL,  -- 'hesitation', 'enthusiasm', 'concern'
+    markers             TEXT[] NOT NULL DEFAULT '{}',  -- e.g., ['maybe', 'possibly', '...']
+    confidence          DECIMAL(3,2) DEFAULT 0.8
+                        CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    source_phrase       TEXT,  -- Original text that triggered detection
+    
+    -- Semantic embedding for v44d cross-conversation synthesis
+    embedding           vector(768),
+    
+    -- Metadata
+    created_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Index for session lookups
+CREATE INDEX IF NOT EXISTS idx_detected_patterns_session
+    ON detected_patterns(session_id);
+
+-- Index for pattern type filtering
+CREATE INDEX IF NOT EXISTS idx_detected_patterns_type
+    ON detected_patterns(pattern_type);
+
+-- HNSW index for semantic search on patterns (v44d synthesis)
+CREATE INDEX IF NOT EXISTS idx_detected_patterns_embedding
+    ON detected_patterns
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+

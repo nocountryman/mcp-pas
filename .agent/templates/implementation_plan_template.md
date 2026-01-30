@@ -44,9 +44,11 @@
 
 **Files Created**:
 - `[layer] path/to/new.py` - [purpose]
+> N/A if no new files created.
 
 **Files Deleted**:
 - `path/to/old.py` - [why]
+> N/A if no files deleted.
 ```
 
 ### 3. Detailed Changes
@@ -70,12 +72,19 @@
 **Rationale**: [Why this change - link to PAS critique if relevant]
 ```
 
-### 4. Verification Plan
+### 4. Verification Plan (adapt for your stack)
 ```markdown
 ## Verification
 
 ### Automated Tests
 ```bash
+# Python
+pytest tests/
+
+# JavaScript
+npm test
+
+# Or your project's test command
 [exact command to run]
 ```
 
@@ -100,7 +109,7 @@ Expected output: [what success looks like]
 - [ ] Add new: `/new-command`
 - [ ] Update: `/existing-command` - [why]
 
-> **Skip this section** if changes don't affect agent workflows or skills.
+> **N/A**: Mark as "N/A - no workflow/skill changes" if this section doesn't apply.
 ```
 
 ---
@@ -113,3 +122,17 @@ Expected output: [what success looks like]
 4. **Exact Code**: Changes must show exact code, not descriptions
 5. **Runnable Verification**: Test commands must be copy-paste runnable
 6. **Workflow Updates**: If changes affect workflows/skills, document in Section 5
+
+---
+
+## PRE-SUBMISSION CHECKLIST
+
+> ✅ Complete ALL items before finalizing this plan.
+
+- [ ] PAS session score ≥ 0.9
+- [ ] All major critiques from PAS addressed in plan
+- [ ] Synthesized hypotheses critiqued (if applicable)
+- [ ] N/A sections explicitly marked (not left blank)
+- [ ] Verification commands tested/runnable
+- [ ] Exact code shown (not descriptions)
+- [ ] Sequential gap analysis completed

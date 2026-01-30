@@ -247,6 +247,74 @@ DATABASE_URL=postgresql://user:password@localhost:5432/mcp_pas
 
 > **Note:** PAS uses local embeddings via `sentence-transformers` by default. No OpenAI API key required.
 
+### Step 4: GPU Acceleration (Optional)
+
+PAS embedding model can run on GPU for **5-10x faster loading** (11s vs 2-5 min on CPU).
+
+#### AMD GPUs (ROCm)
+
+> **Note:** ROCm PyTorch wheels require Python 3.10-3.12. On rolling-release distros (Arch/CachyOS) with Python 3.14+, you'll need a separate Python 3.12 virtual environment.
+
+**Step 1: Create Python 3.12 venv with ROCm PyTorch:**
+```bash
+# Create separate venv with Python 3.12
+python3.12 -m venv .venv312
+source .venv312/bin/activate
+
+# Install ROCm PyTorch from official wheels
+pip install torch --index-url https://download.pytorch.org/whl/rocm6.2
+
+# Install other dependencies
+pip install -r requirements.txt
+```
+
+**Step 2: RDNA2 GPU workaround (RX 6000 series):**
+
+RDNA2 GPUs (gfx1032, gfx1030) need an environment variable override:
+```bash
+export HSA_OVERRIDE_GFX_VERSION=10.3.0
+```
+
+Add this to your MCP config:
+```json
+{
+  "env": {
+    "DATABASE_URL": "...",
+    "HSA_OVERRIDE_GFX_VERSION": "10.3.0"
+  }
+}
+```
+
+**Verify GPU is detected:**
+```bash
+source .venv312/bin/activate
+HSA_OVERRIDE_GFX_VERSION=10.3.0 python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+# Expected: True AMD Radeon RX 6650 XT (or your GPU)
+```
+
+#### NVIDIA GPUs (CUDA)
+
+On **Arch Linux / CachyOS**:
+```bash
+sudo pacman -S python-pytorch-cuda cuda cudnn
+```
+
+On **Ubuntu/Debian**:
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+```
+
+#### Performance Comparison
+
+| Metric | CPU | GPU (ROCm/CUDA) |
+|--------|-----|-----------------|
+| Model load | 2-5 min | 11-30 sec |
+| Encode 100 texts | ~500ms | ~50ms |
+| Memory used | System RAM | VRAM |
+
+**No other changes needed** - once the venv uses ROCm/CUDA torch, the singleton in `utils.py` automatically loads the model to GPU.
+
+
 ---
 
 ## 🔌 IDE Integration
@@ -262,12 +330,17 @@ Add to your MCP configuration:
       "command": "/path/to/mcp-pas/.venv/bin/python",
       "args": ["/path/to/mcp-pas/server.py"],
       "env": {
-        "DATABASE_URL": "postgresql://user:password@localhost:5432/mcp_pas"
+        "DATABASE_URL": "postgresql://user:password@localhost:5432/mcp_pas",
+        "HSA_OVERRIDE_GFX_VERSION": "10.3.0"
       }
     }
   }
 }
 ```
+
+> **Note:** Use `.venv312/bin/python` for GPU (ROCm) or `.venv/bin/python` for CPU-only.
+> Remove `HSA_OVERRIDE_GFX_VERSION` if using NVIDIA or RDNA3+ GPUs.
+
 
 **After configuration**: Restart your IDE (`Ctrl+Shift+P` → Reload Window).
 

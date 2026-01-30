@@ -51,21 +51,41 @@ def safe_close_connection(conn):
 # Embedding Generation
 # =============================================================================
 
-# Lazy-loaded embedding model
+# Lazy-loaded embedding model (singleton)
 _embedding_model = None
+_EMBEDDING_MODEL_NAME = "all-mpnet-base-v2"  # 768-dim, higher quality
+
+# Set to True to load model at startup (avoids MCP timeout with GPU)
+# Disabled by default - ROCm causing crashes, using lazy load for now
+PRELOAD_MODEL = os.getenv("PAS_PRELOAD_MODEL", "false").lower() == "true"
 
 
 def get_embedding_model():
-    """Get or initialize the sentence transformer model."""
+    """Get or initialize the sentence transformer model (singleton)."""
     global _embedding_model
     if _embedding_model is None:
+        logger.info(f"Loading embedding model: {_EMBEDDING_MODEL_NAME} (may take 15-30s on GPU, 2-5m on CPU)...")
         from sentence_transformers import SentenceTransformer
-        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        _embedding_model = SentenceTransformer(_EMBEDDING_MODEL_NAME)
+        
+        # Log device info
+        try:
+            import torch
+            device = "cuda/ROCm" if torch.cuda.is_available() else "CPU"
+            logger.info(f"Embedding model loaded on {device}")
+        except ImportError:
+            logger.info("Embedding model loaded")
     return _embedding_model
 
 
+# Preload model at module import if enabled
+if PRELOAD_MODEL:
+    logger.info("Preloading embedding model at startup...")
+    get_embedding_model()
+
+
 def get_embedding(text: str) -> list[float]:
-    """Generate a 384-dim embedding for the given text."""
+    """Generate a 768-dim embedding for the given text."""
     model = get_embedding_model()
     return model.encode(text).tolist()
 

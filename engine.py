@@ -38,11 +38,8 @@ def get_db_connection():
     return conn
 
 
-def get_embedding(text: str) -> list[float]:
-    """Generate a 768-dim embedding for the given text."""
-    from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer('all-mpnet-base-v2')
-    return model.encode([text])[0].tolist()
+# Use singleton embedding model from utils
+from utils import get_embedding
 
 
 # =============================================================================

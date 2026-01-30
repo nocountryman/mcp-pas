@@ -2,6 +2,32 @@
 
 All notable changes to PAS (Scientific Reasoning MCP) are documented here.
 
+## [v46] - 2026-01-31 (Infrastructure)
+
+### Added
+- **GPU Acceleration (ROCm)** - 10x faster embedding model loading
+  - Added `.venv312/` - Dedicated Python 3.12 virtual environment for ROCm PyTorch
+  - ROCm 6.2 PyTorch wheel (`pip install torch --index-url https://download.pytorch.org/whl/rocm6.2`)
+  - `HSA_OVERRIDE_GFX_VERSION=10.3.0` environment variable for RDNA2 GPU compatibility (RX 6000 series)
+  - Updated `~/.gemini/antigravity/mcp_config.json` to use Python 3.12 venv + HSA override
+
+### Performance
+| Metric | Before (CPU) | After (GPU) |
+|--------|--------------|-------------|
+| Model load | 2-5 min | **11 seconds** |
+| Semantic search | ~500ms | **~50ms** |
+
+### Documentation
+- Updated `README.md` with complete ROCm setup instructions
+- Added RDNA2 workaround documentation
+- Added `.venv312/` to `.gitignore`
+
+### Technical
+- Rolling-release distros (Arch/CachyOS) require Python 3.12 venv since ROCm wheels don't support Python 3.14+
+- Singleton pattern in `utils.py` ensures model loads once to VRAM
+
+---
+
 ## [v44] - 2026-01-30
 
 ### Added

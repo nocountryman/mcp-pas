@@ -166,8 +166,79 @@ LAWS = [
             "Feature creep negating performance gains",
             "Ignoring efficiency for convenience"
         ]
+    },
+    # =========================================================================
+    # v44b: Psychology Laws for Requirement Extraction
+    # Peer-reviewed techniques for understanding user intent
+    # =========================================================================
+    {
+        "law_name": "Hedging Marker Detection",
+        "definition": "Modal auxiliaries (might, may, could) and epistemic markers (suggest, seem, probably) indicate uncertain requirements needing clarification. High hedge density = underspecified scope. Source: CoNLL-2010, BioScope Corpus.",
+        "scientific_weight": 0.95,
+        "law_domain": "psychology",
+        "failure_modes": [
+            "Treating hedged statements as firm requirements",
+            "Missing implicit uncertainty in requests",
+            "Not following up on vague language"
+        ]
+    },
+    {
+        "law_name": "Illocutionary Force Detection",
+        "definition": "User utterances carry illocutionary force (Searle 1969). Directives ('I want', 'should have') signal explicit requirements. Expressives ('I hate', 'frustrated') reveal pain points. Assertives about current state reveal implicit constraints.",
+        "scientific_weight": 0.99,
+        "law_domain": "psychology",
+        "failure_modes": [
+            "Treating all statements as equal weight",
+            "Missing emotional signals (expressives)",
+            "Ignoring state descriptions as constraints"
+        ]
+    },
+    {
+        "law_name": "Kano Requirement Categorization",
+        "definition": "Requirements affect satisfaction differently. Must-haves cause dissatisfaction only when absent. Delighters create disproportionate satisfaction. Performance scales linearly. Time erodes categories. Source: Kano 1984.",
+        "scientific_weight": 0.95,
+        "law_domain": "psychology",
+        "failure_modes": [
+            "Treating all requirements as must-haves",
+            "Missing delighter opportunities",
+            "Not recognizing satisfaction asymmetry"
+        ]
+    },
+    {
+        "law_name": "Gain-Loss Framing Analysis",
+        "definition": "Users frame requirements as gains ('save time', 'faster') or losses ('avoid errors', 'prevent crashes'). Loss-framed indicate higher priority due to loss aversion (Kahneman 1979). Detect frame to assess true priority.",
+        "scientific_weight": 0.99,
+        "law_domain": "psychology",
+        "failure_modes": [
+            "Treating gain/loss frames equally",
+            "Missing urgency signals in loss-framed requests",
+            "Not probing deeper on avoidance language"
+        ]
+    },
+    {
+        "law_name": "MoSCoW Priority Classification",
+        "definition": "Requirements exist in priority tiers. Must/required/critical = non-negotiable. Should = important. Nice-to-have/ideally = optional. Won't = explicit exclusion. Source: DSDM/BABOK.",
+        "scientific_weight": 0.90,
+        "law_domain": "psychology",
+        "failure_modes": [
+            "Missing priority signals in language",
+            "Not clarifying ambiguous priority",
+            "Treating 'nice to have' as must-have"
+        ]
+    },
+    {
+        "law_name": "Loss Aversion Principle",
+        "definition": "Losses feel ~2x worse than equivalent gains. Users emphasize avoiding negatives over gaining positives. 'Don't want' statements reveal core requirements. Source: Kahneman & Tversky 1979 Prospect Theory.",
+        "scientific_weight": 0.99,
+        "law_domain": "psychology",
+        "failure_modes": [
+            "Dismissing negative requirements",
+            "Not weighting avoidance language higher",
+            "Missing implicit fears in requests"
+        ]
     }
 ]
+
 
 
 def get_embeddings(texts: list[str]) -> list[list[float]]:
@@ -231,6 +302,7 @@ def seed_laws():
             law["definition"],
             law["scientific_weight"],
             law.get("failure_modes", []),  # v14c.1
+            law.get("law_domain"),  # v44b: psychology, engineering, etc.
             embedding
         )
         for law, embedding in zip(LAWS, embeddings)
@@ -241,12 +313,13 @@ def seed_laws():
     execute_values(
         cur,
         """
-        INSERT INTO scientific_laws (law_name, definition, scientific_weight, failure_modes, embedding)
+        INSERT INTO scientific_laws (law_name, definition, scientific_weight, failure_modes, law_domain, embedding)
         VALUES %s
         """,
         data,
-        template="(%s, %s, %s, %s, %s::vector)"
+        template="(%s, %s, %s, %s, %s, %s::vector)"
     )
+
     
     conn.commit()
     print(f"✅ Successfully seeded {len(LAWS)} scientific laws.")

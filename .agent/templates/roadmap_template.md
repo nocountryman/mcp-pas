@@ -78,3 +78,16 @@
 3. **Self-Sufficient**: New LLM session must understand roadmap without conversation context
 4. **Diagrams Required**: At least one mermaid diagram for architecture
 5. **Decisions Linked**: Major decisions must reference PAS reasoning
+
+---
+
+## PRE-SUBMISSION CHECKLIST
+
+> ✅ Complete ALL items before presenting this roadmap.
+
+- [ ] PAS session score ≥ 0.9
+- [ ] At least one mermaid diagram included
+- [ ] Each phase has clear scope and dependencies
+- [ ] Success criteria are verifiable (not vague)
+- [ ] Design decisions link to PAS reasoning
+- [ ] Roadmap is self-sufficient (understandable without conversation context)

@@ -18,7 +18,7 @@ import json
 PURPOSE_PROMPT_TEMPLATE = """Analyze this code file and answer these questions:
 
 **FILE**: {file_path}
-{sibling_context}
+{sibling_context}{symbol_section}
 **CONTENT**:
 ```
 {content}
@@ -56,13 +56,16 @@ Return ONLY valid JSON:
 """
 
 
-# v40 Phase 1.5: Module aggregation prompt
+# v40 Phase 1.5: Module aggregation prompt (v45b enhanced)
 MODULE_AGGREGATION_PROMPT = """Synthesize a module-level purpose from these file purposes:
 
 **DIRECTORY**: {directory_path}
 
 **FILES IN THIS MODULE**:
 {file_purposes}
+
+**KEY SYMBOLS** (functions/classes in this module):
+{symbols_section}
 
 ---
 
@@ -81,6 +84,7 @@ Return ONLY valid JSON:
 
 
 # v43: Project-level purpose inference template
+# v45c: Enhanced to include architecture_role from module purposes
 PROJECT_PURPOSE_PROMPT_TEMPLATE = """Analyze this project and answer these questions:
 
 **PROJECT**: {project_id}
@@ -88,6 +92,8 @@ PROJECT_PURPOSE_PROMPT_TEMPLATE = """Analyze this project and answer these quest
 
 **TOP MODULES** (most significant directories/files):
 {module_summaries}
+
+> Note: Module entries may include "[Role: ...]" showing architectural responsibility.
 
 **FILE STATISTICS**:
 - Total files: {file_count}
@@ -120,7 +126,8 @@ def build_purpose_prompt(
     file_path: str, 
     content: str, 
     max_content_length: int = 8000,
-    sibling_files: Optional[List[str]] = None  # v40 Phase 1.5: Hybrid sibling-aware
+    sibling_files: Optional[List[str]] = None,  # v40 Phase 1.5: Hybrid sibling-aware
+    symbols: Optional[List[Dict[str, Any]]] = None  # v45a: Tree-sitter indexed symbols
 ) -> str:
     """
     Build LLM prompt for purpose inference.
@@ -130,6 +137,7 @@ def build_purpose_prompt(
         content: File content (will be truncated if too long)
         max_content_length: Max chars of content to include
         sibling_files: Optional list of sibling filenames in same directory
+        symbols: Optional list of tree-sitter indexed symbols
         
     Returns:
         Formatted prompt string
@@ -144,23 +152,37 @@ def build_purpose_prompt(
         sibling_list = ", ".join(sibling_files[:10])  # Limit to 10
         sibling_context = f"\n**SIBLING FILES** (same module): {sibling_list}\n"
     
+    # v45a: Add indexed symbols section for function-level analysis
+    symbol_section = ""
+    if symbols:
+        symbol_lines = []
+        for sym in symbols[:20]:  # Limit to 20 symbols
+            sig = sym.get("signature", sym.get("symbol_name", ""))
+            sym_type = sym.get("symbol_type", "symbol")
+            symbol_lines.append(f"  - {sym_type}: {sig}")
+        if symbol_lines:
+            symbol_section = "\n**INDEXED SYMBOLS** (from tree-sitter):\n" + "\n".join(symbol_lines) + "\n"
+    
     return PURPOSE_PROMPT_TEMPLATE.format(
         file_path=file_path,
         sibling_context=sibling_context,
+        symbol_section=symbol_section,
         content=content
     )
 
 
 def build_module_aggregation_prompt(
     directory_path: str,
-    file_purposes: List[Dict[str, Any]]
+    file_purposes: List[Dict[str, Any]],
+    symbols: Optional[List[Dict[str, Any]]] = None  # v45b
 ) -> str:
     """
     Build LLM prompt for module-level purpose aggregation.
     
     Args:
         directory_path: Path to the directory/module
-        file_purposes: List of {file, problem, user_need} from file purposes
+        file_purposes: List of {file, problem, user_need, contribution} from file purposes
+        symbols: Optional list of {name, type} from file_symbols (v45b)
         
     Returns:
         Formatted aggregation prompt
@@ -169,13 +191,26 @@ def build_module_aggregation_prompt(
     for fp in file_purposes[:10]:  # Limit to 10 files
         file_name = fp.get("file", "unknown").split("/")[-1]
         problem = fp.get("problem", "Unknown purpose")
-        purpose_lines.append(f"- `{file_name}`: {problem}")
+        contribution = fp.get("contribution", "")
+        # v45b: Include contribution if available
+        if contribution:
+            purpose_lines.append(f"- `{file_name}`: {problem} → *{contribution}*")
+        else:
+            purpose_lines.append(f"- `{file_name}`: {problem}")
     
     file_purposes_text = "\n".join(purpose_lines) if purpose_lines else "No file purposes available"
     
+    # v45b: Format symbols section
+    symbol_lines = []
+    if symbols:
+        for sym in symbols[:15]:  # Limit to 15 symbols
+            symbol_lines.append(f"- `{sym.get('name', '?')}` ({sym.get('type', 'unknown')})")
+    symbols_section = "\n".join(symbol_lines) if symbol_lines else "No symbols indexed"
+    
     return MODULE_AGGREGATION_PROMPT.format(
         directory_path=directory_path,
-        file_purposes=file_purposes_text
+        file_purposes=file_purposes_text,
+        symbols_section=symbols_section
     )
 
 
@@ -225,20 +260,31 @@ def build_project_purpose_prompt(
     Args:
         project_id: Project identifier
         project_path: Absolute path to project
-        module_summaries: List of {file, problem} for top files
+        module_summaries: List of module info dicts. Supports:
+            - v43 format: {file, problem}
+            - v45c format: {path, purpose, architecture_role}
         file_count: Total files in project
         languages: List of detected languages
         
     Returns:
         Formatted prompt string
     """
-    # Format module summaries
+    # Format module summaries - v45c supports both old and new formats
     if module_summaries:
         lines = []
         for mod in module_summaries[:10]:  # Limit to 10
-            file_name = mod.get("file", "unknown").split("/")[-1]
-            problem = mod.get("problem", "Unknown purpose")[:100]
-            lines.append(f"- `{file_name}`: {problem}")
+            # v45c: Support both path/purpose and file/problem formats
+            path = mod.get("path", mod.get("file", "unknown"))
+            display_name = path.split("/")[-1] if "/" in path else path
+            purpose = mod.get("purpose", mod.get("problem", "Unknown purpose"))[:100]
+            
+            line = f"- `{display_name}`: {purpose}"
+            
+            # v45c: Add architecture_role if present
+            if mod.get("architecture_role"):
+                line += f" [Role: {mod['architecture_role'][:50]}]"
+            
+            lines.append(line)
         module_text = "\n".join(lines)
     else:
         module_text = "No module purposes available yet"

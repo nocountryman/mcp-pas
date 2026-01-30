@@ -150,6 +150,9 @@ from self_awareness_helpers import (
     get_session_statistics,
 )
 
+# Shared utilities (singleton embedding model)
+from utils import get_embedding
+
 # Load environment variables
 load_dotenv()
 
@@ -871,11 +874,8 @@ async def search_relevant_laws(query: str, limit: int = 5) -> dict[str, Any]:
         List of relevant laws with similarity scores
     """
     try:
-        from sentence_transformers import SentenceTransformer
-        
-        # Generate embedding for the query
-        model = SentenceTransformer('all-mpnet-base-v2')
-        query_embedding = model.encode([query])[0].tolist()
+        # Use singleton embedding from utils
+        query_embedding = get_embedding(query)
         
         conn = get_db_connection()
         cur = conn.cursor()
@@ -926,14 +926,284 @@ async def search_relevant_laws(query: str, limit: int = 5) -> dict[str, Any]:
 
 
 # =============================================================================
+# v44b: Requirement Extraction Tools
+# =============================================================================
+
+@mcp.tool()
+async def prepare_prompt_analysis(session_id: str) -> dict[str, Any]:
+    """
+    Returns analysis prompt with laws pulled from DB.
+    
+    Gets the verbatim log for the session and searches for relevant
+    psychology laws to include in the prompt template.
+    
+    Args:
+        session_id: The reasoning session UUID
+        
+    Returns:
+        Prompt context with verbatim text and available psychology laws
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Get verbatim text from conversation_log
+        cur.execute(
+            """
+            SELECT raw_text FROM conversation_log
+            WHERE session_id = %s AND log_type = 'verbatim'
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (session_id,)
+        )
+        row = cur.fetchone()
+        verbatim_text = row["raw_text"] if row else None
+        
+        if not verbatim_text:
+            safe_close_connection(conn)
+            return {
+                "success": False,
+                "error": "No verbatim log found for session"
+            }
+        
+        # Search for psychology-related laws
+        query = "requirement elicitation psychology hedging speech act user intent"
+        query_embedding = get_embedding(query)
+        
+        cur.execute(
+            """
+            SELECT 
+                id,
+                law_name,
+                definition,
+                scientific_weight,
+                law_domain,
+                1 - (embedding <=> %s::vector) as similarity
+            FROM scientific_laws
+            WHERE embedding IS NOT NULL
+            ORDER BY embedding <=> %s::vector
+            LIMIT 10
+            """,
+            (query_embedding, query_embedding)
+        )
+        
+        laws = []
+        for row in cur.fetchall():
+            laws.append({
+                "id": row["id"],
+                "law_name": row["law_name"],
+                "definition": row["definition"],
+                "scientific_weight": float(row["scientific_weight"]),
+                "law_domain": row["law_domain"]
+            })
+        
+        # Format laws for prompt
+        laws_text = "\n".join([
+            f"- **{law['law_name']}** (id: {law['id']}): {law['definition']}"
+            for law in laws
+        ])
+        
+        analysis_prompt = f"""## Requirement & Pattern Extraction Analysis
+
+### User Prompt
+```
+{verbatim_text}
+```
+
+### Available Techniques (cite which you use)
+{laws_text}
+
+### Instructions
+1. Extract explicit requirements (direct requests)
+2. Extract implicit requirements (inferred from context)
+3. Identify uncertainty markers (hedging language)
+4. **Detect speech patterns:**
+   - **Hesitation**: Ellipsis (...), filler words (like, basically), mid-sentence rephrasing, heavy hedging
+   - **Enthusiasm**: Exclamation marks, superlatives (ideal, perfect), intensive adverbs (really, very)
+   - **Concern**: Repetition of constraints (must, only), risk/failure words, security focus
+5. For each extraction, cite which law/technique you applied
+
+### Output Format
+Return ONLY valid JSON:
+```json
+{{
+  "explicit_requirements": [{{"text": "...", "confidence": 0.9}}],
+  "implicit_requirements": [{{"text": "...", "inferred_from": "..."}}],
+  "uncertainty_markers": [{{"phrase": "...", "type": "hedging"}}],
+  "speech_patterns": [
+    {{"type": "hesitation"|"enthusiasm"|"concern", "markers": ["..."], "confidence": 0.8, "source_phrase": "..."}}
+  ],
+  "laws_applied": [
+    {{"law_id": 16, "law_name": "Laddering", "applied_to": "requirement 1", "confidence": 0.9}}
+  ]
+}}
+```"""
+
+        
+        safe_close_connection(conn)
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "verbatim_text": verbatim_text,
+            "available_laws": [{"id": l["id"], "name": l["law_name"]} for l in laws],
+            "analysis_prompt": analysis_prompt
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to prepare prompt analysis: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def store_prompt_analysis(
+    session_id: str,
+    analysis_json: str
+) -> dict[str, Any]:
+    """
+    Store LLM analysis with law citations.
+    
+    Stores extracted requirements and creates junction records
+    linking requirements to the laws used to extract them.
+    
+    Args:
+        session_id: The reasoning session UUID
+        analysis_json: JSON string with extraction results
+        
+    Returns:
+        Confirmation with counts of stored items
+    """
+    try:
+        analysis = json.loads(analysis_json)
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        stored_count = 0
+        citation_count = 0
+        
+        # Store explicit requirements
+        for req in analysis.get("explicit_requirements", []):
+            embedding = get_embedding(req["text"])
+            
+            cur.execute(
+                """
+                INSERT INTO extracted_requirements 
+                    (session_id, requirement_text, requirement_type, confidence, embedding)
+                VALUES (%s, %s, %s, %s, %s::vector)
+                RETURNING id
+                """,
+                (session_id, req["text"], "explicit", req.get("confidence", 0.8), embedding)
+            )
+            req_id = cur.fetchone()["id"]
+            stored_count += 1
+            
+            # Link cited laws
+            for law in analysis.get("laws_applied", []):
+                if law.get("applied_to") and law["applied_to"].lower() in req["text"].lower():
+                    cur.execute(
+                        """
+                        INSERT INTO requirement_law_citations 
+                            (requirement_id, law_id, confidence, application_context)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (req_id, law["law_id"], law.get("confidence", 0.8), law.get("law_name"))
+                    )
+                    citation_count += 1
+        
+        # Store implicit requirements
+        for req in analysis.get("implicit_requirements", []):
+            embedding = get_embedding(req["text"])
+            
+            cur.execute(
+                """
+                INSERT INTO extracted_requirements 
+                    (session_id, requirement_text, requirement_type, inferred_from, embedding)
+                VALUES (%s, %s, %s, %s, %s::vector)
+                RETURNING id
+                """,
+                (session_id, req["text"], "implicit", req.get("inferred_from"), embedding)
+            )
+            stored_count += 1
+        
+        # Store speech patterns (v44c)
+        patterns_stored = 0
+        for pattern in analysis.get("speech_patterns", []):
+            pattern_type = pattern.get("type", "unknown")
+            markers = pattern.get("markers", [])
+            source_phrase = pattern.get("source_phrase", "")
+            confidence = pattern.get("confidence", 0.8)
+            
+            # Generate embedding for v44d synthesis
+            pattern_text = f"{pattern_type}: {source_phrase} ({', '.join(markers)})"
+            embedding = get_embedding(pattern_text)
+            
+            # Get conversation_log_id for FK (most recent verbatim log)
+            cur.execute(
+                """
+                SELECT id FROM conversation_log
+                WHERE session_id = %s AND log_type = 'verbatim'
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (session_id,)
+            )
+            log_row = cur.fetchone()
+            conversation_log_id = log_row["id"] if log_row else None
+            
+            cur.execute(
+                """
+                INSERT INTO detected_patterns 
+                    (session_id, conversation_log_id, pattern_type, markers, confidence, source_phrase, embedding)
+                VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
+                """,
+                (session_id, conversation_log_id, pattern_type, markers, confidence, source_phrase, embedding)
+            )
+            patterns_stored += 1
+        
+        conn.commit()
+        
+        # Get laws cited for response
+        laws_cited = [l["law_name"] for l in analysis.get("laws_applied", [])]
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "stored_count": stored_count,
+            "citations_created": citation_count,
+            "patterns_stored": patterns_stored,  # v44c
+            "laws_cited": laws_cited,
+            "uncertainty_markers_count": len(analysis.get("uncertainty_markers", []))
+        }
+
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in analysis: {e}")
+        return {
+            "success": False,
+            "error": f"Invalid JSON: {e}"
+        }
+    except Exception as e:
+        logger.error(f"Failed to store prompt analysis: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+# =============================================================================
 # Reasoning Tools - Expansion & Critique (Phase 1: Prompt-Driven)
 # =============================================================================
 
-def get_embedding(text: str) -> list[float]:
-    """Generate a 768-dim embedding for the given text."""
-    from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer('all-mpnet-base-v2')
-    return model.encode([text])[0].tolist()
+# NOTE: get_embedding is imported from utils (singleton, loads model once)
 
 
 @mcp.tool()
@@ -1273,6 +1543,69 @@ async def prepare_expansion(
                         logger.info(f"v43: Added project grounding for {project_id}")
             except Exception as e:
                 logger.warning(f"v43: Project grounding failed (non-fatal): {e}")
+        
+        # =====================================================================
+        # v44d: Cross-Conversation Synthesis (Single-User)
+        # Include historical patterns from detected_patterns using goal-similarity
+        # and recency. Enables LLM to leverage insights from past sessions.
+        # =====================================================================
+        try:
+            goal_text = session["goal"]
+            goal_embedding = get_embedding(goal_text[:1000])
+            
+            historical_patterns = []
+            seen_patterns = set()
+            
+            # 1. Goal-similarity patterns (semantic match)
+            cur.execute("""
+                SELECT pattern_type, source_phrase, confidence,
+                       1 - (embedding <=> %s::vector) as similarity
+                FROM detected_patterns
+                WHERE session_id != %s
+                  AND embedding IS NOT NULL
+                ORDER BY embedding <=> %s::vector
+                LIMIT 3
+            """, (goal_embedding, session_id, goal_embedding))
+            
+            for row in cur.fetchall():
+                key = (row["pattern_type"], row["source_phrase"][:50])
+                if key not in seen_patterns:
+                    seen_patterns.add(key)
+                    historical_patterns.append({
+                        "type": row["pattern_type"],
+                        "phrase": row["source_phrase"],
+                        "confidence": float(row["confidence"]) if row["confidence"] else 0.8,
+                        "similarity": round(float(row["similarity"]), 3) if row["similarity"] else None,
+                        "source": "goal_similarity"
+                    })
+            
+            # 2. Recent patterns (last 7 days)
+            cur.execute("""
+                SELECT pattern_type, source_phrase, confidence, created_at
+                FROM detected_patterns
+                WHERE session_id != %s
+                  AND created_at > NOW() - INTERVAL '7 days'
+                ORDER BY created_at DESC
+                LIMIT 3
+            """, (session_id,))
+            
+            for row in cur.fetchall():
+                key = (row["pattern_type"], row["source_phrase"][:50])
+                if key not in seen_patterns:
+                    seen_patterns.add(key)
+                    historical_patterns.append({
+                        "type": row["pattern_type"],
+                        "phrase": row["source_phrase"],
+                        "confidence": float(row["confidence"]) if row["confidence"] else 0.8,
+                        "source": "recency"
+                    })
+            
+            # Add to response if any found
+            if historical_patterns:
+                response["historical_patterns"] = historical_patterns[:5]
+                logger.info(f"v44d: Found {len(historical_patterns[:5])} historical patterns for context")
+        except Exception as e:
+            logger.warning(f"v44d: Historical pattern synthesis failed (non-fatal): {e}")
         
         return response
 
@@ -3032,11 +3365,8 @@ async def check_interview_complete(session_id: str) -> dict[str, Any]:
                     exemplar_count = cur.fetchone()[0]
                     
                     if exemplar_count > 0:
-                        from sentence_transformers import SentenceTransformer
-                        model = SentenceTransformer('all-mpnet-base-v2')
-                        
                         for desc_text in unmatched_descriptions[:5]:  # Limit to 5 for performance
-                            desc_embedding = model.encode(desc_text).tolist()
+                            desc_embedding = get_embedding(desc_text)
                             
                             cur.execute("""
                                 SELECT trait_name, 1 - (embedding <=> %s::vector) as similarity
@@ -4091,7 +4421,24 @@ async def infer_file_purpose(
         
         # Cache miss or force refresh - return prompt for LLM
         content = file_record.get("content") or ""
-        prompt = build_purpose_prompt(file_path, content)
+        
+        # v45a: Fetch indexed symbols for function-level analysis
+        symbols = []
+        try:
+            cur.execute("""
+                SELECT fs.symbol_name, fs.symbol_type, fs.line_start, fs.signature
+                FROM file_symbols fs
+                JOIN file_registry fr ON fs.file_id = fr.id
+                WHERE fr.project_id = %s AND fr.file_path = %s
+                ORDER BY fs.line_start
+                LIMIT 30
+            """, (project_id, file_path))
+            symbols = [dict(r) for r in cur.fetchall()]
+            logger.info(f"v45a: Found {len(symbols)} indexed symbols for {file_path}")
+        except Exception as e:
+            logger.debug(f"v45a: Symbol fetch failed (non-fatal): {e}")
+        
+        prompt = build_purpose_prompt(file_path, content, symbols=symbols)
         
         return {
             "success": True,
@@ -4099,6 +4446,7 @@ async def infer_file_purpose(
             "file_path": file_path,
             "file_hash": current_hash,
             "inference_prompt": prompt,
+            "symbol_count": len(symbols),  # v45a: Report symbol count
             "instructions": f"Process this prompt with LLM, then call store_file_purpose(project_id='{project_id}', file_path='{file_path}', purpose_data='<JSON result>')"
         }
         
@@ -4249,7 +4597,8 @@ async def infer_module_purpose(
                 file_purposes.append({
                     "file": file_path,
                     "problem": module_purpose.get("problem", ""),
-                    "user_need": module_purpose.get("user_need", "")
+                    "user_need": module_purpose.get("user_need", ""),
+                    "contribution": purposes.get("project_contribution", "")  # v45b
                 })
             else:
                 needs_inference.append(file_path)
@@ -4265,8 +4614,22 @@ async def infer_module_purpose(
                 "instructions": f"Call infer_file_purpose for pending files, then retry infer_module_purpose"
             }
         
-        # Build aggregation prompt
-        prompt = build_module_aggregation_prompt(directory_path, file_purposes)
+        # v45b: Fetch symbols for files in this module
+        file_paths = [f["file_path"] for f in files]
+        cur.execute("""
+            SELECT fs.symbol_name, fs.symbol_type
+            FROM file_symbols fs
+            JOIN file_registry fr ON fs.file_id = fr.id
+            WHERE fr.project_id = %s 
+              AND fr.file_path = ANY(%s)
+              AND fs.symbol_type IN ('function', 'class')
+            ORDER BY fs.line_start
+            LIMIT 20
+        """, (project_id, file_paths))
+        symbols = [{"name": r["symbol_name"], "type": r["symbol_type"]} for r in cur.fetchall()]
+        
+        # Build aggregation prompt with symbols (v45b)
+        prompt = build_module_aggregation_prompt(directory_path, file_purposes, symbols)
         
         return {
             "success": True,
@@ -4472,28 +4835,54 @@ async def infer_project_purpose(
                 "error": f"No files indexed for project {project_id}. Run sync_project first."
             }
         
-        # Get top file purposes for context
+        # v45c: First try to get aggregated module-level purposes
         cur.execute(
             """
             SELECT file_path, purpose_cache
             FROM file_registry
-            WHERE project_id = %s AND purpose_cache IS NOT NULL
-            ORDER BY line_count DESC
+            WHERE project_id = %s 
+              AND purpose_cache IS NOT NULL
+              AND purpose_cache->>'scope_type' = 'module'
+            ORDER BY file_path
             LIMIT 10
             """,
             (project_id,)
         )
-        files = cur.fetchall()
+        module_entries = cur.fetchall()
         
         module_summaries = []
-        for f in files:
-            cache = f["purpose_cache"]
-            if cache and "purposes" in cache:
-                module_purpose = cache["purposes"].get("module_purpose", {})
-                module_summaries.append({
-                    "file": f["file_path"],
-                    "problem": module_purpose.get("problem", "Unknown")
-                })
+        if module_entries:
+            # Use aggregated module purposes (v45b)
+            for m in module_entries:
+                cache = m["purpose_cache"]
+                if cache and "purposes" in cache:
+                    purposes = cache["purposes"]
+                    module_summaries.append({
+                        "path": m["file_path"],
+                        "purpose": purposes.get("module_purpose", "Unknown"),
+                        "architecture_role": purposes.get("architecture_role", "")
+                    })
+        else:
+            # Fallback: use individual file purposes (backward compatible)
+            cur.execute(
+                """
+                SELECT file_path, purpose_cache
+                FROM file_registry
+                WHERE project_id = %s AND purpose_cache IS NOT NULL
+                ORDER BY line_count DESC
+                LIMIT 10
+                """,
+                (project_id,)
+            )
+            files = cur.fetchall()
+            for f in files:
+                cache = f["purpose_cache"]
+                if cache and "purposes" in cache:
+                    module_purpose = cache["purposes"].get("module_purpose", {})
+                    module_summaries.append({
+                        "path": f["file_path"],
+                        "purpose": module_purpose.get("problem", "Unknown")
+                    })
         
         # Build prompt using helper
         from purpose_helpers import build_project_purpose_prompt
