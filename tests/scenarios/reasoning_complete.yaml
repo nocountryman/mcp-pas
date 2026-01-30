@@ -11,7 +11,7 @@ steps:
     assert:
       - success == true
       - session_id != null
-      - state == active
+      - state == "active"
   
   - tool: prepare_expansion
     args:

@@ -2,7 +2,40 @@
 
 All notable changes to PAS (Scientific Reasoning MCP) are documented here.
 
+## [v43] - 2026-01-30
+
+### Added
+- **Project Purpose Awareness** (ROADMAP) - Teleological understanding at project level
+  - PAS session `74b5612a` achieved score 1.0, gap 0.111 (quality gate PASSED)
+  - 3-phase approach: Schema & Core Tools → Purpose Helpers → Integration
+  - Synthesized hypothesis with critiqued hybrid node
+  - Each phase requires separate PAS session for implementation plan
+
+- **PAS Workflow Templates** - Standardized planning artifacts
+  - `.agent/templates/roadmap_template.md` - Multi-phase project roadmaps
+  - `.agent/templates/implementation_plan_template.md` - Single-phase implementation plans
+  - Templates enforce PAS evidence, scope declarations, verification plans
+
+### Changed
+- **`pas-planning.md` Workflow** - Major overhaul for quality gate enforcement
+  - Score ≥0.9 HARD BLOCK before proceeding
+  - Gap ≥0.08 required for decision confidence
+  - Synthesized hypotheses MUST be critiqued
+  - Roadmap vs Implementation Plan distinction
+
+- **Global GEMINI.md** - Added Rules 9-10
+  - Rule 9: Roadmap vs Implementation Plan criteria
+  - Rule 10: Synthesized hypothesis critique requirement
+  - Consolidated all PAS workflow rules (1-10)
+
+### Technical
+- PAS sessions: `74b5612a` (v43 roadmap), logged v42b session as partial (incomplete workflow)
+- First use of proper roadmap template with PAS reasoning evidence
+
+---
+
 ## [v42-tests] - 2026-01-30
+
 
 ### Added
 - **Self-Aware Test Suite** - 4-layer test architecture for PAS

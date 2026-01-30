@@ -67,7 +67,9 @@ class TestLearning:
         
         assert result["success"] is True
         if result.get("auto_recorded"):
-            assert result["outcome_id"] is not None
+            # outcome_id is nested inside outcome_result
+            outcome_result = result.get("outcome_result", {})
+            assert outcome_result.get("outcome_id") is not None
     
     @pytest.mark.asyncio
     async def test_get_calibration_stats(self, db_connection):

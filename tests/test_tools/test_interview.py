@@ -26,7 +26,8 @@ class TestInterview:
         
         assert result["success"] is True
         # May or may not have questions depending on goal complexity
-        assert "questions" in result or "no_gaps" in result
+        # API returns: questions_generated, interview_config, detected_domains
+        assert "questions_generated" in result or "no_gaps_detected" in result
     
     @pytest.mark.asyncio
     async def test_get_next_question(self, db_connection):
@@ -78,7 +79,7 @@ class TestInterview:
         result = await check_interview_complete(session["session_id"])
         
         assert result["success"] is True
-        assert "complete" in result
+        assert "is_complete" in result  # API returns is_complete
 
 
 class TestEarlyExit:

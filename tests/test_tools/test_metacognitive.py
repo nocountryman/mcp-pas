@@ -33,22 +33,25 @@ class TestMetacognitive:
         result = await advance_metacognitive_stage(session["session_id"])
         
         assert result["success"] is True
-        assert "new_stage" in result
+        assert "current_stage" in result  # API returns current_stage
         assert "stage_prompt" in result
     
     @pytest.mark.asyncio
     async def test_advance_to_specific_stage(self, db_connection):
-        """Verify jumping to specific stage."""
+        """Verify advancing through stages."""
         from server import start_reasoning_session, advance_metacognitive_stage
         
-        session = await start_reasoning_session("Test stage jump")
-        result = await advance_metacognitive_stage(
-            session["session_id"],
-            target_stage=3
-        )
+        session = await start_reasoning_session("Test stage progression")
         
-        assert result["success"] is True
-        assert result["new_stage"] == 3
+        # Must advance incrementally - can't skip stages
+        for target in range(1, 4):
+            result = await advance_metacognitive_stage(
+                session["session_id"],
+                target_stage=target
+            )
+            assert result["success"] is True
+        
+        assert result["current_stage"] == 3
 
 
 class TestSelfAwareness:
@@ -75,10 +78,14 @@ class TestSelfAwareness:
         
         assert result["success"] is True
         assert "tools" in result
-        assert len(result["tools"]) > 30  # Should have 38+ tools
+        # Tools is a dict: {"count": N, "categories": [...], "tools": [...]}
+        tools_data = result["tools"]
+        assert tools_data["count"] > 30  # Should have 38+ tools
         
         # Verify tool structure
-        tool = result["tools"][0]
+        tool_list = tools_data.get("tools", [])
+        assert len(tool_list) > 0
+        tool = tool_list[0]
         assert "name" in tool
         assert "description" in tool
     

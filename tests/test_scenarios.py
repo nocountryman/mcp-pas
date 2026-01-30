@@ -131,6 +131,18 @@ class ScenarioRunner:
                     expected = False
                 elif expected == "null":
                     expected = None
+                elif expected.startswith('"') and expected.endswith('"'):
+                    # Handle quoted strings
+                    expected = expected[1:-1]
+                elif expected.startswith("'") and expected.endswith("'"):
+                    # Handle single-quoted strings
+                    expected = expected[1:-1]
+                elif expected.isdigit():
+                    # Handle integer values
+                    expected = int(expected)
+                elif expected.replace(".", "", 1).isdigit():
+                    # Handle float values
+                    expected = float(expected)
                 
                 assert actual == expected, \
                     f"Step {step_num}: {field} == {actual}, expected {expected}"

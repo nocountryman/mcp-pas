@@ -152,16 +152,15 @@ def get_tool_registry(mcp_instance) -> List[Dict[str, Any]]:
     tools = []
     
     try:
-        # Access FastMCP's internal tool manager
-        # Note: Uses internal API - may need updates on library changes
+        # Access FastMCP's tool manager via list_tools()
         if hasattr(mcp_instance, '_tool_manager'):
             tool_manager = mcp_instance._tool_manager
-            if hasattr(tool_manager, 'tools'):
-                for name, tool in tool_manager.tools.items():
-                    # Extract category from docstring prefix if present
-                    docstring = tool.fn.__doc__ or ""
+            if hasattr(tool_manager, 'list_tools'):
+                for tool in tool_manager.list_tools():
+                    # Extract category from docstring/description if present
+                    docstring = tool.description or ""
                     category = "unknown"
-                    if "reasoning" in docstring.lower():
+                    if "reasoning" in docstring.lower() or "session" in docstring.lower():
                         category = "reasoning"
                     elif "codebase" in docstring.lower() or "project" in docstring.lower():
                         category = "codebase"
@@ -169,16 +168,16 @@ def get_tool_registry(mcp_instance) -> List[Dict[str, Any]]:
                         category = "calibration"
                     elif "learning" in docstring.lower() or "outcome" in docstring.lower():
                         category = "learning"
-                    elif "interview" in docstring.lower():
+                    elif "interview" in docstring.lower() or "question" in docstring.lower():
                         category = "interview"
                     elif "purpose" in docstring.lower():
                         category = "purpose"
-                    elif "metacognitive" in docstring.lower():
+                    elif "metacognitive" in docstring.lower() or "stage" in docstring.lower():
                         category = "metacognitive"
                     
                     tools.append({
-                        "name": name,
-                        "description": docstring.split("\n")[0] if docstring else None,
+                        "name": tool.name,
+                        "description": docstring.split("\n")[0].strip() if docstring else None,
                         "category": category
                     })
         

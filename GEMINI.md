@@ -284,3 +284,38 @@ Session `49ea0e60` showed that v42 Feature Tracker planning missed `purpose_help
 | **Auto** | `prepare_expansion` returns `related_modules` from semantic search |
 
 > **v42a Change**: Codebase research is now mandatory before hypothesis generation.
+
+---
+
+## Rule 10: Roadmap vs Implementation Plan 📋 (v43)
+
+**Multi-phase work = ROADMAP first, then per-phase implementation plans.**
+
+### Decision Criteria
+
+| Criteria | Document Type |
+|----------|---------------|
+| Single phase, actionable changes | Implementation Plan |
+| Multiple phases, cross-cutting concerns | Roadmap → then per-phase plans |
+
+### Roadmap Requirements
+
+1. **PAS session with score ≥0.9** for overall design
+2. **Diagrams** (mermaid) for architecture
+3. **Reasoning context** - new LLM session must understand without conversation history
+4. **Per-phase breakdown** - each phase gets own PAS session + implementation plan
+
+### Implementation Plan Requirements
+
+1. **Score ≥0.9** - HARD BLOCK if below
+2. **Synthesized hypotheses MUST be critiqued** - not just created
+3. **Exact code changes** - not descriptions
+4. **Runnable verification** - copy-paste commands
+
+### Templates
+
+- Roadmap: `.agent/templates/roadmap_template.md`
+- Implementation: `.agent/templates/implementation_plan_template.md`
+
+> **v43 Change**: Roadmap/Implementation distinction is now enforced with templates.
+
