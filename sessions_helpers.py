@@ -320,7 +320,7 @@ def log_verbatim_input(
         
         cur.execute("""
             INSERT INTO conversation_log 
-            (session_id, log_type, raw_text, text_embedding, user_id)
+            (session_id, log_type, raw_text, embedding, user_id)
             VALUES (%s, 'verbatim', %s, %s, %s)
             RETURNING id
         """, (session_id, raw_input, raw_embedding, user_id))
