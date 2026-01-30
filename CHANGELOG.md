@@ -5,11 +5,18 @@ All notable changes to PAS (Scientific Reasoning MCP) are documented here.
 ## [v43] - 2026-01-30
 
 ### Added
-- **Project Purpose Awareness** (ROADMAP) - Teleological understanding at project level
-  - PAS session `74b5612a` achieved score 1.0, gap 0.111 (quality gate PASSED)
-  - 3-phase approach: Schema & Core Tools → Purpose Helpers → Integration
-  - Synthesized hypothesis with critiqued hybrid node
-  - Each phase requires separate PAS session for implementation plan
+- **Project Purpose Awareness** - Teleological understanding at project level
+  - `project_registry` table with purpose_hierarchy, detected_domain, domain_confidence
+  - HNSW index on purpose_embedding for semantic search
+  - **New Tools**:
+    - `infer_project_purpose` - Returns cached purpose or LLM inference prompt
+    - `store_project_purpose` - Stores mission, user_needs, must_have_modules
+    - `analyze_completeness` - Compares must_have_modules against actual modules
+    - `get_purpose_chain` - Traces file → module → project purpose hierarchy
+  - **Helper Functions** (`purpose_helpers.py`):
+    - `PROJECT_PURPOSE_PROMPT_TEMPLATE` - 5-field project purpose inference
+    - `build_project_purpose_prompt` - Builds inference prompt from project context
+    - `parse_project_purpose_response` - Parses LLM response to structured data
 
 - **PAS Workflow Templates** - Standardized planning artifacts
   - `.agent/templates/roadmap_template.md` - Multi-phase project roadmaps
@@ -17,22 +24,22 @@ All notable changes to PAS (Scientific Reasoning MCP) are documented here.
   - Templates enforce PAS evidence, scope declarations, verification plans
 
 ### Changed
+- **`sync_project`** - Auto-upserts project_registry entry
+- **`prepare_expansion`** - Includes project grounding when project_id has purpose
+  - Adds `🎯 PROJECT MISSION` to instructions for hypothesis alignment
+  - Returns `project_grounding` field with mission, user_needs, detected_domain
+- **`config.yaml`** - Added `purpose_inference.completeness_similarity_threshold: 0.7`
 - **`pas-planning.md` Workflow** - Major overhaul for quality gate enforcement
   - Score ≥0.9 HARD BLOCK before proceeding
   - Gap ≥0.08 required for decision confidence
   - Synthesized hypotheses MUST be critiqued
-  - Roadmap vs Implementation Plan distinction
-
-- **Global GEMINI.md** - Added Rules 9-10
-  - Rule 9: Roadmap vs Implementation Plan criteria
-  - Rule 10: Synthesized hypothesis critique requirement
-  - Consolidated all PAS workflow rules (1-10)
 
 ### Technical
-- PAS sessions: `74b5612a` (v43 roadmap), logged v42b session as partial (incomplete workflow)
-- First use of proper roadmap template with PAS reasoning evidence
+- PAS sessions: `74b5612a` (roadmap, score 1.0), `e17bf57c` (Phase 1 plan, score 0.933)
+- 3-phase implementation: Schema & Core Tools → Purpose Helpers → Integration
 
 ---
+
 
 ## [v42-tests] - 2026-01-30
 

@@ -1215,6 +1215,37 @@ async def prepare_expansion(
             except Exception as e:
                 logger.warning(f"v42a: Auto semantic search failed (non-fatal): {e}")
         
+        # =====================================================================
+        # v43: Project Purpose Grounding
+        # Include project mission to ground hypotheses in teleological context
+        # =====================================================================
+        if project_id:
+            try:
+                cur.execute(
+                    """
+                    SELECT purpose_hierarchy, detected_domain
+                    FROM project_registry
+                    WHERE project_id = %s
+                    """,
+                    (project_id,)
+                )
+                project_purpose_row = cur.fetchone()
+                
+                if project_purpose_row and project_purpose_row["purpose_hierarchy"]:
+                    purpose = project_purpose_row["purpose_hierarchy"]
+                    response["project_grounding"] = {
+                        "mission": purpose.get("mission", ""),
+                        "user_needs": purpose.get("user_needs", []),
+                        "detected_domain": project_purpose_row["detected_domain"]
+                    }
+                    
+                    mission = purpose.get("mission", "")[:150]
+                    if mission:
+                        response["instructions"] += f"\n\n🎯 PROJECT MISSION: {mission}. Ensure hypotheses align with this purpose."
+                        logger.info(f"v43: Added project grounding for {project_id}")
+            except Exception as e:
+                logger.warning(f"v43: Project grounding failed (non-fatal): {e}")
+        
         return response
 
 
@@ -4523,6 +4554,293 @@ async def store_project_purpose(
     finally:
         if 'conn' in locals():
             safe_close_connection(conn)
+
+
+@mcp.tool()
+async def analyze_completeness(
+    project_id: str
+) -> dict[str, Any]:
+    """
+    Compare project's must_have_modules against actual indexed modules.
+    
+    Uses semantic similarity to match required modules from purpose_hierarchy
+    against files in file_registry. Returns implemented vs missing modules.
+    
+    Args:
+        project_id: Project identifier
+        
+    Returns:
+        Completeness analysis with implemented/missing modules
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Get project purpose
+        cur.execute(
+            """
+            SELECT purpose_hierarchy, detected_domain
+            FROM project_registry
+            WHERE project_id = %s
+            """,
+            (project_id,)
+        )
+        project = cur.fetchone()
+        
+        if not project:
+            return {
+                "success": False,
+                "error": f"Project not found: {project_id}. Run sync_project first."
+            }
+        
+        purpose_hierarchy = project["purpose_hierarchy"]
+        if not purpose_hierarchy:
+            return {
+                "success": False,
+                "error": f"Project purpose not inferred yet. Run infer_project_purpose first."
+            }
+        
+        must_have_modules = purpose_hierarchy.get("must_have_modules", [])
+        if not must_have_modules:
+            return {
+                "success": True,
+                "project_id": project_id,
+                "completeness": 1.0,
+                "message": "No must_have_modules defined in purpose hierarchy",
+                "implemented": [],
+                "missing": []
+            }
+        
+        # Get similarity threshold from config
+        threshold = 0.7  # Default
+        try:
+            import yaml
+            with open("config.yaml", "r") as f:
+                config = yaml.safe_load(f)
+                threshold = config.get("purpose_inference", {}).get(
+                    "completeness_similarity_threshold", 0.7
+                )
+        except Exception:
+            pass
+        
+        # Get all file embeddings for this project
+        cur.execute(
+            """
+            SELECT file_path, content_embedding, purpose_cache
+            FROM file_registry
+            WHERE project_id = %s AND content_embedding IS NOT NULL
+            """,
+            (project_id,)
+        )
+        files = cur.fetchall()
+        
+        if not files:
+            return {
+                "success": False,
+                "error": f"No files indexed for project {project_id}."
+            }
+        
+        # Check each required module against file embeddings
+        implemented = []
+        missing = []
+        
+        for required_module in must_have_modules:
+            # Generate embedding for required module name
+            module_embedding = get_embedding(required_module)
+            
+            # Find best matching file
+            best_match = None
+            best_similarity = 0.0
+            
+            for f in files:
+                if f["content_embedding"]:
+                    # Calculate cosine similarity
+                    similarity = 1 - (
+                        sum((a - b) ** 2 for a, b in zip(module_embedding, f["content_embedding"])) ** 0.5 / 2
+                    )
+                    if similarity > best_similarity:
+                        best_similarity = similarity
+                        best_match = f["file_path"]
+            
+            if best_similarity >= threshold:
+                implemented.append({
+                    "required": required_module,
+                    "matched_file": best_match,
+                    "similarity": round(best_similarity, 3)
+                })
+            else:
+                missing.append({
+                    "required": required_module,
+                    "best_candidate": best_match,
+                    "similarity": round(best_similarity, 3) if best_match else 0.0
+                })
+        
+        completeness = len(implemented) / len(must_have_modules) if must_have_modules else 1.0
+        
+        return {
+            "success": True,
+            "project_id": project_id,
+            "detected_domain": project["detected_domain"],
+            "completeness": round(completeness, 3),
+            "threshold": threshold,
+            "implemented": implemented,
+            "missing": missing,
+            "total_required": len(must_have_modules),
+            "total_implemented": len(implemented)
+        }
+        
+    except Exception as e:
+        logger.error(f"analyze_completeness failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def get_purpose_chain(
+    project_id: str,
+    file_path: str
+) -> dict[str, Any]:
+    """
+    Trace the purpose hierarchy from file to module to project.
+    
+    Returns the teleological context for a file, showing how it contributes
+    to higher-level goals. Useful for hypothesis grounding.
+    
+    Args:
+        project_id: Project identifier
+        file_path: File path (relative or absolute)
+        
+    Returns:
+        Purpose chain from file through module to project
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Normalize file path
+        if file_path.startswith('/'):
+            # Try to make relative
+            cur.execute(
+                "SELECT project_path FROM project_registry WHERE project_id = %s",
+                (project_id,)
+            )
+            project = cur.fetchone()
+            if project and file_path.startswith(project["project_path"]):
+                file_path = file_path[len(project["project_path"]):].lstrip('/')
+        
+        # Get file purpose
+        cur.execute(
+            """
+            SELECT file_path, purpose_cache, language
+            FROM file_registry
+            WHERE project_id = %s AND file_path = %s
+            """,
+            (project_id, file_path)
+        )
+        file_record = cur.fetchone()
+        
+        file_purpose = None
+        if file_record and file_record["purpose_cache"]:
+            cache = file_record["purpose_cache"]
+            if "purposes" in cache:
+                module_purpose = cache["purposes"].get("module_purpose", {})
+                file_purpose = {
+                    "file_path": file_record["file_path"],
+                    "language": file_record["language"],
+                    "problem": module_purpose.get("problem", ""),
+                    "user_need": module_purpose.get("user_need", ""),
+                    "project_contribution": cache["purposes"].get("project_contribution", "")
+                }
+        
+        # Get module purpose (directory level)
+        if file_record:
+            import os
+            directory = os.path.dirname(file_record["file_path"])
+            cur.execute(
+                """
+                SELECT purpose_cache
+                FROM file_registry
+                WHERE project_id = %s AND file_path = %s AND purpose_cache->>'scope_type' = 'module'
+                """,
+                (project_id, directory)
+            )
+            module_record = cur.fetchone()
+            
+            module_purpose = None
+            if module_record and module_record["purpose_cache"]:
+                cache = module_record["purpose_cache"]
+                if "purposes" in cache:
+                    module_purpose = {
+                        "directory": directory,
+                        "module_purpose": cache["purposes"].get("module_purpose", ""),
+                        "architecture_role": cache["purposes"].get("architecture_role", "")
+                    }
+        else:
+            module_purpose = None
+        
+        # Get project purpose
+        cur.execute(
+            """
+            SELECT purpose_hierarchy, detected_domain, domain_confidence
+            FROM project_registry
+            WHERE project_id = %s
+            """,
+            (project_id,)
+        )
+        project_record = cur.fetchone()
+        
+        project_purpose = None
+        if project_record and project_record["purpose_hierarchy"]:
+            project_purpose = {
+                "mission": project_record["purpose_hierarchy"].get("mission", ""),
+                "user_needs": project_record["purpose_hierarchy"].get("user_needs", []),
+                "detected_domain": project_record["detected_domain"],
+                "domain_confidence": float(project_record["domain_confidence"]) if project_record["domain_confidence"] else None
+            }
+        
+        return {
+            "success": True,
+            "project_id": project_id,
+            "file_path": file_path,
+            "purpose_chain": {
+                "file": file_purpose,
+                "module": module_purpose,
+                "project": project_purpose
+            },
+            "grounding_context": _build_grounding_context(file_purpose, module_purpose, project_purpose)
+        }
+        
+    except Exception as e:
+        logger.error(f"get_purpose_chain failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+def _build_grounding_context(
+    file_purpose: dict | None,
+    module_purpose: dict | None, 
+    project_purpose: dict | None
+) -> str:
+    """Build grounding context string for hypothesis generation."""
+    lines = []
+    
+    if project_purpose and project_purpose.get("mission"):
+        lines.append(f"**Project Mission**: {project_purpose['mission']}")
+    
+    if module_purpose and module_purpose.get("module_purpose"):
+        lines.append(f"**Module Role**: {module_purpose['module_purpose']}")
+    
+    if file_purpose and file_purpose.get("problem"):
+        lines.append(f"**File Purpose**: {file_purpose['problem']}")
+    
+    if file_purpose and file_purpose.get("project_contribution"):
+        lines.append(f"**Contribution**: {file_purpose['project_contribution']}")
+    
+    return "\n".join(lines) if lines else "No purpose context available"
 
 
 @mcp.tool()
