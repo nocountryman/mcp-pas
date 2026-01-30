@@ -86,6 +86,23 @@ Expected output: [what success looks like]
 2. [Step 2]
 ```
 
+### 5. Workflow/Skills Updates (if applicable)
+```markdown
+## Workflow Updates
+
+### Affected Workflows
+- [ ] `/workflow-name` - [describe change needed]
+
+### Affected Skills  
+- [ ] `.agent/skills/skill-name/SKILL.md` - [describe change needed]
+
+### Slashcommand Updates
+- [ ] Add new: `/new-command`
+- [ ] Update: `/existing-command` - [why]
+
+> **Skip this section** if changes don't affect agent workflows or skills.
+```
+
 ---
 
 ## ENFORCEMENT RULES
@@ -95,3 +112,4 @@ Expected output: [what success looks like]
 3. **All Critiques Addressed**: Every major flaw from store_critique must have resolution
 4. **Exact Code**: Changes must show exact code, not descriptions
 5. **Runnable Verification**: Test commands must be copy-paste runnable
+6. **Workflow Updates**: If changes affect workflows/skills, document in Section 5

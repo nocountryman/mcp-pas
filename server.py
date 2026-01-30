@@ -4385,6 +4385,31 @@ async def infer_project_purpose(
         
         # Check cache validity
         if not force_refresh and project["purpose_hierarchy"]:
+            # v43 Phase 3: Staleness detection
+            stale = False
+            stale_message = None
+            age_days = 0
+            
+            try:
+                import yaml
+                from datetime import datetime, timezone
+                
+                with open("config.yaml") as f:
+                    cfg = yaml.safe_load(f)
+                staleness_days = cfg.get("purpose_inference", {}).get("staleness_days", 7)
+                
+                if project["updated_at"]:
+                    updated_at = project["updated_at"]
+                    if updated_at.tzinfo is None:
+                        updated_at = updated_at.replace(tzinfo=timezone.utc)
+                    
+                    age_days = (datetime.now(timezone.utc) - updated_at).days
+                    stale = age_days > staleness_days
+                    if stale:
+                        stale_message = f"Purpose is {age_days} days old (threshold: {staleness_days}). Consider calling with force_refresh=True."
+            except Exception as e:
+                logger.warning(f"Staleness check failed: {e}")
+            
             return {
                 "success": True,
                 "status": "cached",
@@ -4393,7 +4418,9 @@ async def infer_project_purpose(
                 "purpose_hierarchy": project["purpose_hierarchy"],
                 "detected_domain": project["detected_domain"],
                 "domain_confidence": float(project["domain_confidence"]) if project["domain_confidence"] else None,
-                "cached_at": project["updated_at"].isoformat() if project["updated_at"] else None
+                "cached_at": project["updated_at"].isoformat() if project["updated_at"] else None,
+                "stale": stale,
+                "stale_message": stale_message
             }
         
         # Gather context for inference prompt

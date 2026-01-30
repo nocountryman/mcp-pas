@@ -18,3 +18,4 @@ session:
 # v43: Project Purpose Awareness
 purpose_inference:
   completeness_similarity_threshold: 0.7  # Minimum similarity for module to count as "implemented"
+  staleness_days: 7  # Purpose older than this triggers refresh suggestion

@@ -84,3 +84,19 @@ After synthesize_hypotheses() creates hybrid node:
 - [ ] Adding required fields
 - [ ] Schema changes
 - [ ] Any uncertainty about scope
+
+---
+
+## Workflow Refinements
+
+### Best Practices
+- **Log failures immediately**: Call `record_outcome(outcome="failure", failure_reason="...")` BEFORE fixing bugs
+- **Restart after config changes**: Server must restart to pick up `config.yaml` changes
+- **Update workflows if relevant**: Check if changes affect `.agent/workflows/` or `.agent/skills/` files
+- **Update CHANGELOG**: Add version entry after significant changes
+
+### After Implementation
+1. Run tests to verify changes
+2. Check if any skills/slashcommands need updates
+3. Call `record_outcome` with final result
+4. Commit with meaningful message referencing PAS session ID

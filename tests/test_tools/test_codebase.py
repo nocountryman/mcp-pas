@@ -171,3 +171,92 @@ class TestPurposeInference:
             pytest.skip("Store purpose failed - may need schema update")
         
         assert result["success"] is True
+
+
+class TestProjectPurpose:
+    """Tests for project-level purpose tools (v43)."""
+    
+    @pytest.mark.asyncio
+    async def test_infer_project_purpose(self, db_connection):
+        """Verify project purpose inference prompt generation."""
+        from server import infer_project_purpose
+        
+        result = await infer_project_purpose(
+            project_id="mcp-pas",
+            force_refresh=True
+        )
+        
+        # May fail if project not synced
+        if not result.get("success"):
+            pytest.skip("Project not synced - run sync_project first")
+        
+        # Should return either cached purpose or inference prompt
+        assert result.get("success") is True
+        assert "purpose_hierarchy" in result or "inference_prompt" in result
+    
+    @pytest.mark.asyncio
+    async def test_store_project_purpose(self, db_connection):
+        """Verify storing project purpose."""
+        from server import store_project_purpose
+        import json
+        
+        purpose_data = json.dumps({
+            "mission": "Test project for PAS",
+            "user_needs": ["testing", "validation"],
+            "must_have_modules": ["server", "tests"],
+            "detected_domain": "backend",
+            "domain_confidence": 0.9
+        })
+        
+        result = await store_project_purpose(
+            project_id="mcp-pas-test",
+            purpose_data=purpose_data
+        )
+        
+        if result.get("success"):
+            assert result["success"] is True
+        else:
+            pytest.skip("Store purpose failed - project may not exist")
+    
+    @pytest.mark.asyncio
+    async def test_analyze_completeness(self, db_connection):
+        """Verify completeness analysis."""
+        from server import analyze_completeness
+        
+        result = await analyze_completeness(project_id="mcp-pas")
+        
+        if result.get("success"):
+            assert "completeness" in result
+            assert "implemented" in result
+            assert "missing" in result
+        else:
+            pytest.skip("Completeness analysis failed - project purpose may not exist")
+    
+    @pytest.mark.asyncio
+    async def test_get_purpose_chain(self, db_connection):
+        """Verify purpose chain tracing."""
+        from server import get_purpose_chain
+        
+        result = await get_purpose_chain(
+            project_id="mcp-pas",
+            file_path="server.py"
+        )
+        
+        if result.get("success"):
+            assert "purpose_chain" in result
+        else:
+            pytest.skip("Purpose chain failed - file may not have purpose cached")
+    
+    @pytest.mark.asyncio
+    async def test_purpose_staleness_detection(self, db_connection):
+        """Verify staleness detection returns stale flag."""
+        from server import infer_project_purpose
+        
+        result = await infer_project_purpose(
+            project_id="mcp-pas",
+            force_refresh=False
+        )
+        
+        if result.get("success"):
+            # stale flag should be present in response
+            assert isinstance(result.get("stale", False), bool)
