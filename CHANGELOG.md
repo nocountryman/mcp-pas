@@ -2,6 +2,24 @@
 
 All notable changes to PAS (Scientific Reasoning MCP) are documented here.
 
+## [v44] - 2026-01-30
+
+### Added
+- **Raw Input Logging Enforcement** - Captures verbatim user prompts for psychological analysis
+  - `raw_input` parameter on `start_reasoning_session` - stores exact user words
+  - `skip_raw_input_check` escape hatch for LLM-initiated sessions
+  - `check_raw_input_required()` preflight in `preflight_helpers.py`
+  - **HARD ENFORCED**: Sessions with user-initiated keywords fail without `raw_input`
+  - Auto-logs raw input with `log_type='verbatim'` in `conversation_log`
+
+- **Rule 11** added to `pas-planning.md` workflow
+
+### Technical
+- PAS Session: `f6a25538-d320-442a-9431-407e2186e9c7` (score 0.953)
+- Keywords detected: 'build', 'implement', 'design', 'create', 'user wants', etc.
+
+---
+
 ## [v43] - 2026-01-30
 
 ### Added
