@@ -80,6 +80,41 @@ Return ONLY valid JSON:
 """
 
 
+# v43: Project-level purpose inference template
+PROJECT_PURPOSE_PROMPT_TEMPLATE = """Analyze this project and answer these questions:
+
+**PROJECT**: {project_id}
+**PATH**: {project_path}
+
+**TOP MODULES** (most significant directories/files):
+{module_summaries}
+
+**FILE STATISTICS**:
+- Total files: {file_count}
+- Languages: {languages}
+
+---
+
+Answer at the PROJECT level:
+
+1. **MISSION**: What is the primary purpose of this entire project? (1-2 sentences)
+2. **USER NEEDS**: What user needs does this project address? (list 3-5)
+3. **MUST-HAVE MODULES**: What modules/components must exist for this project to fulfill its mission? (list 3-7)
+4. **DETECTED DOMAIN**: What domain does this project belong to? (e.g., 'backend', 'frontend', 'ml', 'devops', 'library', 'cli')
+5. **DOMAIN CONFIDENCE**: How confident are you in the domain detection? (0.0 to 1.0)
+
+---
+
+Return ONLY valid JSON:
+{{
+  "mission": "...",
+  "user_needs": ["need1", "need2", "need3"],
+  "must_have_modules": ["module1", "module2", "module3"],
+  "detected_domain": "...",
+  "domain_confidence": 0.9
+}}
+"""
+
 
 def build_purpose_prompt(
     file_path: str, 
@@ -174,6 +209,97 @@ def parse_module_response(response: str) -> Optional[Dict[str, Any]]:
         
     except (json.JSONDecodeError, AttributeError):
         return None
+
+
+# v43: Project-level purpose helpers
+def build_project_purpose_prompt(
+    project_id: str,
+    project_path: str,
+    module_summaries: List[Dict[str, str]],
+    file_count: int,
+    languages: List[str]
+) -> str:
+    """
+    Build LLM prompt for project-level purpose inference.
+    
+    Args:
+        project_id: Project identifier
+        project_path: Absolute path to project
+        module_summaries: List of {file, problem} for top files
+        file_count: Total files in project
+        languages: List of detected languages
+        
+    Returns:
+        Formatted prompt string
+    """
+    # Format module summaries
+    if module_summaries:
+        lines = []
+        for mod in module_summaries[:10]:  # Limit to 10
+            file_name = mod.get("file", "unknown").split("/")[-1]
+            problem = mod.get("problem", "Unknown purpose")[:100]
+            lines.append(f"- `{file_name}`: {problem}")
+        module_text = "\n".join(lines)
+    else:
+        module_text = "No module purposes available yet"
+    
+    # Format languages
+    lang_text = ", ".join(languages[:5]) if languages else "Unknown"
+    
+    return PROJECT_PURPOSE_PROMPT_TEMPLATE.format(
+        project_id=project_id,
+        project_path=project_path,
+        module_summaries=module_text,
+        file_count=file_count,
+        languages=lang_text
+    )
+
+
+def parse_project_purpose_response(response: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse LLM response for project purpose into structured data.
+    
+    Args:
+        response: Raw LLM response (should be JSON)
+        
+    Returns:
+        Parsed project purpose dict or None if parsing fails
+    """
+    try:
+        # Handle markdown code blocks
+        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response)
+        if json_match:
+            response = json_match.group(1)
+        
+        response = response.strip()
+        data = json.loads(response)
+        
+        if not isinstance(data, dict):
+            return None
+        
+        # Validate and extract purpose hierarchy
+        purpose_hierarchy = {
+            "mission": data.get("mission", ""),
+            "user_needs": data.get("user_needs", []),
+            "must_have_modules": data.get("must_have_modules", [])
+        }
+        
+        # Validate types
+        if not isinstance(purpose_hierarchy["user_needs"], list):
+            purpose_hierarchy["user_needs"] = [str(purpose_hierarchy["user_needs"])]
+        if not isinstance(purpose_hierarchy["must_have_modules"], list):
+            purpose_hierarchy["must_have_modules"] = [str(purpose_hierarchy["must_have_modules"])]
+        
+        return {
+            "purpose_hierarchy": purpose_hierarchy,
+            "detected_domain": data.get("detected_domain", ""),
+            "domain_confidence": float(data.get("domain_confidence", 0.0))
+        }
+        
+    except (json.JSONDecodeError, AttributeError, ValueError):
+        return None
+
+
 
 
 def parse_purpose_response(response: str) -> Optional[Dict[str, Any]]:

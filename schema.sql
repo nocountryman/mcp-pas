@@ -781,3 +781,44 @@ CREATE INDEX IF NOT EXISTS idx_session_call_log_session
 -- ============================================================================
 ALTER TABLE reasoning_sessions ADD COLUMN IF NOT EXISTS
     surfaced_warning_ids UUID[] DEFAULT '{}';
+
+-- ============================================================================
+-- v43: Project Purpose Awareness
+-- Project-level teleological understanding (mission, user needs, completeness)
+-- ============================================================================
+
+-- project_registry: Core project index with purpose and semantic vectors
+CREATE TABLE IF NOT EXISTS project_registry (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id          TEXT UNIQUE NOT NULL,    -- Isolation boundary (normalized from path)
+    project_path        TEXT NOT NULL,           -- Absolute path to project root
+    
+    -- Purpose hierarchy (LLM-inferred via infer_project_purpose)
+    purpose_hierarchy   JSONB,                   -- {mission: string, user_needs: string[], must_have_modules: string[]}
+    
+    -- Domain detection
+    detected_domain     TEXT,                    -- e.g., 'backend', 'frontend', 'ml', 'devops'
+    domain_confidence   DECIMAL(3,2),            -- 0.00 to 1.00
+    
+    -- Semantic embedding for project mission
+    purpose_embedding   vector(768),             -- Embedding of mission text for similarity search
+    
+    -- Metadata
+    created_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- HNSW index for semantic search on project purpose
+CREATE INDEX IF NOT EXISTS idx_project_registry_embedding
+    ON project_registry
+    USING hnsw (purpose_embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+-- Index for project_id lookups
+CREATE INDEX IF NOT EXISTS idx_project_registry_project_id
+    ON project_registry(project_id);
+
+-- Index for domain filtering
+CREATE INDEX IF NOT EXISTS idx_project_registry_domain
+    ON project_registry(detected_domain);
+

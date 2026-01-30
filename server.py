@@ -4309,6 +4309,222 @@ async def store_module_purpose(
             safe_close_connection(conn)
 
 
+# =============================================================================
+# v43: Project Purpose Awareness Tools
+# =============================================================================
+
+@mcp.tool()
+async def infer_project_purpose(
+    project_id: str,
+    force_refresh: bool = False
+) -> dict[str, Any]:
+    """
+    Get or infer project-level purpose (mission, user needs, required modules).
+    
+    Returns cached purpose if available, or a prompt for LLM inference.
+    After LLM processes the prompt, call store_project_purpose with the result.
+    
+    Args:
+        project_id: Project identifier
+        force_refresh: If True, ignore cache and return inference prompt
+        
+    Returns:
+        Cached purpose or inference prompt
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Check if project exists in project_registry
+        cur.execute(
+            """
+            SELECT project_path, purpose_hierarchy, detected_domain, domain_confidence, updated_at
+            FROM project_registry
+            WHERE project_id = %s
+            """,
+            (project_id,)
+        )
+        project = cur.fetchone()
+        
+        if not project:
+            return {
+                "success": False, 
+                "error": f"Project not found: {project_id}. Run sync_project first."
+            }
+        
+        # Check cache validity
+        if not force_refresh and project["purpose_hierarchy"]:
+            return {
+                "success": True,
+                "status": "cached",
+                "project_id": project_id,
+                "project_path": project["project_path"],
+                "purpose_hierarchy": project["purpose_hierarchy"],
+                "detected_domain": project["detected_domain"],
+                "domain_confidence": float(project["domain_confidence"]) if project["domain_confidence"] else None,
+                "cached_at": project["updated_at"].isoformat() if project["updated_at"] else None
+            }
+        
+        # Gather context for inference prompt
+        # Get file count and languages
+        cur.execute(
+            """
+            SELECT COUNT(*) as file_count, 
+                   ARRAY_AGG(DISTINCT language) FILTER (WHERE language IS NOT NULL) as languages
+            FROM file_registry
+            WHERE project_id = %s
+            """,
+            (project_id,)
+        )
+        stats = cur.fetchone()
+        file_count = stats["file_count"] or 0
+        languages = stats["languages"] or []
+        
+        if file_count == 0:
+            return {
+                "success": False,
+                "error": f"No files indexed for project {project_id}. Run sync_project first."
+            }
+        
+        # Get top file purposes for context
+        cur.execute(
+            """
+            SELECT file_path, purpose_cache
+            FROM file_registry
+            WHERE project_id = %s AND purpose_cache IS NOT NULL
+            ORDER BY line_count DESC
+            LIMIT 10
+            """,
+            (project_id,)
+        )
+        files = cur.fetchall()
+        
+        module_summaries = []
+        for f in files:
+            cache = f["purpose_cache"]
+            if cache and "purposes" in cache:
+                module_purpose = cache["purposes"].get("module_purpose", {})
+                module_summaries.append({
+                    "file": f["file_path"],
+                    "problem": module_purpose.get("problem", "Unknown")
+                })
+        
+        # Build prompt using helper
+        from purpose_helpers import build_project_purpose_prompt
+        prompt = build_project_purpose_prompt(
+            project_id=project_id,
+            project_path=project["project_path"],
+            module_summaries=module_summaries,
+            file_count=file_count,
+            languages=languages
+        )
+        
+        return {
+            "success": True,
+            "status": "needs_inference",
+            "project_id": project_id,
+            "project_path": project["project_path"],
+            "file_count": file_count,
+            "files_with_purpose": len(module_summaries),
+            "inference_prompt": prompt,
+            "instructions": f"Process this prompt with LLM, then call store_project_purpose(project_id='{project_id}', purpose_data='<JSON result>')"
+        }
+        
+    except Exception as e:
+        logger.error(f"infer_project_purpose failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def store_project_purpose(
+    project_id: str,
+    purpose_data: str  # JSON string for universal LLM compatibility
+) -> dict[str, Any]:
+    """
+    Store LLM-inferred project purpose in the project registry.
+    
+    Args:
+        project_id: Project identifier
+        purpose_data: JSON string with mission, user_needs, must_have_modules, detected_domain, domain_confidence
+        
+    Returns:
+        Confirmation with stored purpose summary
+    """
+    try:
+        # Parse purpose data
+        from purpose_helpers import parse_project_purpose_response
+        parsed = parse_project_purpose_response(purpose_data)
+        if parsed is None:
+            return {
+                "success": False, 
+                "error": "Failed to parse purpose_data. Ensure valid JSON with mission, user_needs, must_have_modules, detected_domain, domain_confidence."
+            }
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verify project exists
+        cur.execute(
+            "SELECT project_path FROM project_registry WHERE project_id = %s",
+            (project_id,)
+        )
+        project = cur.fetchone()
+        if not project:
+            return {"success": False, "error": f"Project not found: {project_id}"}
+        
+        # Generate embedding from mission text for semantic search
+        mission = parsed["purpose_hierarchy"].get("mission", "")
+        embedding = get_embedding(mission[:2000]) if mission else None
+        
+        # Update project registry
+        cur.execute(
+            """
+            UPDATE project_registry
+            SET purpose_hierarchy = %s,
+                detected_domain = %s,
+                domain_confidence = %s,
+                purpose_embedding = %s,
+                updated_at = NOW()
+            WHERE project_id = %s
+            """,
+            (
+                json.dumps(parsed["purpose_hierarchy"]),
+                parsed["detected_domain"],
+                parsed["domain_confidence"],
+                embedding,
+                project_id
+            )
+        )
+        conn.commit()
+        
+        logger.info(f"v43: Stored project purpose for {project_id}")
+        
+        purpose_hierarchy = parsed["purpose_hierarchy"]
+        return {
+            "success": True,
+            "project_id": project_id,
+            "purpose_summary": {
+                "mission": purpose_hierarchy.get("mission", "")[:200],
+                "user_needs_count": len(purpose_hierarchy.get("user_needs", [])),
+                "must_have_modules_count": len(purpose_hierarchy.get("must_have_modules", []))
+            },
+            "detected_domain": parsed["detected_domain"],
+            "domain_confidence": parsed["domain_confidence"]
+        }
+        
+    except Exception as e:
+        if 'conn' in locals():
+            conn.rollback()
+        logger.error(f"store_project_purpose failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
 @mcp.tool()
 async def advance_metacognitive_stage(
     session_id: str,
@@ -5826,6 +6042,24 @@ async def sync_project(
                     break
         
         conn.commit()
+        
+        # v43: Upsert project_registry entry
+        try:
+            cur.execute(
+                """
+                INSERT INTO project_registry (project_id, project_path)
+                VALUES (%s, %s)
+                ON CONFLICT (project_id) DO UPDATE SET
+                    project_path = EXCLUDED.project_path,
+                    updated_at = NOW()
+                """,
+                (pid, str(path))
+            )
+            conn.commit()
+            stats['project_registered'] = True
+        except Exception as reg_error:
+            logger.warning(f"v43: project_registry upsert failed: {reg_error}")
+            stats['project_registered'] = False
         
         return {
             "success": True,
