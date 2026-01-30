@@ -768,20 +768,30 @@ async def start_reasoning_session(
         # v44: Auto-log raw_input with log_type='verbatim' if provided
         if raw_input:
             try:
-                raw_embedding = get_embedding(raw_input[:2000])  # Truncate for embedding
+                # Try to get embedding, but proceed without if it fails
+                raw_embedding = None
+                try:
+                    raw_embedding = get_embedding(raw_input[:2000])
+                except Exception as embed_e:
+                    logger.warning(f"v44: Embedding failed, proceeding without: {embed_e}")
+                
                 cur.execute("""
                     INSERT INTO conversation_log 
                     (session_id, log_type, raw_text, text_embedding, user_id)
                     VALUES (%s, 'verbatim', %s, %s, %s)
                     RETURNING id
                 """, (session_id, raw_input, raw_embedding, user_id))
-                verbatim_log_id = cur.fetchone()["id"]
-                conn.commit()
-                response["verbatim_log_id"] = str(verbatim_log_id)
-                response["message"] += " Raw input logged (verbatim)."
-                logger.info(f"v44: Logged verbatim raw_input ({len(raw_input)} chars) for session {session_id}")
+                result = cur.fetchone()
+                if result:
+                    verbatim_log_id = result["id"]
+                    conn.commit()
+                    response["verbatim_log_id"] = str(verbatim_log_id)
+                    response["message"] += " Raw input logged (verbatim)."
+                    logger.info(f"v44: Logged verbatim raw_input ({len(raw_input)} chars) for session {session_id}")
+                else:
+                    logger.warning("v44: Insert returned no result")
             except Exception as e:
-                logger.warning(f"v44: Failed to log verbatim raw_input: {e}")
+                logger.error(f"v44: Failed to log verbatim raw_input: {type(e).__name__}: {e}")
         
         return response
 
