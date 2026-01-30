@@ -624,7 +624,11 @@ async def sample_agent(
 # =============================================================================
 
 @mcp.tool()
-async def start_reasoning_session(user_goal: str) -> dict[str, Any]:
+async def start_reasoning_session(
+    user_goal: str,
+    raw_input: Optional[str] = None,
+    skip_raw_input_check: bool = False
+) -> dict[str, Any]:
     """
     Start a new reasoning session for the given goal.
     
@@ -633,6 +637,8 @@ async def start_reasoning_session(user_goal: str) -> dict[str, Any]:
     
     Args:
         user_goal: The high-level goal or question to reason about
+        raw_input: v44 - Verbatim user prompt (auto-logged with log_type='verbatim')
+        skip_raw_input_check: v44 - Bypass raw_input enforcement for LLM-initiated sessions
         
     Returns:
         Dictionary with session_id and status
@@ -642,6 +648,18 @@ async def start_reasoning_session(user_goal: str) -> dict[str, Any]:
             "success": False,
             "error": "User goal cannot be empty"
         }
+    
+    # v44: Hard enforcement of raw_input for user-initiated sessions
+    if not skip_raw_input_check:
+        from preflight_helpers import check_raw_input_required
+        raw_input_warning = check_raw_input_required(user_goal, raw_input)
+        if raw_input_warning:
+            return {
+                "success": False,
+                "error": "raw_input required for user-initiated sessions",
+                "warning": raw_input_warning,
+                "hint": "Pass raw_input='<verbatim user prompt>' or skip_raw_input_check=True if LLM-initiated"
+            }
     
     try:
         conn = get_db_connection()
@@ -746,6 +764,24 @@ async def start_reasoning_session(user_goal: str) -> dict[str, Any]:
         if persistent_traits:
             response["persistent_traits"] = persistent_traits
             response["message"] += f" Loaded {len(persistent_traits)} persistent trait(s) from history."
+        
+        # v44: Auto-log raw_input with log_type='verbatim' if provided
+        if raw_input:
+            try:
+                raw_embedding = get_embedding(raw_input[:2000])  # Truncate for embedding
+                cur.execute("""
+                    INSERT INTO conversation_log 
+                    (session_id, log_type, raw_text, text_embedding, user_id)
+                    VALUES (%s, 'verbatim', %s, %s, %s)
+                    RETURNING id
+                """, (session_id, raw_input, raw_embedding, user_id))
+                verbatim_log_id = cur.fetchone()["id"]
+                conn.commit()
+                response["verbatim_log_id"] = str(verbatim_log_id)
+                response["message"] += " Raw input logged (verbatim)."
+                logger.info(f"v44: Logged verbatim raw_input ({len(raw_input)} chars) for session {session_id}")
+            except Exception as e:
+                logger.warning(f"v44: Failed to log verbatim raw_input: {e}")
         
         return response
 

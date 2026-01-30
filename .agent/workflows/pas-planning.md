@@ -100,3 +100,32 @@ After synthesize_hypotheses() creates hybrid node:
 2. Check if any skills/slashcommands need updates
 3. Call `record_outcome` with final result
 4. Commit with meaningful message referencing PAS session ID
+
+---
+
+## Rule 11: Raw Input Logging 📝 (v44)
+
+**When user provides a prompt that initiates a session:**
+
+1. Pass `raw_input` to `start_reasoning_session` with VERBATIM text
+2. Store summarized goal separately in `user_goal`
+3. If blocked by preflight, either:
+   - Add `raw_input` parameter with user's exact words
+   - Use `skip_raw_input_check=True` for LLM-initiated sessions
+
+```python
+# User-initiated session (REQUIRED: raw_input)
+mcp_pas-server_start_reasoning_session(
+    user_goal="Implement feature X for user",
+    raw_input="can you implement feature X? it should do Y and Z"
+)
+
+# LLM-initiated session (skip check)
+mcp_pas-server_start_reasoning_session(
+    user_goal="Refactor internal module",
+    skip_raw_input_check=True
+)
+```
+
+**Hard enforced**: Sessions with user-initiated keywords ('build', 'implement', 'design', etc.) will FAIL without `raw_input`.
+

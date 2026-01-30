@@ -121,3 +121,45 @@ def check_preflight_conditions(
     
     return warnings
 
+
+# ============================================================================
+# Raw Input Logging Enforcement (v44)
+# Ensures verbatim user input is captured for psychological analysis
+# ============================================================================
+
+# Keywords indicating user-initiated session (vs LLM-initiated)
+USER_INITIATED_KEYWORDS = {
+    'user wants', 'user asked', 'user requested', 'requested', 
+    'build', 'implement', 'design', 'create', 'add', 'fix',
+    'user feedback', 'user said', 'user:', 'the user'
+}
+
+
+def check_raw_input_required(user_goal: str, raw_input: Optional[str]) -> Optional[dict]:
+    """
+    Check if raw_input should be present but isn't.
+    
+    Returns warning dict if session appears user-initiated but raw_input missing.
+    Returns None if check passes.
+    """
+    if raw_input:
+        return None  # Raw input provided, all good
+    
+    if not user_goal:
+        return None  # Empty goal, nothing to check
+    
+    goal_lower = user_goal.lower()
+    
+    # Check for user-initiated keywords
+    for keyword in USER_INITIATED_KEYWORDS:
+        if keyword in goal_lower:
+            return {
+                "type": "missing_raw_input",
+                "message": f"Session appears user-initiated ('{keyword}' in goal) but raw_input not provided",
+                "suggestion": "Pass raw_input='<verbatim user prompt>' or skip_raw_input_check=True if LLM-initiated",
+                "detected_keyword": keyword
+            }
+    
+    return None
+
+
