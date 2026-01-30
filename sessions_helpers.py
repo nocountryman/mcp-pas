@@ -271,3 +271,71 @@ def build_continuation_context(
             context["user_id"] = original_context["user_id"]
     
     return context
+
+
+# =============================================================================
+# Verbatim Input Logging (v44)
+# =============================================================================
+
+import logging
+logger = logging.getLogger("pas-server")
+
+
+def log_verbatim_input(
+    cur,
+    conn,
+    session_id: str,
+    raw_input: str,
+    user_id: Optional[str] = None,
+    get_embedding_func = None
+) -> Optional[str]:
+    """
+    Log raw user input with log_type='verbatim' to conversation_log.
+    
+    This enables psychological analysis of speech patterns and word choice
+    by preserving the exact unmodified user prompt.
+    
+    Args:
+        cur: Database cursor (with dict factory)
+        conn: Database connection (for commit)
+        session_id: Session UUID to associate log with
+        raw_input: Verbatim user text
+        user_id: Optional user identifier
+        get_embedding_func: Optional embedding function (proceeds without if None or fails)
+        
+    Returns:
+        Log entry ID if successful, None if failed
+    """
+    if not raw_input:
+        return None
+    
+    try:
+        # Try to get embedding, but proceed without if it fails
+        raw_embedding = None
+        if get_embedding_func:
+            try:
+                raw_embedding = get_embedding_func(raw_input[:2000])
+            except Exception as embed_e:
+                logger.warning(f"v44: Embedding failed, proceeding without: {embed_e}")
+        
+        cur.execute("""
+            INSERT INTO conversation_log 
+            (session_id, log_type, raw_text, text_embedding, user_id)
+            VALUES (%s, 'verbatim', %s, %s, %s)
+            RETURNING id
+        """, (session_id, raw_input, raw_embedding, user_id))
+        
+        result = cur.fetchone()
+        if result:
+            log_id = result["id"]
+            conn.commit()
+            logger.info(f"v44: Logged verbatim raw_input ({len(raw_input)} chars) for session {session_id}")
+            return str(log_id)
+        else:
+            logger.warning("v44: Insert returned no result")
+            return None
+            
+    except Exception as e:
+        logger.error(f"v44: Failed to log verbatim raw_input: {type(e).__name__}: {e}")
+        return None
+
