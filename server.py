@@ -4674,20 +4674,34 @@ async def analyze_completeness(
         for required_module in must_have_modules:
             # Generate embedding for required module name
             module_embedding = get_embedding(required_module)
+            # Convert to list for comparison (v43 bugfix: numpy array truth value)
+            if hasattr(module_embedding, 'tolist'):
+                module_embedding = module_embedding.tolist()
             
             # Find best matching file
             best_match = None
             best_similarity = 0.0
             
             for f in files:
-                if f["content_embedding"]:
-                    # Calculate cosine similarity
-                    similarity = 1 - (
-                        sum((a - b) ** 2 for a, b in zip(module_embedding, f["content_embedding"])) ** 0.5 / 2
-                    )
-                    if similarity > best_similarity:
-                        best_similarity = similarity
-                        best_match = f["file_path"]
+                file_embedding = f["content_embedding"]
+                # Use explicit None check - numpy arrays fail on truthy check
+                if file_embedding is not None:
+                    # Convert file embedding to list if needed
+                    if hasattr(file_embedding, 'tolist'):
+                        file_embedding = file_embedding.tolist()
+                    elif not isinstance(file_embedding, list):
+                        file_embedding = list(file_embedding)
+                    # Calculate cosine similarity (Euclidean distance approximation)
+                    try:
+                        similarity = 1 - (
+                            sum((a - b) ** 2 for a, b in zip(module_embedding, file_embedding)) ** 0.5 / 2
+                        )
+                        if similarity > best_similarity:
+                            best_similarity = similarity
+                            best_match = f["file_path"]
+                    except Exception as e:
+                        logger.warning(f"Similarity calc failed: {e}")
+                        continue
             
             if best_similarity >= threshold:
                 implemented.append({
