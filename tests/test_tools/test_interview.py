@@ -16,7 +16,7 @@ class TestInterview:
     @pytest.mark.asyncio
     async def test_identify_gaps_generates_questions(self, db_connection):
         """Verify gap identification generates questions."""
-        from server import start_reasoning_session, identify_gaps
+        from pas.server import start_reasoning_session, identify_gaps
         
         session = await start_reasoning_session(
             "Build a user authentication system with OAuth support"
@@ -32,7 +32,7 @@ class TestInterview:
     @pytest.mark.asyncio
     async def test_get_next_question(self, db_connection):
         """Verify next question retrieval."""
-        from server import start_reasoning_session, identify_gaps, get_next_question
+        from pas.server import start_reasoning_session, identify_gaps, get_next_question
         
         session = await start_reasoning_session(
             "Design a complex distributed system with multiple components"
@@ -48,7 +48,7 @@ class TestInterview:
     @pytest.mark.asyncio
     async def test_submit_answer(self, db_connection):
         """Verify answer submission."""
-        from server import start_reasoning_session, identify_gaps, get_next_question, submit_answer
+        from pas.server import start_reasoning_session, identify_gaps, get_next_question, submit_answer
         
         session = await start_reasoning_session(
             "Create a payment processing system"
@@ -72,7 +72,7 @@ class TestInterview:
     @pytest.mark.asyncio
     async def test_check_interview_complete(self, db_connection):
         """Verify interview completion check."""
-        from server import start_reasoning_session, check_interview_complete
+        from pas.server import start_reasoning_session, check_interview_complete
         
         session = await start_reasoning_session("Simple test goal")
         
@@ -89,7 +89,7 @@ class TestEarlyExit:
     async def test_early_exit_offered_on_plateau(self, test_session_sync, db_connection):
         """Verify early exit offered when evidence plateaus."""
         import json
-        from server import get_next_question
+        from pas.server import get_next_question
         
         cur = db_connection.cursor()
         

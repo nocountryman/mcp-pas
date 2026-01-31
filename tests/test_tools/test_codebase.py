@@ -20,7 +20,7 @@ class TestCodebaseSync:
     @pytest.mark.asyncio
     async def test_sync_project_basic(self, db_connection):
         """Verify project sync creates file registry entries."""
-        from server import sync_project
+        from pas.server import sync_project
         
         # Sync the PAS project itself (meta!)
         project_path = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -38,7 +38,7 @@ class TestCodebaseSync:
     @pytest.mark.asyncio
     async def test_import_lsif(self, db_connection):
         """Verify LSIF import."""
-        from server import import_lsif
+        from pas.server import import_lsif
         import os
         
         lsif_path = os.path.join(
@@ -66,7 +66,7 @@ class TestCodebaseQuery:
     @pytest.mark.asyncio
     async def test_query_codebase_returns_results(self, db_connection):
         """Verify semantic search returns files and symbols."""
-        from server import query_codebase
+        from pas.server import query_codebase
         
         result = await query_codebase(
             query="session management database connection",
@@ -81,7 +81,7 @@ class TestCodebaseQuery:
     @pytest.mark.asyncio
     async def test_find_references(self, db_connection):
         """Verify find_references returns locations."""
-        from server import find_references
+        from pas.server import find_references
         
         result = await find_references(
             project_id="mcp-pas",
@@ -100,7 +100,7 @@ class TestCodeNavigation:
     @pytest.mark.asyncio
     async def test_go_to_definition(self, db_connection):
         """Verify go_to_definition returns location."""
-        from server import go_to_definition
+        from pas.server import go_to_definition
         
         result = await go_to_definition(
             project_id="mcp-pas",
@@ -115,7 +115,7 @@ class TestCodeNavigation:
     @pytest.mark.asyncio
     async def test_call_hierarchy(self, db_connection):
         """Verify call hierarchy traversal."""
-        from server import call_hierarchy
+        from pas.server import call_hierarchy
         
         result = await call_hierarchy(
             project_id="mcp-pas",
@@ -133,7 +133,7 @@ class TestPurposeInference:
     @pytest.mark.asyncio
     async def test_infer_file_purpose(self, db_connection):
         """Verify file purpose inference prompt generation."""
-        from server import infer_file_purpose
+        from pas.server import infer_file_purpose
         
         result = await infer_file_purpose(
             project_id="mcp-pas",
@@ -151,7 +151,7 @@ class TestPurposeInference:
     @pytest.mark.asyncio
     async def test_store_file_purpose(self, db_connection):
         """Verify storing file purpose."""
-        from server import store_file_purpose
+        from pas.server import store_file_purpose
         import json
         
         purpose_data = json.dumps({
@@ -179,7 +179,7 @@ class TestProjectPurpose:
     @pytest.mark.asyncio
     async def test_infer_project_purpose(self, db_connection):
         """Verify project purpose inference prompt generation."""
-        from server import infer_project_purpose
+        from pas.server import infer_project_purpose
         
         result = await infer_project_purpose(
             project_id="mcp-pas",
@@ -197,7 +197,7 @@ class TestProjectPurpose:
     @pytest.mark.asyncio
     async def test_store_project_purpose(self, db_connection):
         """Verify storing project purpose."""
-        from server import store_project_purpose
+        from pas.server import store_project_purpose
         import json
         
         purpose_data = json.dumps({
@@ -221,7 +221,7 @@ class TestProjectPurpose:
     @pytest.mark.asyncio
     async def test_analyze_completeness(self, db_connection):
         """Verify completeness analysis."""
-        from server import analyze_completeness
+        from pas.server import analyze_completeness
         
         result = await analyze_completeness(project_id="mcp-pas")
         
@@ -235,7 +235,7 @@ class TestProjectPurpose:
     @pytest.mark.asyncio
     async def test_get_purpose_chain(self, db_connection):
         """Verify purpose chain tracing."""
-        from server import get_purpose_chain
+        from pas.server import get_purpose_chain
         
         result = await get_purpose_chain(
             project_id="mcp-pas",
@@ -250,7 +250,7 @@ class TestProjectPurpose:
     @pytest.mark.asyncio
     async def test_purpose_staleness_detection(self, db_connection):
         """Verify staleness detection returns stale flag."""
-        from server import infer_project_purpose
+        from pas.server import infer_project_purpose
         
         result = await infer_project_purpose(
             project_id="mcp-pas",
@@ -264,7 +264,7 @@ class TestProjectPurpose:
     @pytest.mark.asyncio
     async def test_get_system_map(self, db_connection):
         """Verify system map returns module dependency graph."""
-        from server import get_system_map
+        from pas.server import get_system_map
         
         result = await get_system_map(
             project_id="mcp-pas",
@@ -288,7 +288,7 @@ class TestProjectPurpose:
     @pytest.mark.asyncio
     async def test_infer_schema_intent(self, db_connection):
         """Verify schema intent extraction returns entities."""
-        from server import infer_schema_intent
+        from pas.server import infer_schema_intent
         
         result = await infer_schema_intent(project_id="mcp-pas")
         
@@ -305,7 +305,7 @@ class TestProjectPurpose:
     @pytest.mark.asyncio
     async def test_infer_config_assumptions(self, db_connection):
         """Verify config assumption extraction."""
-        from server import infer_config_assumptions
+        from pas.server import infer_config_assumptions
         
         result = await infer_config_assumptions(
             project_id="mcp-pas",
@@ -325,7 +325,7 @@ class TestProjectPurpose:
     @pytest.mark.asyncio
     async def test_query_project_understanding(self, db_connection):
         """Verify unified project understanding query."""
-        from server import query_project_understanding
+        from pas.server import query_project_understanding
         
         result = await query_project_understanding(project_id="mcp-pas")
         

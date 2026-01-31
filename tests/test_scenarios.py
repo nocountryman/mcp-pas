@@ -40,7 +40,7 @@ class ScenarioRunner:
     
     async def run(self):
         """Execute all steps in the scenario."""
-        from server import (
+        from pas.server import (
             start_reasoning_session, prepare_expansion, store_expansion,
             prepare_critique, store_critique, finalize_session, record_outcome
         )

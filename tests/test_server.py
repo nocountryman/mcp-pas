@@ -14,7 +14,7 @@ class TestV22Traits:
     @pytest.mark.asyncio
     async def test_user_id_stored_on_session_start(self, db_connection):
         """Verify user_id is always stored in session context."""
-        from server import start_reasoning_session
+        from pas.server import start_reasoning_session
         
         result = await start_reasoning_session("v24 test: user_id storage")
         assert result["success"]
@@ -50,7 +50,7 @@ class TestV22Traits:
     @pytest.mark.asyncio
     async def test_trait_persistence_on_outcome(self, db_connection):
         """Verify traits are persisted after record_outcome."""
-        from server import start_reasoning_session, store_expansion, record_outcome
+        from pas.server import start_reasoning_session, store_expansion, record_outcome
         
         # Create session with full flow
         result = await start_reasoning_session("v24 test: trait persistence")
@@ -99,7 +99,7 @@ class TestV22LawBoosting:
     @pytest.mark.asyncio
     async def test_boost_applied_correctly(self, db_connection):
         """Verify boost is applied to law weights."""
-        from server import start_reasoning_session, prepare_expansion
+        from pas.server import start_reasoning_session, prepare_expansion
         
         # Create session
         result = await start_reasoning_session("v24 test: boost application")
@@ -180,7 +180,7 @@ class TestV23EarlyExit:
     @pytest.mark.asyncio
     async def test_evidence_tracking_populated(self, db_connection):
         """Verify evidence_history is populated after answers."""
-        from server import start_reasoning_session, identify_gaps, get_next_question, submit_answer
+        from pas.server import start_reasoning_session, identify_gaps, get_next_question, submit_answer
         
         result = await start_reasoning_session("v24 test: evidence tracking")
         session_id = result["session_id"]
@@ -210,7 +210,7 @@ class TestV23EarlyExit:
     @pytest.mark.asyncio
     async def test_early_exit_offered_on_plateau(self, test_session_sync, db_connection):
         """Verify early exit is offered when evidence delta = 0 for 3 answers."""
-        from server import get_next_question
+        from pas.server import get_next_question
         
         cur = db_connection.cursor()
         
@@ -235,7 +235,7 @@ class TestV23EarlyExit:
     @pytest.mark.asyncio
     async def test_continue_after_early_exit_declined(self, test_session_sync, db_connection):
         """Verify user can continue after declining early exit."""
-        from server import submit_answer
+        from pas.server import submit_answer
         
         cur = db_connection.cursor()
         
@@ -283,7 +283,7 @@ class TestServerBasics:
     @pytest.mark.asyncio
     async def test_server_imports(self):
         """Verify server module imports without errors."""
-        import server
+        from pas import server
         assert hasattr(server, 'start_reasoning_session')
         assert hasattr(server, 'prepare_expansion')
         assert hasattr(server, 'record_outcome')
@@ -291,7 +291,7 @@ class TestServerBasics:
     @pytest.mark.asyncio
     async def test_session_creation(self, db_connection):
         """Verify session is created successfully."""
-        from server import start_reasoning_session
+        from pas.server import start_reasoning_session
         
         result = await start_reasoning_session("v24 test: session creation")
         assert result["success"]

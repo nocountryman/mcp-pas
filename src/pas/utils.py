@@ -143,7 +143,7 @@ def is_valid_uuid(value: str) -> bool:
 
 def validate_uuid(value: str, field_name: str = "id") -> str:
     """Validate and return UUID, raising ValidationError if invalid."""
-    from errors import ValidationError
+    from pas.errors import ValidationError
     if not is_valid_uuid(value):
         raise ValidationError(field_name, f"Invalid UUID format: {value}")
     return value
@@ -155,7 +155,7 @@ def validate_uuid(value: str, field_name: str = "id") -> str:
 
 def validate_confidence(value: float, field_name: str = "confidence") -> float:
     """Validate confidence is in 0.0-1.0 range."""
-    from errors import InvalidConfidenceError
+    from pas.errors import InvalidConfidenceError
     if not (0.0 <= value <= 1.0):
         raise InvalidConfidenceError(field_name, value)
     return value
@@ -170,7 +170,7 @@ VALID_OUTCOMES = frozenset(["success", "partial", "failure"])
 
 def validate_outcome(outcome: str) -> str:
     """Validate outcome is success/partial/failure."""
-    from errors import InvalidOutcomeError
+    from pas.errors import InvalidOutcomeError
     if outcome not in VALID_OUTCOMES:
         raise InvalidOutcomeError(outcome)
     return outcome

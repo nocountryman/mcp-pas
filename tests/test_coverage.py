@@ -24,7 +24,7 @@ class TestCoverageAudit:
         This test fails when new tools are added without corresponding tests,
         automatically enforcing test coverage for new features.
         """
-        from server import get_self_awareness
+        from pas.server import get_self_awareness
         
         # Get all tools from PAS self-awareness
         awareness = await get_self_awareness()
@@ -98,7 +98,7 @@ class TestCoverageAudit:
         """
         Ensure each workflow has at least one scenario test.
         """
-        from server import get_self_awareness
+        from pas.server import get_self_awareness
         
         awareness = await get_self_awareness()
         architecture = awareness.get("architecture", {})
@@ -129,7 +129,7 @@ class TestSchemaAwareness:
     @pytest.mark.asyncio
     async def test_schema_table_count_accurate(self, db_connection):
         """Verify reported table count matches database."""
-        from server import get_self_awareness
+        from pas.server import get_self_awareness
         
         awareness = await get_self_awareness()
         reported_count = awareness["schema"]["table_count"]
@@ -151,7 +151,7 @@ class TestSchemaAwareness:
     @pytest.mark.asyncio
     async def test_tool_count_matches_server(self, db_connection):
         """Verify tool count is reasonable."""
-        from server import get_self_awareness
+        from pas.server import get_self_awareness
         
         awareness = await get_self_awareness()
         # Tools is nested: {"count": N, "tools": [...]}

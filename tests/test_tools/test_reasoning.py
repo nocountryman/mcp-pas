@@ -17,7 +17,7 @@ class TestSessionManagement:
     @pytest.mark.asyncio
     async def test_start_reasoning_session_basic(self, db_connection):
         """Verify basic session creation."""
-        from server import start_reasoning_session
+        from pas.server import start_reasoning_session
         
         result = await start_reasoning_session("Test goal for unit testing")
         
@@ -30,7 +30,7 @@ class TestSessionManagement:
     @pytest.mark.asyncio
     async def test_start_session_stores_goal(self, db_connection):
         """Verify goal is stored correctly."""
-        from server import start_reasoning_session
+        from pas.server import start_reasoning_session
         
         goal = "Unique test goal " + str(pytest.importorskip("uuid").uuid4())[:8]
         result = await start_reasoning_session(goal)
@@ -44,7 +44,7 @@ class TestSessionManagement:
     @pytest.mark.asyncio
     async def test_find_or_create_session_new(self, db_connection):
         """Verify find_or_create creates new session for unique goal."""
-        from server import find_or_create_session
+        from pas.server import find_or_create_session
         
         goal = "Brand new unique goal " + str(pytest.importorskip("uuid").uuid4())
         result = await find_or_create_session(goal)
@@ -57,7 +57,7 @@ class TestSessionManagement:
     @pytest.mark.asyncio
     async def test_find_or_create_session_existing(self, db_connection):
         """Verify find_or_create returns existing similar session."""
-        from server import start_reasoning_session, find_or_create_session
+        from pas.server import start_reasoning_session, find_or_create_session
         
         # Create initial session
         goal = "Implementing user authentication flow"
@@ -78,7 +78,7 @@ class TestExpansion:
     @pytest.mark.asyncio
     async def test_prepare_expansion_returns_context(self, db_connection):
         """Verify prepare_expansion returns required context."""
-        from server import start_reasoning_session, prepare_expansion
+        from pas.server import start_reasoning_session, prepare_expansion
         
         session = await start_reasoning_session("Test hypothesis generation")
         result = await prepare_expansion(session["session_id"])
@@ -91,7 +91,7 @@ class TestExpansion:
     @pytest.mark.asyncio
     async def test_prepare_expansion_with_project_id(self, db_connection):
         """Verify prepare_expansion with project_id returns related modules."""
-        from server import start_reasoning_session, prepare_expansion
+        from pas.server import start_reasoning_session, prepare_expansion
         
         session = await start_reasoning_session("Test with codebase context")
         result = await prepare_expansion(session["session_id"], project_id="mcp-pas")
@@ -103,7 +103,7 @@ class TestExpansion:
     @pytest.mark.asyncio
     async def test_store_expansion_single_hypothesis(self, db_connection):
         """Verify storing a single hypothesis."""
-        from server import start_reasoning_session, store_expansion
+        from pas.server import start_reasoning_session, store_expansion
         
         session = await start_reasoning_session("Test storing hypothesis")
         result = await store_expansion(
@@ -122,7 +122,7 @@ class TestExpansion:
     @pytest.mark.asyncio
     async def test_store_expansion_multiple_hypotheses(self, db_connection):
         """Verify storing multiple hypotheses."""
-        from server import start_reasoning_session, store_expansion
+        from pas.server import start_reasoning_session, store_expansion
         
         session = await start_reasoning_session("Test multiple hypotheses")
         result = await store_expansion(
@@ -147,7 +147,7 @@ class TestCritique:
     @pytest.mark.asyncio
     async def test_prepare_critique_returns_context(self, db_connection):
         """Verify prepare_critique returns node context."""
-        from server import start_reasoning_session, store_expansion, prepare_critique
+        from pas.server import start_reasoning_session, store_expansion, prepare_critique
         
         session = await start_reasoning_session("Test critique flow")
         expansion = await store_expansion(
@@ -168,7 +168,7 @@ class TestCritique:
     @pytest.mark.asyncio
     async def test_store_critique_updates_score(self, db_connection):
         """Verify critique updates node likelihood."""
-        from server import start_reasoning_session, store_expansion, store_critique
+        from pas.server import start_reasoning_session, store_expansion, store_critique
         
         session = await start_reasoning_session("Test score update")
         expansion = await store_expansion(
@@ -198,7 +198,7 @@ class TestFinalization:
     @pytest.mark.asyncio
     async def test_get_best_path(self, db_connection):
         """Verify best path retrieval."""
-        from server import start_reasoning_session, store_expansion, get_best_path
+        from pas.server import start_reasoning_session, store_expansion, get_best_path
         
         session = await start_reasoning_session("Test best path")
         await store_expansion(
@@ -220,7 +220,7 @@ class TestFinalization:
     @pytest.mark.asyncio
     async def test_finalize_session_returns_recommendation(self, db_connection):
         """Verify finalize returns recommendation."""
-        from server import start_reasoning_session, store_expansion, finalize_session
+        from pas.server import start_reasoning_session, store_expansion, finalize_session
         
         session = await start_reasoning_session("Test finalization")
         await store_expansion(
@@ -239,7 +239,7 @@ class TestFinalization:
     @pytest.mark.asyncio
     async def test_record_outcome_success(self, db_connection):
         """Verify recording successful outcome."""
-        from server import start_reasoning_session, store_expansion, record_outcome
+        from pas.server import start_reasoning_session, store_expansion, record_outcome
         
         session = await start_reasoning_session("Test outcome recording")
         await store_expansion(
@@ -262,7 +262,7 @@ class TestFinalization:
     @pytest.mark.asyncio
     async def test_record_outcome_failure_with_reason(self, db_connection):
         """Verify recording failure with semantic reason."""
-        from server import start_reasoning_session, store_expansion, record_outcome
+        from pas.server import start_reasoning_session, store_expansion, record_outcome
         
         session = await start_reasoning_session("Test failure recording")
         await store_expansion(

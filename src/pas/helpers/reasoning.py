@@ -9,7 +9,7 @@ import math
 import random
 from typing import Any, Optional
 
-from utils import detect_negation
+from pas.utils import detect_negation
 
 # =============================================================================
 # Constants

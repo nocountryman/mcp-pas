@@ -39,7 +39,7 @@ def get_db_connection():
 
 
 # Use singleton embedding model from utils
-from utils import get_embedding
+from pas.utils import get_embedding
 
 
 # =============================================================================

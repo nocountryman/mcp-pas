@@ -32,7 +32,7 @@ def event_loop():
 @pytest.fixture
 def db_connection():
     """Provide test database connection with rollback."""
-    from server import get_db_connection, safe_close_connection
+    from pas.server import get_db_connection, safe_close_connection
     conn = get_db_connection()
     yield conn
     conn.rollback()  # Undo test changes
@@ -113,7 +113,7 @@ def pytest_runtest_makereport(item, call):
     
     try:
         # Import PAS tools (lazy import to avoid circular deps)
-        from server import start_reasoning_session, store_expansion, record_outcome
+        from pas.server import start_reasoning_session, store_expansion, record_outcome
         
         # Get failure details
         failure_category = categorize_failure(report.longrepr)

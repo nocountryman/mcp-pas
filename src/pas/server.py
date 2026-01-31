@@ -27,7 +27,7 @@ from mcp.types import (
 )
 
 # v39: Modularized imports
-from reasoning_helpers import (
+from pas.helpers.reasoning import (
     apply_heuristic_penalties as _apply_heuristic_penalties,
     get_outcome_multiplier as _get_outcome_multiplier,
     compute_critique_accuracy as _compute_critique_accuracy,
@@ -47,7 +47,7 @@ from reasoning_helpers import (
     DOMAIN_PATTERNS,
 )
 
-from learning_helpers import (
+from pas.helpers.learning import (
     parse_terminal_signals,
     extract_failure_reason,
     signal_to_outcome,
@@ -59,7 +59,7 @@ from learning_helpers import (
     FAILURE_REASON_PATTERNS,
 )
 
-from interview_helpers import (
+from pas.helpers.interview import (
     get_interview_context,
     extract_domain_from_goal,
     process_interview_answer,
@@ -72,7 +72,7 @@ from interview_helpers import (
     DOMAIN_KEYWORDS,
 )
 
-from codebase_helpers import (
+from pas.helpers.codebase import (
     extract_symbols as _extract_symbols,
     get_language_from_path,
     should_skip_file,
@@ -86,7 +86,7 @@ from codebase_helpers import (
     SKIP_DIRS,
 )
 
-from sessions_helpers import (
+from pas.helpers.sessions import (
     derive_user_id_from_goal,
     compute_decayed_trait_score,
     should_include_trait,
@@ -105,7 +105,7 @@ from sessions_helpers import (
 )
 
 # v40: Hybrid synthesis helpers (complementarity detection)
-from hybrid_helpers import (
+from pas.helpers.hybrid import (
     detect_complementarity,
     synthesize_hypothesis_text,
     extract_addressed_goals,
@@ -113,7 +113,7 @@ from hybrid_helpers import (
 )
 
 # v40 Phase 1: Purpose inference helpers
-from purpose_helpers import (
+from pas.helpers.purpose import (
     build_purpose_prompt,
     parse_purpose_response,
     validate_purpose_cache,
@@ -125,7 +125,7 @@ from purpose_helpers import (
 )
 
 # v40 Phase 2: Metacognitive 5-stage prompting
-from metacognitive_helpers import (
+from pas.helpers.metacognitive import (
     METACOGNITIVE_STAGES,
     get_stage_info,
     get_stage_prompt,
@@ -135,7 +135,7 @@ from metacognitive_helpers import (
 )
 
 # v40 Phase 3: CSR Calibration
-from calibration_helpers import (
+from pas.helpers.calibration import (
     OUTCOME_MAPPING,
     map_outcome_to_numeric,
     compute_calibration_stats,
@@ -143,7 +143,7 @@ from calibration_helpers import (
 )
 
 # v40 Phase 4: Self-Awareness
-from self_awareness_helpers import (
+from pas.helpers.self_awareness import (
     ARCHITECTURE_MAP,
     get_schema_info,
     get_tool_registry,
@@ -151,7 +151,7 @@ from self_awareness_helpers import (
 )
 
 # Shared utilities (singleton embedding model)
-from utils import get_embedding
+from pas.utils import get_embedding
 
 # Load environment variables
 load_dotenv()
@@ -169,7 +169,7 @@ from pathlib import Path
 
 def load_config() -> dict:
     """Load configuration from config.yaml, with env var overrides."""
-    config_path = Path(__file__).parent / "config.yaml"
+    config_path = Path(__file__).parent / "config" / "config.yaml"
     
     # Default config (fallback if file doesn't exist)
     config = {
@@ -654,7 +654,7 @@ async def start_reasoning_session(
     
     # v44: Hard enforcement of raw_input for user-initiated sessions
     if not skip_raw_input_check:
-        from preflight_helpers import check_raw_input_required
+        from pas.helpers.preflight import check_raw_input_required
         raw_input_warning = check_raw_input_required(user_goal, raw_input)
         if raw_input_warning:
             return {
@@ -770,7 +770,7 @@ async def start_reasoning_session(
         
         # v44: Auto-log raw_input with log_type='verbatim' if provided
         if raw_input:
-            from sessions_helpers import log_verbatim_input
+            from pas.helpers.sessions import log_verbatim_input
             verbatim_log_id = log_verbatim_input(
                 cur, conn, session_id, raw_input, user_id, get_embedding
             )
@@ -1446,7 +1446,7 @@ async def prepare_expansion(
         # v41: Preflight Enforcement - SQL Detection
         # =====================================================================
         try:
-            from preflight_helpers import detect_sql_operations, log_tool_call
+            from pas.helpers.preflight import detect_sql_operations, log_tool_call
             
             # Detect SQL operations in goal or parent content
             combined_text = f"{session['goal']} {parent_content}"
@@ -1898,7 +1898,7 @@ async def store_expansion(
         preflight_warnings = []
         preflight_bypassed = False
         try:
-            from preflight_helpers import check_preflight_conditions, log_tool_call
+            from pas.helpers.preflight import check_preflight_conditions, log_tool_call
             
             if skip_preflight:
                 # Log bypass for outcome correlation
@@ -2638,7 +2638,7 @@ def archive_interview_to_history(cur, session_id: str, goal: str, interview: dic
     
     Extracts domain from goal and stores each answered question with its context.
     """
-    from engine import get_embedding
+    from pas.engine import get_embedding
     
     # Extract domain from goal (first meaningful word after common prefixes)
     goal_lower = goal.lower()
@@ -4820,7 +4820,7 @@ async def infer_project_purpose(
                 import yaml
                 from datetime import datetime, timezone
                 
-                with open("config.yaml") as f:
+                with open(Path(__file__).parent / "config" / "config.yaml") as f:
                     cfg = yaml.safe_load(f)
                 staleness_days = cfg.get("purpose_inference", {}).get("staleness_days", 7)
                 
@@ -4920,7 +4920,7 @@ async def infer_project_purpose(
                     })
         
         # Build prompt using helper
-        from purpose_helpers import build_project_purpose_prompt
+        from pas.helpers.purpose import build_project_purpose_prompt
         prompt = build_project_purpose_prompt(
             project_id=project_id,
             project_path=project["project_path"],
@@ -4965,7 +4965,7 @@ async def store_project_purpose(
     """
     try:
         # Parse purpose data
-        from purpose_helpers import parse_project_purpose_response
+        from pas.helpers.purpose import parse_project_purpose_response
         parsed = parse_project_purpose_response(purpose_data)
         if parsed is None:
             return {
@@ -5094,7 +5094,7 @@ async def analyze_completeness(
         threshold = 0.7  # Default
         try:
             import yaml
-            with open("config.yaml", "r") as f:
+            with open(Path(__file__).parent / "config" / "config.yaml", "r") as f:
                 config = yaml.safe_load(f)
                 threshold = config.get("purpose_inference", {}).get(
                     "completeness_similarity_threshold", 0.7
@@ -5435,14 +5435,14 @@ async def infer_schema_intent(
         conn = get_db_connection()
         
         # Reuse existing schema introspection
-        from self_awareness_helpers import get_schema_info
+        from pas.helpers.self_awareness import get_schema_info
         schema_info = get_schema_info(conn)
         
         if "error" in schema_info:
             return {"success": False, "error": schema_info["error"]}
         
         # Extract entities using heuristics
-        from schema_intent_helpers import extract_schema_entities, build_enrichment_prompt
+        from pas.helpers.schema_intent import extract_schema_entities, build_enrichment_prompt
         extraction = extract_schema_entities(
             tables=schema_info.get("tables", {}),
             relationships=schema_info.get("relationships", [])
@@ -5557,7 +5557,7 @@ async def infer_config_assumptions(
         Extracted assumptions with enrichment_prompt for LLM refinement
     """
     try:
-        from config_assumptions_helpers import parse_config_file, extract_assumptions, build_enrichment_prompt
+        from pas.helpers.config_assumptions import parse_config_file, extract_assumptions, build_enrichment_prompt
         
         # Parse config
         config = parse_config_file(config_path)
