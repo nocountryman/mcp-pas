@@ -3916,6 +3916,38 @@ async def finalize_session(
         # v17c: Focus on business value, not code quality (RLVR handles that)
         outcome_prompt = f"Did this solve your business problem? record_outcome(session_id='{session_id}', outcome='success'|'partial'|'failure'). Note: Code quality is validated automatically by RLVR."
         
+        # v48: Parallel Critique Window - identify mid-range candidates for optional exploration
+        pending_critiques: list[dict[str, Any]] = []
+        explore_alternatives_prompt = None
+        try:
+            pc_config = config.get("parallel_critique", {})
+            if pc_config.get("enabled", False) and len(processed) > 1:
+                ratio = pc_config.get("critique_ratio", 0.7)
+                max_cand = pc_config.get("max_candidates", 3)
+                threshold = recommendation["final_score"] * ratio
+                
+                for p in processed[1:]:  # Skip winner
+                    if p["final_score"] >= threshold and len(pending_critiques) < max_cand:
+                        pending_critiques.append({
+                            "node_id": p["node_id"],
+                            "content": p["content"][:200],
+                            "score": round(p["final_score"], 4)
+                        })
+                
+                if pending_critiques:
+                    # Store in session context
+                    updated_context = session.get("context") or {}
+                    updated_context["pending_critiques"] = pending_critiques
+                    cur.execute(
+                        "UPDATE reasoning_sessions SET context = %s WHERE id = %s",
+                        (json.dumps(updated_context), session_id)
+                    )
+                    conn.commit()
+                    explore_alternatives_prompt = f"Mid-range alternatives available. Call explore_alternatives(session_id='{session_id}') to review."
+                    logger.info(f"v48: Queued {len(pending_critiques)} alternatives for exploration in session {session_id}")
+        except Exception as e:
+            logger.warning(f"v48: Parallel critique identification failed: {e}")
+        
         # v8c: Implementation checklist - bridge reasoning to action
         implementation_checklist = []
         winning_content = recommendation["content"]
@@ -4187,7 +4219,10 @@ Focus on OMISSIONS, not flaws.""",
             "sequential_analysis": sequential_analysis,
             "systemic_gaps": systemic_gaps,
             # v40: Complementarity detection
-            "complementarity": complementarity_result
+            "complementarity": complementarity_result,
+            # v48: Parallel critique window
+            "pending_critiques": pending_critiques if pending_critiques else None,
+            "explore_alternatives_prompt": explore_alternatives_prompt
         }
 
 
@@ -5278,6 +5313,471 @@ async def get_purpose_chain(
             safe_close_connection(conn)
 
 
+@mcp.tool()
+async def get_system_map(
+    project_id: str,
+    include_weights: bool = True
+) -> dict[str, Any]:
+    """
+    Build module dependency graph from symbol references.
+    
+    Aggregates cross-file references by directory to show which modules
+    depend on which others. Part of v45d System Mapping.
+    
+    Args:
+        project_id: Project identifier
+        include_weights: If True, include call counts as edge weights (default: True)
+        
+    Returns:
+        MODULE_RELATIONSHIP_GRAPH with nodes, edges, and stats
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verify project exists
+        cur.execute(
+            "SELECT project_id FROM project_registry WHERE project_id = %s",
+            (project_id,)
+        )
+        if not cur.fetchone():
+            return {"success": False, "error": f"Project not found: {project_id}"}
+        
+        # Aggregate symbol_references by module directory
+        # CTE extracts directories, then filter/group at module level
+        cur.execute(
+            """
+            WITH module_deps AS (
+                SELECT 
+                    COALESCE(NULLIF(regexp_replace(source_file, '/[^/]+$', ''), ''), '.') as source_module,
+                    COALESCE(NULLIF(regexp_replace(target_file, '/[^/]+$', ''), ''), '.') as target_module
+                FROM symbol_references
+                WHERE project_id = %s
+            )
+            SELECT source_module, target_module, COUNT(*) as weight
+            FROM module_deps
+            WHERE source_module != target_module
+            GROUP BY source_module, target_module
+            ORDER BY weight DESC
+            LIMIT 500
+            """,
+            (project_id,)
+        )
+        rows = cur.fetchall()
+        
+        if not rows:
+            return {
+                "success": True,
+                "project_id": project_id,
+                "nodes": [],
+                "edges": [],
+                "stats": {"module_count": 0, "edge_count": 0},
+                "note": "No cross-module dependencies found. Ensure project is synced and has symbol_references."
+            }
+        
+        # Build unique nodes set and edges list
+        nodes_set = set()
+        edges = []
+        for row in rows:
+            nodes_set.add(row["source_module"])
+            nodes_set.add(row["target_module"])
+            edge = {
+                "source": row["source_module"],
+                "target": row["target_module"]
+            }
+            if include_weights:
+                edge["weight"] = row["weight"]
+            edges.append(edge)
+        
+        nodes = sorted(list(nodes_set))
+        
+        logger.info(f"v45d: System map for {project_id}: {len(nodes)} modules, {len(edges)} edges")
+        
+        return {
+            "success": True,
+            "project_id": project_id,
+            "nodes": nodes,
+            "edges": edges,
+            "stats": {
+                "module_count": len(nodes),
+                "edge_count": len(edges)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"get_system_map failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def infer_schema_intent(
+    project_id: str
+) -> dict[str, Any]:
+    """
+    Extract domain entities from database schema using information_schema.
+    
+    Uses heuristic classification to identify entities, configurations,
+    audit tables, and junction tables. Returns an enrichment_prompt for
+    optional LLM semantic analysis.
+    
+    Part of v45e Schema→Intent.
+    
+    Args:
+        project_id: Project identifier
+        
+    Returns:
+        Extracted entities with enrichment_prompt for LLM refinement
+    """
+    try:
+        conn = get_db_connection()
+        
+        # Reuse existing schema introspection
+        from self_awareness_helpers import get_schema_info
+        schema_info = get_schema_info(conn)
+        
+        if "error" in schema_info:
+            return {"success": False, "error": schema_info["error"]}
+        
+        # Extract entities using heuristics
+        from schema_intent_helpers import extract_schema_entities, build_enrichment_prompt
+        extraction = extract_schema_entities(
+            tables=schema_info.get("tables", {}),
+            relationships=schema_info.get("relationships", [])
+        )
+        
+        # Build optional enrichment prompt
+        enrichment_prompt = build_enrichment_prompt(
+            entities=extraction.get("entities", []),
+            relationships=extraction.get("relationships", [])
+        )
+        
+        logger.info(f"v45e: Extracted {len(extraction['entities'])} entities for {project_id}")
+        
+        return {
+            "success": True,
+            "project_id": project_id,
+            **extraction,
+            "enrichment_prompt": enrichment_prompt,
+            "instructions": f"Optionally process enrichment_prompt with LLM, then call store_schema_intent(project_id='{project_id}', intent_json='<result>')"
+        }
+        
+    except Exception as e:
+        logger.error(f"infer_schema_intent failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def store_schema_intent(
+    project_id: str,
+    intent_json: str
+) -> dict[str, Any]:
+    """
+    Store schema intent (enriched entities) in project_registry.
+    
+    Args:
+        project_id: Project identifier
+        intent_json: JSON string with entities and enrichment data
+        
+    Returns:
+        Confirmation with stored entity count
+    """
+    try:
+        intent_data = json.loads(intent_json)
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verify project exists
+        cur.execute(
+            "SELECT project_id FROM project_registry WHERE project_id = %s",
+            (project_id,)
+        )
+        if not cur.fetchone():
+            return {"success": False, "error": f"Project not found: {project_id}"}
+        
+        # Store detected entities
+        cur.execute(
+            """
+            UPDATE project_registry 
+            SET detected_entities = %s, updated_at = NOW()
+            WHERE project_id = %s
+            """,
+            (json.dumps(intent_data), project_id)
+        )
+        conn.commit()
+        
+        entity_count = len(intent_data.get("entities", intent_data.get("enriched_entities", [])))
+        logger.info(f"v45e: Stored {entity_count} entities for {project_id}")
+        
+        return {
+            "success": True,
+            "project_id": project_id,
+            "entities_stored": entity_count,
+            "message": f"Schema intent stored with {entity_count} entities"
+        }
+        
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Invalid JSON: {e}"}
+    except Exception as e:
+        if 'conn' in locals():
+            conn.rollback()
+        logger.error(f"store_schema_intent failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def infer_config_assumptions(
+    project_id: str,
+    config_path: str = "config.yaml"
+) -> dict[str, Any]:
+    """
+    Extract implicit assumptions from configuration files.
+    
+    Parses YAML/JSON config and identifies:
+    - Threshold values (performance expectations)
+    - Time-based values (scheduling requirements)
+    - Path/URL values (deployment constraints)
+    
+    Part of v45f Config→Assumptions.
+    
+    Args:
+        project_id: Project identifier
+        config_path: Path to config file (relative to project or absolute)
+        
+    Returns:
+        Extracted assumptions with enrichment_prompt for LLM refinement
+    """
+    try:
+        from config_assumptions_helpers import parse_config_file, extract_assumptions, build_enrichment_prompt
+        
+        # Parse config
+        config = parse_config_file(config_path)
+        
+        # Extract assumptions using heuristics
+        assumptions = extract_assumptions(config)
+        
+        # Build enrichment prompt
+        enrichment_prompt = build_enrichment_prompt(assumptions, config_path)
+        
+        # Categorize assumptions
+        by_type: dict[str, list] = {}
+        for a in assumptions:
+            t = a.get("type", "unknown")
+            if t not in by_type:
+                by_type[t] = []
+            by_type[t].append(a)
+        
+        logger.info(f"v45f: Extracted {len(assumptions)} assumptions from {config_path}")
+        
+        return {
+            "success": True,
+            "project_id": project_id,
+            "config_path": config_path,
+            "assumptions": assumptions,
+            "by_type": by_type,
+            "stats": {
+                "total": len(assumptions),
+                "types": {k: len(v) for k, v in by_type.items()}
+            },
+            "enrichment_prompt": enrichment_prompt,
+            "instructions": f"Optionally process enrichment_prompt with LLM, then call store_config_assumptions(project_id='{project_id}', assumptions_json='<result>')"
+        }
+        
+    except FileNotFoundError as e:
+        return {"success": False, "error": str(e)}
+    except Exception as e:
+        logger.error(f"infer_config_assumptions failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def store_config_assumptions(
+    project_id: str,
+    assumptions_json: str
+) -> dict[str, Any]:
+    """
+    Store config assumptions in project_registry.
+    
+    Args:
+        project_id: Project identifier
+        assumptions_json: JSON string with assumptions data
+        
+    Returns:
+        Confirmation with stored count
+    """
+    try:
+        assumptions_data = json.loads(assumptions_json)
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verify project exists
+        cur.execute(
+            "SELECT project_id FROM project_registry WHERE project_id = %s",
+            (project_id,)
+        )
+        if not cur.fetchone():
+            return {"success": False, "error": f"Project not found: {project_id}"}
+        
+        # Store assumptions
+        cur.execute(
+            """
+            UPDATE project_registry 
+            SET config_assumptions = %s, updated_at = NOW()
+            WHERE project_id = %s
+            """,
+            (json.dumps(assumptions_data), project_id)
+        )
+        conn.commit()
+        
+        count = len(assumptions_data.get("assumptions", assumptions_data.get("enriched_assumptions", [])))
+        logger.info(f"v45f: Stored {count} assumptions for {project_id}")
+        
+        return {
+            "success": True,
+            "project_id": project_id,
+            "assumptions_stored": count,
+            "message": f"Config assumptions stored ({count} items)"
+        }
+        
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Invalid JSON: {e}"}
+    except Exception as e:
+        if 'conn' in locals():
+            conn.rollback()
+        logger.error(f"store_config_assumptions failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def query_project_understanding(
+    project_id: str
+) -> dict[str, Any]:
+    """
+    Query unified project understanding.
+    
+    Aggregates v45 features into single response:
+    - v45d: System map (module dependencies)
+    - v45e: Schema intent (domain entities)
+    - v45f: Config assumptions (implicit expectations)
+    - Purpose chain (mission and user needs)
+    
+    Part of v45 Deep Project Understanding.
+    
+    Args:
+        project_id: Project identifier
+        
+    Returns:
+        PROJECT_CONTEXT with all understanding layers
+    """
+    result: dict[str, Any] = {
+        "success": True,
+        "project_id": project_id,
+        "system_map": None,
+        "schema_intent": None,
+        "config_assumptions": None,
+        "purpose": None,
+        "stats": {"sections_populated": 0}
+    }
+    
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # 1. Get project purpose from registry
+        cur.execute(
+            """
+            SELECT purpose_hierarchy, detected_entities, config_assumptions
+            FROM project_registry 
+            WHERE project_id = %s
+            """,
+            (project_id,)
+        )
+        row = cur.fetchone()
+        
+        if not row:
+            return {"success": False, "error": f"Project not found: {project_id}"}
+        
+        # Extract cached data
+        if row.get("purpose_hierarchy"):
+            result["purpose"] = row["purpose_hierarchy"]
+            result["stats"]["sections_populated"] += 1
+            
+        if row.get("detected_entities"):
+            result["schema_intent"] = row["detected_entities"]
+            result["stats"]["sections_populated"] += 1
+            
+        if row.get("config_assumptions"):
+            result["config_assumptions"] = row["config_assumptions"]
+            result["stats"]["sections_populated"] += 1
+        
+        # 2. Get system map (live aggregation)
+        system_map = await get_system_map(project_id)
+        if system_map.get("success") and system_map.get("nodes"):
+            result["system_map"] = {
+                "nodes": system_map["nodes"],
+                "edges": system_map["edges"],
+                "stats": system_map["stats"]
+            }
+            result["stats"]["sections_populated"] += 1
+        
+        # 3. Add summary
+        result["summary"] = _build_understanding_summary(result)
+        
+        logger.info(f"v45: Project understanding for {project_id}: {result['stats']['sections_populated']}/4 sections")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"query_project_understanding failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+def _build_understanding_summary(understanding: dict) -> str:
+    """Build human-readable summary of project understanding."""
+    lines = []
+    
+    purpose = understanding.get("purpose")
+    if purpose:
+        mission = str(purpose.get("mission", "Unknown mission"))[:100]
+        lines.append(f"**Mission**: {mission}")
+    
+    system_map = understanding.get("system_map")
+    if system_map:
+        nodes = len(system_map.get("nodes", []))
+        edges = len(system_map.get("edges", []))
+        lines.append(f"**Architecture**: {nodes} modules, {edges} dependencies")
+    
+    schema = understanding.get("schema_intent")
+    if schema:
+        entities = schema.get("entities", schema) if isinstance(schema, dict) else schema
+        if isinstance(entities, list):
+            lines.append(f"**Schema**: {len(entities)} domain entities")
+    
+    config = understanding.get("config_assumptions")
+    if config:
+        assumptions = config.get("assumptions", config) if isinstance(config, dict) else config
+        if isinstance(assumptions, list):
+            lines.append(f"**Config**: {len(assumptions)} implicit assumptions")
+    
+    return "\n".join(lines) if lines else "No project understanding data available."
+
+
 def _build_grounding_context(
     file_purpose: dict | None,
     module_purpose: dict | None, 
@@ -6354,6 +6854,76 @@ async def complete_session(
         
     except Exception as e:
         logger.error(f"complete_session failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
+async def explore_alternatives(
+    session_id: str
+) -> dict[str, Any]:
+    """
+    Process pending mid-range hypothesis critiques.
+    
+    Retrieves critique_candidates from session context and returns
+    critique prompts for each. Clears queue after retrieval.
+    
+    Args:
+        session_id: The reasoning session UUID
+        
+    Returns:
+        Critique prompts for each alternative, or empty if none pending
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Get session context
+        cur.execute(
+            "SELECT context FROM reasoning_sessions WHERE id = %s",
+            (session_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return {"success": False, "error": "Session not found"}
+        
+        context = row["context"] or {}
+        pending = context.get("pending_critiques", [])
+        
+        if not pending:
+            return {"success": True, "message": "No pending alternatives", "alternatives": []}
+        
+        # Build critique prompts
+        alternatives = []
+        for candidate in pending:
+            alternatives.append({
+                "node_id": candidate["node_id"],
+                "content": candidate["content"],
+                "score": candidate["score"],
+                "critique_prompt": f"Critique this alternative hypothesis: {candidate['content']}"
+            })
+        
+        # Clear pending
+        context["pending_critiques"] = []
+        cur.execute(
+            "UPDATE reasoning_sessions SET context = %s WHERE id = %s",
+            (json.dumps(context), session_id)
+        )
+        conn.commit()
+        
+        logger.info(f"v48: Returning {len(alternatives)} alternatives for exploration in session {session_id}")
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "alternatives": alternatives,
+            "instructions": "Generate critiques for each alternative. Log insights via log_conversation with log_type='alternative_insight'"
+        }
+        
+    except Exception as e:
+        logger.error(f"explore_alternatives failed: {e}")
         return {"success": False, "error": str(e)}
     finally:
         if 'conn' in locals():

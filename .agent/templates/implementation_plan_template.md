@@ -72,7 +72,7 @@
 **Rationale**: [Why this change - link to PAS critique if relevant]
 ```
 
-### 4. Verification Plan (adapt for your stack)
+### 5. Verification Plan (adapt for your stack)
 ```markdown
 ## Verification
 
@@ -95,7 +95,60 @@ Expected output: [what success looks like]
 2. [Step 2]
 ```
 
-### 5. Workflow/Skills Updates (if applicable)
+### 6. Project Structure (if creating/moving files)
+```markdown
+## Project Structure
+
+> **For NEW projects**: Use best practices (Python: `src/` layout)
+> **For EXISTING projects**: Align with current layout, or document transition if restructuring
+
+[Target structure if applicable]
+```
+
+### 7. Environment Context (if pip/python commands)
+```markdown
+## Environment
+
+> **IMPORTANT**: Specify the venv for ALL pip/python commands.
+> Bare `pip` or `python` may use system interpreter, not project venv.
+
+| Item | Value |
+|------|-------|
+| **Venv Path** | `[FILL: /path/to/.venv/]` |
+| **pip command** | `[VENV]/bin/pip install ...` |
+| **python command** | `[VENV]/bin/python -m ...` |
+```
+
+### 8. Code Quality Requirements (Python)
+```markdown
+## Code Quality
+
+> Apply these thresholds to new/modified code. Document exceptions.
+
+### Thresholds
+| Metric | Target | Warn | Fail |
+|--------|--------|------|------|
+| Cyclomatic Complexity | ≤10 | 11-15 | >15 |
+| Function Length | ≤50 lines | 51-80 | >80 |
+| File Length | ≤500 lines | 501-800 | >800 |
+
+### Principles
+- **SRP**: Each function does ONE thing
+- **DRY**: Extract repeated patterns (3+ occurrences)
+- **Naming**: snake_case for functions/variables, CamelCase for classes
+
+### Verification Command
+```bash
+# Run before committing
+radon cc [file.py] -s -a
+```
+
+### Exceptions
+> Document any justified exceptions (state machines, parsers, etc.):
+- [ ] [Function name]: [Reason for exception]
+```
+
+### 7. Workflow/Skills Updates (if applicable)
 ```markdown
 ## Workflow Updates
 

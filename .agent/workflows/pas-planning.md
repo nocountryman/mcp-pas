@@ -39,8 +39,13 @@ description: Enforce PAS-driven implementation planning for non-trivial changes
 After synthesize_hypotheses() creates hybrid node:
 → MUST call prepare_critique on hybrid node
 → MUST call store_critique on hybrid node
+→ MUST call prepare_sequential_analysis (on hybrid)
+→ MUST call store_sequential_analysis (identify remaining gaps)
 → THEN finalize_session
 ```
+
+> **Why**: Sequential analysis on the final hybrid catches gaps that critique alone misses (e.g., missing __init__.py exports, test import strategy).
+
 
 ---
 
@@ -94,6 +99,22 @@ After synthesize_hypotheses() creates hybrid node:
 - **Restart after config changes**: Server must restart to pick up `config.yaml` changes
 - **Update workflows if relevant**: Check if changes affect `.agent/workflows/` or `.agent/skills/` files
 - **Update CHANGELOG**: Add version entry after significant changes
+
+### Code Quality (Python) 🐍
+**Apply these thresholds to new/modified code:**
+
+| Metric | Target | Fail At |
+|--------|--------|---------|
+| Cyclomatic Complexity | ≤10 | >15 |
+| Function Length | ≤50 lines | >80 |
+| File Length | ≤500 lines | >800 |
+
+**Verification**: `radon cc [file.py] -s -a`
+
+**Principles** (nudge LLM toward clean code):
+- **SRP**: Each function does ONE thing - if you need "and", split it
+- **DRY**: 3+ similar blocks → extract to helper
+- **Naming**: Verb for functions (`get_user`), noun for variables (`user_id`)
 
 ### After Implementation
 1. Run tests to verify changes

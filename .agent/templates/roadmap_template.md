@@ -69,6 +69,50 @@
 - [ ] Criterion 2 (verifiable)
 ```
 
+### 6. Project Structure
+```markdown
+## Project Structure
+
+> **For NEW projects**: Use language best practices
+> - Python: `src/` layout with `pyproject.toml`
+> - Node/TS: `src/` with `package.json`
+>
+> **For EXISTING projects**: 
+> - If maintaining current layout → align with it
+> - If restructuring → document BOTH current AND target structure
+>   (Treat restructuring as a separate PAS session)
+
+[Target structure tree if creating new files or restructuring]
+```
+
+### 7. Environment Context
+```markdown
+## Environment
+
+> **Specify venv** for pip/python commands. Bare `pip`/`python` = system interpreter.
+
+| Project Venv | Command Pattern |
+|--------------|-----------------|
+| `[FILL: /path/to/.venv/]` | `[VENV]/bin/pip`, `[VENV]/bin/python` |
+```
+
+### 8. Code Quality Standards (Python)
+```markdown
+## Code Quality Standards
+
+> All new/modified code MUST meet these thresholds.
+
+| Metric | Target | Max Allowed |
+|--------|--------|-------------|
+| Cyclomatic Complexity | ≤10 | 15 (with justification) |
+| Function Length | ≤50 lines | 80 lines |
+| File Length | ≤500 lines | 800 lines |
+
+**Principles**: SRP (single responsibility), DRY (don't repeat), KISS (keep simple)
+
+**Verification**: `radon cc [file.py] -s -a`
+```
+
 ---
 
 ## ENFORCEMENT RULES

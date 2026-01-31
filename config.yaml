@@ -19,3 +19,9 @@ session:
 purpose_inference:
   completeness_similarity_threshold: 0.7  # Minimum similarity for module to count as "implemented"
   staleness_days: 7  # Purpose older than this triggers refresh suggestion
+
+# v48: Parallel Critique Window
+parallel_critique:
+  enabled: true
+  critique_ratio: 0.7      # Critique hypotheses >= winner * ratio
+  max_candidates: 3        # Limit to avoid latency explosion

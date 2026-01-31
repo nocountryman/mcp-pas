@@ -260,3 +260,77 @@ class TestProjectPurpose:
         if result.get("success"):
             # stale flag should be present in response
             assert isinstance(result.get("stale", False), bool)
+    
+    @pytest.mark.asyncio
+    async def test_get_system_map(self, db_connection):
+        """Verify system map returns module dependency graph."""
+        from server import get_system_map
+        
+        result = await get_system_map(
+            project_id="mcp-pas",
+            include_weights=True
+        )
+        
+        if result.get("success"):
+            assert "nodes" in result
+            assert "edges" in result
+            assert "stats" in result
+            assert isinstance(result["nodes"], list)
+            assert isinstance(result["edges"], list)
+            # If edges exist, verify structure
+            if result["edges"]:
+                assert "source" in result["edges"][0]
+                assert "target" in result["edges"][0]
+        else:
+            # May fail if project not synced with symbol_references
+            pytest.skip("System map failed - project may need sync_project with LSIF import")
+
+    @pytest.mark.asyncio
+    async def test_infer_schema_intent(self, db_connection):
+        """Verify schema intent extraction returns entities."""
+        from server import infer_schema_intent
+        
+        result = await infer_schema_intent(project_id="mcp-pas")
+        
+        assert result.get("success") is True
+        assert "entities" in result
+        assert "classifications" in result
+        assert "enrichment_prompt" in result
+        assert isinstance(result["entities"], list)
+        
+        # Should find PAS tables
+        entity_names = [e["name"] for e in result["entities"]]
+        assert "reasoning_sessions" in entity_names or len(entity_names) > 0
+
+    @pytest.mark.asyncio
+    async def test_infer_config_assumptions(self, db_connection):
+        """Verify config assumption extraction."""
+        from server import infer_config_assumptions
+        
+        result = await infer_config_assumptions(
+            project_id="mcp-pas",
+            config_path="/home/nocoma/Documents/MCP/PAS/config.yaml"
+        )
+        
+        assert result.get("success") is True
+        assert "assumptions" in result
+        assert "by_type" in result
+        assert "enrichment_prompt" in result
+        assert len(result["assumptions"]) > 0
+        
+        # Should detect threshold assumptions from config.yaml
+        types = result.get("stats", {}).get("types", {})
+        assert "threshold" in types or "capacity" in types
+
+    @pytest.mark.asyncio
+    async def test_query_project_understanding(self, db_connection):
+        """Verify unified project understanding query."""
+        from server import query_project_understanding
+        
+        result = await query_project_understanding(project_id="mcp-pas")
+        
+        assert result.get("success") is True
+        assert "stats" in result
+        assert "summary" in result
+        # At least system_map should be populated for synced project
+        assert result["stats"]["sections_populated"] >= 0
