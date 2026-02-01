@@ -22,7 +22,7 @@ GOAL_PATTERNS: Dict[str, List[str]] = {
     ],
     "code_awareness": [
         "purpose", "semantic", "intent", "symbol", "codebase", 
-        "syntax", "comprehension", "indexing", "lsif"
+        "syntax", "comprehension", "indexing"
     ],
     "self_awareness": [
         "analyze_self", "introspection", "self-aware", "meta-analysis",

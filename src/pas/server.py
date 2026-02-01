@@ -110,12 +110,9 @@ from pas.helpers.codebase import (
     derive_project_id,
     extract_symbol_patterns_from_text,
     build_reference_summary,
-    # Phase 6: find_references helpers
+    # Phase 6: find_references helpers (v53: DB-first, Jedi removed)
     resolve_project_root,
-    scan_file_for_references,
-    find_references_jedi,
     deduplicate_references,
-    # v51 Phase 2: Jedi pre-filtering
     fetch_project_root,
     prefilter_files,
     HAS_RIPGREP,
@@ -6183,64 +6180,20 @@ async def find_references(
                         })
                     source_used = "lsp"
                 else:
-                    logger.info("[LSP] No refs from LSP, falling back to jedi")
+                    logger.info("[LSP] No refs from LSP - ensure project is synced")
+                    source_used = "db"
             except Exception as e:
-                logger.warning(f"LSP find_references failed, falling back: {e}")
+                logger.warning(f"LSP find_references failed: {e}")
                 import traceback
                 logger.debug(traceback.format_exc())
-                source_used = "jedi"
+                source_used = "db"
         else:
-            logger.info(f"[LSP] No symbol_position found, using jedi fallback")
-            source_used = "jedi"
+            logger.info(f"[LSP] No symbol_position found - will search DB")
+            source_used = "db"
         
-        # Step 3: Fallback to Jedi/LSIF if LSP didn't return results
-        if not references:
-            # Get Python files
-            cur.execute(
-                "SELECT file_path FROM file_registry WHERE project_id = %s AND file_path LIKE %s",
-                (project_id, "%.py")
-            )
-            rows = cur.fetchall()
-            if not rows:
-                safe_close_connection(conn)
-                return {"success": False, "error": f"No Python files found for project '{project_id}'"}
-            
-            rel_paths = [r['file_path'] for r in rows]
-            abs_paths = [project_root / rp for rp in rel_paths] if project_root else []
-            
-            # Pre-filter candidate files
-            candidate_files = prefilter_files(
-                symbol=symbol_name,
-                project_root=project_root,
-                file_paths=abs_paths
-            )
-            
-            if not candidate_files:
-                safe_close_connection(conn)
-                return {
-                    "success": True, "project_id": project_id, "symbol_name": symbol_name,
-                    "references": [], "count": 0, "source": "prefilter",
-                    "note": "No files contain this symbol. Ensure project is synced."
-                }
-            
-            # Try Jedi
-            try:
-                import jedi
-                if project_root is not None:
-                    candidate_rel_paths = []
-                    for f in candidate_files:
-                        if f.exists():
-                            try:
-                                candidate_rel_paths.append(str(f.relative_to(project_root)))
-                            except ValueError:
-                                candidate_rel_paths.append(str(f))
-                    
-                    references = find_references_jedi(project_root, candidate_rel_paths, symbol_name)
-                    source_used = "jedi"
-            except ImportError:
-                source_used = "lsif"
-            except Exception as e:
-                logger.warning(f"Jedi analysis failed: {e}")
+        # v53: DB-first - no Jedi/LSIF fallback
+        # If LSP didn't find refs, return empty (project needs sync_project)
+
         
         # Deduplicate
         references = deduplicate_references(references, include_definitions)
@@ -6372,7 +6325,7 @@ async def call_hierarchy(
         if not rows:
             return {"success": True, "project_id": project_id, "symbol_name": symbol_name,
                     "direction": direction, "hierarchy": [], "count": 0,
-                    "note": "No call hierarchy found in LSIF data."}
+                    "note": "No call hierarchy found. Run sync_project first."}
         
         hierarchy = [{"caller": {"file": r['source_file'], "line": r['source_line'], "symbol": r['source_symbol']},
                       "callee": {"file": r['target_file'], "line": r['target_line'], "symbol": r['target_symbol']}} 

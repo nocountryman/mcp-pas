@@ -490,54 +490,10 @@ def prefilter_python(symbol: str, file_paths: list[Path]) -> list[Path]:
             pass
     return candidates
 
+# NOTE: Jedi fallback functions removed (v53 DB-first architecture)
+# scan_file_for_references and find_references_jedi were here
+# Now queries use DB cache populated by sync_project
 
-def scan_file_for_references(file_path: Path, symbol_name: str) -> list[dict]:
-    """Scan a single file for symbol references using Jedi."""
-    try:
-        import jedi
-    except ImportError:
-        return []
-    
-    references = []
-    try:
-        with open(file_path, 'r') as f:
-            source = f.read()
-        
-        script = jedi.Script(source, path=file_path)
-        for i, line in enumerate(source.splitlines(), 1):
-            if symbol_name in line:
-                col = line.find(symbol_name)
-                if col >= 0:
-                    try:
-                        refs = script.get_references(line=i, column=col, scope='file')
-                        for ref in refs:
-                            if ref.name == symbol_name:
-                                references.append({
-                                    "file": str(file_path),
-                                    "line": ref.line,
-                                    "symbol": ref.name,
-                                    "relation": "definition" if ref.is_definition() else "reference"
-                                })
-                        break
-                    except Exception:
-                        continue
-    except Exception:
-        pass
-    return references
-
-
-def find_references_jedi(
-    project_root: Optional[Path],
-    rel_paths: list[str],
-    symbol_name: str
-) -> list[dict]:
-    """Find references across project using Jedi live analysis."""
-    all_refs = []
-    for rel_path in rel_paths:
-        file_path = project_root / rel_path if project_root else Path(rel_path)
-        if file_path.exists():
-            all_refs.extend(scan_file_for_references(file_path, symbol_name))
-    return all_refs
 
 
 
