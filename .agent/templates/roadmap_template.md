@@ -45,6 +45,7 @@
 ### Phase 1: [Name]
 - **Scope**: [What's included]
 - **Dependencies**: [What must exist first]
+- **LSP Impact**: [Run find_references on key symbols, list affected files]
 - **PAS Session Required**: YES (link to implementation_plan.md)
 - **Estimated Effort**: [low/medium/high]
 

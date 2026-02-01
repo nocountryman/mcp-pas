@@ -51,6 +51,30 @@
 > N/A if no files deleted.
 ```
 
+### 2b. LSP Impact Analysis
+```markdown
+## LSP Impact Analysis
+
+> Run `get_lsp_impact` on scope files, or manually call `find_references` for key symbols.
+
+**Symbols in scope** (from document_symbols):
+| File | Key Symbols |
+|------|-------------|
+| `path/to/file.py` | `func1`, `Class1` |
+
+**Affected files** (from find_references):
+| Symbol | Used By | Count |
+|--------|---------|-------|
+| `func1` | `other.py`, `test.py` | 5 |
+
+**Callers discovered**:
+- [List files not in original scope that reference scope symbols]
+> N/A if no new callers found.
+
+**Scope completeness**: [Are all affected files included in scope above?]
+```
+
+
 ### 3. Detailed Changes
 ```markdown
 ## Changes

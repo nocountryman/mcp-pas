@@ -1,0 +1,16 @@
+{
+    "languages": [
+        "python"
+    ],
+    "binaries": {
+        "python": "/home/nocoma/Documents/MCP/PAS/.venv312/bin/basedpyright-stdio"
+    },
+    "tools": {
+        "enable": [
+            "semanticSearch"
+        ]
+    },
+    "semantic_search": {
+        "enabled": false
+    }
+}

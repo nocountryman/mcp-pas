@@ -5,11 +5,27 @@ Pure utility functions for reasoning tree operations.
 These have no side effects and can be easily tested.
 """
 
+import logging
 import math
 import random
 from typing import Any, Optional
 
-from pas.utils import detect_negation
+from pas.utils import detect_negation, get_embedding, get_db_connection, safe_close_connection
+
+logger = logging.getLogger(__name__)
+
+# =============================================================================
+# Keyword Failure Patterns (fallback if DB lookup fails)
+# =============================================================================
+
+KEYWORD_FAILURE_PATTERNS: dict[str, tuple[str, str]] = {
+    "embedding": ("EMBEDDING_SHAPE_MISMATCH", "Embedding operations often fail due to dimension mismatches. Verify vector dimensions match schema (1024 for nomic)."),
+    "vector": ("EMBEDDING_SHAPE_MISMATCH", "Vector operations need dimension checks."),
+    "import": ("SCOPE_BOUNDARY_CROSSING", "Imports across file boundaries risk missing implicit context."),
+    "config": ("SCOPE_BOUNDARY_CROSSING", "Config references need explicit qualification."),
+    "schema": ("SCHEMA_EVOLUTION", "Schema changes need migration planning."),
+    "column": ("SCHEMA_EVOLUTION", "Column changes may break existing queries."),
+}
 
 # =============================================================================
 # Constants
@@ -31,6 +47,131 @@ ROLLOUT_WEIGHT = 0.2
 # UCT exploration parameters
 UCT_THRESHOLD = 0.05           # Gap below which to apply UCT
 UCT_EXPLORATION_C = 1.0        # Exploration constant
+
+
+# =============================================================================
+# Failure Search Functions
+# =============================================================================
+
+def search_relevant_failures(
+    text: str,
+    semantic_threshold: float = 0.55,
+    limit: int = 3,
+    context_type: str = "goal",  # v42b: "goal", "scope", "critique"
+    schema_check_required: bool = False,  # v42b: boost schema failures
+    exclude_ids: set = None  # v42b: deduplication
+) -> list[dict]:
+    """
+    v32/v42b: Search for past failures relevant to the given text.
+    
+    Combines:
+    1. Keyword pattern matching from failure_patterns table (or fallback dict)
+    2. Semantic search on failure_reason_embedding
+    
+    v42b enhancements:
+    - context_type: adjusts threshold (0.45 for scope, 0.55 for goal)
+    - schema_check_required: boosts schema-related failures
+    - exclude_ids: skip already-surfaced warnings for deduplication
+    
+    Returns list of warnings with source and details.
+    """
+    # v42b: Adjust threshold based on context
+    if context_type == "scope":
+        semantic_threshold = 0.45  # Lower threshold for scope matching
+    
+    # v42b: Boost schema failures when relevant
+    search_text = text
+    if schema_check_required and "schema" not in text.lower():
+        search_text = f"{text} schema table migration CREATE ALTER"
+    
+    warnings = []
+    text_lower = search_text.lower()
+    seen_patterns: set[str] = set()
+    exclude_ids = exclude_ids or set()
+
+    
+    # Part 1: Keyword pattern matching from DB (v32) or fallback dict
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # v32: Query failure_patterns table
+        cur.execute("""
+            SELECT pattern_name, keywords, warning_text
+            FROM failure_patterns
+            WHERE enabled = true
+        """)
+        
+        for row in cur.fetchall():
+            pattern_name = row['pattern_name']
+            keywords = row['keywords']  # TEXT[] array
+            warning_text = row['warning_text']
+            
+            # Check if any keyword matches
+            for keyword in keywords:
+                if keyword.lower() in text_lower and pattern_name not in seen_patterns:
+                    warnings.append({
+                        'pattern': pattern_name,
+                        'source': 'keyword',
+                        'warning': warning_text,
+                        'triggered_by': keyword
+                    })
+                    seen_patterns.add(pattern_name)
+                    break
+        
+        safe_close_connection(conn)
+    except Exception as e:
+        logger.warning(f"v32 DB pattern lookup failed, using fallback: {e}")
+        # Fallback to hardcoded dict
+        for keyword, (pattern, warning_text) in KEYWORD_FAILURE_PATTERNS.items():
+            if keyword in text_lower and pattern not in seen_patterns:
+                warnings.append({
+                    'pattern': pattern,
+                    'source': 'keyword',
+                    'warning': warning_text,
+                    'triggered_by': keyword
+                })
+                seen_patterns.add(pattern)
+    
+    # Part 2: Semantic search (broader, probabilistic)
+    if len(warnings) < limit:
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # Generate embedding for the text
+            embedding = get_embedding(text[:1000])
+            
+            cur.execute(
+                """
+                SELECT failure_reason, 
+                       1 - (failure_reason_embedding <=> %s::vector) as similarity,
+                       notes
+                FROM outcome_records
+                WHERE outcome = 'failure' 
+                  AND failure_reason_embedding IS NOT NULL
+                  AND 1 - (failure_reason_embedding <=> %s::vector) > %s
+                ORDER BY failure_reason_embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (embedding, embedding, semantic_threshold, embedding, limit - len(warnings))
+            )
+            
+            for row in cur.fetchall():
+                # Avoid duplicates if semantic matches keyword pattern
+                if not any(w.get('triggered_by') and w['triggered_by'] in row['failure_reason'].lower() for w in warnings):
+                    warnings.append({
+                        'pattern': 'SEMANTIC_MATCH',
+                        'source': 'semantic',
+                        'warning': row['failure_reason'],
+                        'similarity': round(float(row['similarity']), 3)
+                    })
+            
+            safe_close_connection(conn)
+        except Exception as e:
+            logger.warning(f"Semantic failure search failed: {e}")
+    
+    return warnings[:limit]
 
 
 # =============================================================================

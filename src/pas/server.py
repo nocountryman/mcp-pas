@@ -38,8 +38,10 @@ from pas.helpers.reasoning import (
     apply_uct_tiebreaking as _apply_uct_tiebreaking,
     build_processed_candidate as _build_processed_candidate,
     infer_traits_from_hidden_values as _infer_traits_from_hidden_values,
+    search_relevant_failures as _search_relevant_failures,
     # Constants
     HEURISTIC_PENALTIES,
+    KEYWORD_FAILURE_PATTERNS,
     DEPTH_BONUS_PER_LEVEL,
     ROLLOUT_WEIGHT,
     UCT_THRESHOLD,
@@ -70,19 +72,57 @@ from pas.helpers.interview import (
     DEFAULT_INTERVIEW_CONFIG,
     DEFAULT_QUALITY_THRESHOLDS,
     DOMAIN_KEYWORDS,
+    # Phase 5: check_interview_complete helpers
+    TRAIT_RULES,
+    infer_traits_from_hidden_values,
+    build_context_summary,
+    aggregate_hidden_values,
+    run_semantic_trait_matching,
+    collect_unmatched_descriptions,
+    run_trait_inference,
+    persist_interview_context,
+    # Phase 7: submit_answer helpers
+    find_and_validate_question,
+    record_answer_with_choice,
+    process_answer_side_effects,
+    # Phase 8: identify_gaps helpers
+    query_historical_failures,
+    detect_domains,
+    load_dimension_questions,
+    build_goal_question_prompt,
+    prioritize_questions,
+)
+
+from pas.helpers.critique import (
+    fetch_node_with_laws,
+    build_critique_prompt,
+    search_past_failures,
+    search_past_critiques,
+    build_assumption_extraction_prompt,
 )
 
 from pas.helpers.codebase import (
     extract_symbols as _extract_symbols,
+    extract_symbols_lsp as _extract_symbols_lsp,
     get_language_from_path,
     should_skip_file,
     compute_file_hash,
     derive_project_id,
     extract_symbol_patterns_from_text,
     build_reference_summary,
+    # Phase 6: find_references helpers
+    resolve_project_root,
+    scan_file_for_references,
+    find_references_jedi,
+    deduplicate_references,
+    # v51 Phase 2: Jedi pre-filtering
+    fetch_project_root,
+    prefilter_files,
+    HAS_RIPGREP,
     # Constants
     LANGUAGE_MAP,
     SKIP_EXTENSIONS,
+
     SKIP_DIRS,
 )
 
@@ -150,8 +190,73 @@ from pas.helpers.self_awareness import (
     get_session_statistics,
 )
 
+# Phase 1 Refactor: Finalize session helpers
+from pas.helpers.finalize import (
+    check_sequential_gate,
+    compute_quality_gate,
+    build_score_improvement_suggestions,
+    apply_unverified_prefix,
+    surface_warnings_and_tags,
+    identify_pending_critiques,
+    build_implementation_checklist,
+    query_past_failures,
+    query_calibration_warning,
+    build_deep_critique_requests,
+    check_complementarity,
+    apply_uct_and_compute_decision,
+    build_next_step_guidance,
+    build_scope_guidance,
+    build_exhaustive_prompt,
+    get_context_summary,
+    fetch_sibling_data,
+    process_candidates,
+    apply_config_defaults,
+    fetch_session,
+    fetch_candidates,
+    # v51: ROI analysis
+    build_roi_analysis,
+)
+
+# Phase 2 Refactor: Store expansion helpers
+from pas.helpers.expansion import (
+    build_hypotheses_list,
+    verify_active_session,
+    resolve_parent_path,
+    match_laws_and_compute_prior,
+    log_conversation_source,
+    compute_workflow_nudges,
+    query_scope_failures,
+    run_preflight_checks,
+    surface_scope_failures,
+)
+
+# Phase 3 Refactor: Prepare expansion helpers
+from pas.helpers.expansion import (
+    validate_session_and_get_parent,
+    fetch_and_boost_laws,
+    build_trait_instructions,
+    surface_past_failures,
+    extract_symbol_suggestions,
+    search_related_modules,
+    fetch_project_grounding,
+    fetch_historical_patterns,
+)
+
+# Phase 4 Refactor: Record outcome helpers
+from pas.helpers.outcomes import (
+    compute_outcome_embeddings,
+    insert_and_attribute_outcome,
+    log_training_data,
+    record_critique_accuracy,
+    log_calibration_record,
+    persist_user_traits,
+    trigger_auto_refresh,
+    apply_auto_tags,
+)
+
 # Shared utilities (singleton embedding model)
 from pas.utils import get_embedding
+
 
 # Load environment variables
 load_dotenv()
@@ -353,125 +458,53 @@ KEYWORD_FAILURE_PATTERNS: dict[str, tuple[str, str]] = {
 }
 
 
-def _search_relevant_failures(
-    text: str,
-    semantic_threshold: float = 0.55,
-    limit: int = 3,
-    context_type: str = "goal",  # v42b: "goal", "scope", "critique"
-    schema_check_required: bool = False,  # v42b: boost schema failures
-    exclude_ids: set = None  # v42b: deduplication
-) -> list[dict]:
+def _build_plan_template_prompt(quality_gate: dict, goal: str) -> dict | None:
     """
-    v32/v42b: Search for past failures relevant to the given text.
+    v49: Detect whether roadmap or implementation plan template is appropriate.
     
-    Combines:
-    1. Keyword pattern matching from failure_patterns table (or fallback dict)
-    2. Semantic search on failure_reason_embedding
+    Keywords like 'roadmap', 'multi-phase', 'architecture', 'phases' suggest
+    multi-phase work requiring a roadmap. Otherwise, implementation plan.
     
-    v42b enhancements:
-    - context_type: adjusts threshold (0.45 for scope, 0.55 for goal)
-    - schema_check_required: boosts schema-related failures
-    - exclude_ids: skip already-surfaced warnings for deduplication
-    
-    Returns list of warnings with source and details.
+    Returns template prompt dict or None if gate not passed.
     """
-    # v42b: Adjust threshold based on context
-    if context_type == "scope":
-        semantic_threshold = 0.45  # Lower threshold for scope matching
+    if not quality_gate.get("passed"):
+        return None
     
-    # v42b: Boost schema failures when relevant
-    search_text = text
-    if schema_check_required and "schema" not in text.lower():
-        search_text = f"{text} schema table migration CREATE ALTER"
+    goal_lower = goal.lower()
+    roadmap_keywords = ["roadmap", "multi-phase", "phases", "architecture", "design system", "restructure"]
+    is_roadmap = any(kw in goal_lower for kw in roadmap_keywords)
     
-    warnings = []
-    text_lower = search_text.lower()
-    seen_patterns: set[str] = set()
-    exclude_ids = exclude_ids or set()
+    if is_roadmap:
+        return {
+            "template_type": "roadmap",
+            "template_path": ".agent/templates/roadmap_template.md",
+            "required_sections": [
+                "Problem Statement & PAS Evidence",
+                "Architectural Overview (mermaid diagrams)",
+                "Phase Breakdown (each phase = separate PAS session)",
+                "Cross-Phase Design Decisions",
+                "Success Criteria (verifiable)",
+                "Environment (venv path)"
+            ],
+            "enforcement": "SOFT - use roadmap for multi-phase work"
+        }
+    else:
+        return {
+            "template_type": "implementation_plan",
+            "template_path": ".agent/templates/implementation_plan_template.md",
+            "required_sections": [
+                "PAS Reasoning Summary (session ID, hypotheses table, scores)",
+                "Key Critiques & How Addressed",
+                "Sequential Gap Analysis Results",
+                "Scope Declaration (files modified/created/deleted)",
+                "Detailed Changes (exact before/after code)",
+                "Verification Plan (copy-paste runnable commands)",
+                "Environment (venv path)",
+                "Pre-submission Checklist"
+            ],
+            "enforcement": "SOFT - template shown, agent should follow"
+        }
 
-    
-    # Part 1: Keyword pattern matching from DB (v32) or fallback dict
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # v32: Query failure_patterns table
-        cur.execute("""
-            SELECT pattern_name, keywords, warning_text
-            FROM failure_patterns
-            WHERE enabled = true
-        """)
-        
-        for row in cur.fetchall():
-            pattern_name = row['pattern_name']
-            keywords = row['keywords']  # TEXT[] array
-            warning_text = row['warning_text']
-            
-            # Check if any keyword matches
-            for keyword in keywords:
-                if keyword.lower() in text_lower and pattern_name not in seen_patterns:
-                    warnings.append({
-                        'pattern': pattern_name,
-                        'source': 'keyword',
-                        'warning': warning_text,
-                        'triggered_by': keyword
-                    })
-                    seen_patterns.add(pattern_name)
-                    break
-        
-        safe_close_connection(conn)
-    except Exception as e:
-        logger.warning(f"v32 DB pattern lookup failed, using fallback: {e}")
-        # Fallback to hardcoded dict
-        for keyword, (pattern, warning_text) in KEYWORD_FAILURE_PATTERNS.items():
-            if keyword in text_lower and pattern not in seen_patterns:
-                warnings.append({
-                    'pattern': pattern,
-                    'source': 'keyword',
-                    'warning': warning_text,
-                    'triggered_by': keyword
-                })
-                seen_patterns.add(pattern)
-    
-    # Part 2: Semantic search (broader, probabilistic)
-    if len(warnings) < limit:
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            
-            # Generate embedding for the text
-            embedding = get_embedding(text[:1000])
-            
-            cur.execute(
-                """
-                SELECT failure_reason, 
-                       1 - (failure_reason_embedding <=> %s::vector) as similarity,
-                       notes
-                FROM outcome_records
-                WHERE outcome = 'failure' 
-                  AND failure_reason_embedding IS NOT NULL
-                  AND 1 - (failure_reason_embedding <=> %s::vector) > %s
-                ORDER BY failure_reason_embedding <=> %s::vector
-                LIMIT %s
-                """,
-                (embedding, embedding, semantic_threshold, embedding, limit - len(warnings))
-            )
-            
-            for row in cur.fetchall():
-                # Avoid duplicates if semantic matches keyword pattern
-                if not any(w.get('triggered_by') and w['triggered_by'] in row['failure_reason'].lower() for w in warnings):
-                    warnings.append({
-                        'pattern': 'SEMANTIC_MATCH',
-                        'source': 'semantic',
-                        'warning': row['failure_reason'],
-                        'similarity': round(float(row['similarity']), 3)
-                    })
-            
-            safe_close_connection(conn)
-        except Exception as e:
-            logger.warning(f"Semantic failure search failed: {e}")
-    
-    return warnings[:limit]
 
 
 # =============================================================================
@@ -1231,143 +1264,31 @@ async def prepare_expansion(
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Get session
-        cur.execute("SELECT id, goal, state FROM reasoning_sessions WHERE id = %s", (session_id,))
-        session = cur.fetchone()
-        if not session:
-            return {"success": False, "error": f"Session {session_id} not found"}
-        
-        if session["state"] != "active":
-            return {"success": False, "error": f"Session is {session['state']}, not active"}
-        
-        # Get parent node or use goal as root
-        if parent_node_id:
-            cur.execute(
-                "SELECT id, path, content FROM thought_nodes WHERE id = %s AND session_id = %s",
-                (parent_node_id, session_id)
-            )
-            parent = cur.fetchone()
-            if not parent:
-                return {"success": False, "error": f"Parent node {parent_node_id} not found"}
-            parent_content = parent["content"]
-            parent_path = parent["path"]
-        else:
-            parent_content = session["goal"]
-            parent_path = None
-            
-            # Check for existing root
-            cur.execute(
-                "SELECT id, path FROM thought_nodes WHERE session_id = %s AND path = 'root'",
-                (session_id,)
-            )
-            existing_root = cur.fetchone()
-            if existing_root:
-                parent_node_id = str(existing_root["id"])
-                parent_path = "root"
-        
-        # Find relevant laws for this context
-        embedding = get_embedding(parent_content)
-        cur.execute(
-            """
-            SELECT id, law_name, definition, scientific_weight,
-                   1 - (embedding <=> %s::vector) as similarity
-            FROM scientific_laws WHERE embedding IS NOT NULL
-            ORDER BY embedding <=> %s::vector LIMIT 3
-            """,
-            (embedding, embedding)
+        # =====================================================================
+        # Helper 1: Validate session and get parent
+        # =====================================================================
+        session, parent_content, parent_path, parent_node_id, error = validate_session_and_get_parent(
+            cur, session_id, parent_node_id
         )
-        
-        laws = [{"id": r["id"], "law_name": r["law_name"], "definition": r["definition"],
-                 "weight": float(r["scientific_weight"]), "similarity": round(float(r["similarity"]), 4)}
-                for r in cur.fetchall()]
+        if error:
+            return error
         
         # =====================================================================
-        # v22 Feature 2: Law Weight Boosting Based on User Traits
-        # Boost law weights that correlate with user's persistent/latent traits
+        # Helper 2: Fetch and boost laws (v22)
         # =====================================================================
-        # Get session context for traits
-        cur.execute("SELECT context FROM reasoning_sessions WHERE id = %s", (session_id,))
-        context_row = cur.fetchone()
-        session_context = context_row["context"] if context_row and context_row["context"] else {}
-        
-        # Combine persistent and latent traits
-        all_trait_names = []
-        persistent_traits = session_context.get("persistent_traits", [])
-        latent_traits = session_context.get("latent_traits", [])
-        
-        for t in persistent_traits:
-            if t.get("trait"):
-                all_trait_names.append(t["trait"])
-        for t in latent_traits:
-            if t.get("trait"):
-                all_trait_names.append(t["trait"])
-        
-        # Apply boosting if we have traits
-        boosted_laws = []
-        if all_trait_names and laws:
-            cur.execute("""
-                SELECT law_id, SUM(boost_factor) as total_boost
-                FROM trait_law_correlations
-                WHERE trait_name = ANY(%s)
-                GROUP BY law_id
-            """, (all_trait_names,))
-            
-            boosts = {row["law_id"]: row["total_boost"] for row in cur.fetchall()}
-            
-            for law in laws:
-                if law["id"] in boosts:
-                    # Cap boost at 50% to prevent runaway
-                    boost = min(boosts[law["id"]], 0.5)
-                    original_weight = law["weight"]
-                    law["weight"] = round(law["weight"] * (1 + boost), 4)
-                    law["boosted_by"] = boost
-                    boosted_laws.append(law["law_name"])
-                    logger.debug(f"v22: Boosted {law['law_name']} from {original_weight} to {law['weight']}")
+        laws, boosted_laws = fetch_and_boost_laws(cur, parent_content, session_id, get_embedding)
         
         # =====================================================================
-        # v21 Phase 3: Trait-Aware Instructions
-        # Read latent_traits from session context and append dynamic guidance
+        # Helper 3: Build trait instructions (v21)
         # =====================================================================
-        base_instructions = "Consider: What is requested? What files/modules might be affected? For each hypothesis, declare SCOPE as specific file paths. Optionally prefix with layer if helpful: [API] routes.py, [DB] models.py, [tests] test_auth.py. Generate 3 hypotheses with confidence (0.0-1.0). Call store_expansion(h1_text=..., h1_confidence=..., h1_scope='[layer] file1.py, file2.py', ...)."
-        
-        # v22: latent_traits already retrieved in Feature 2 section above
-        
-        # Trait-to-guidance mapping
-        TRAIT_GUIDANCE = {
-            "RISK_AVERSE": "User prefers SAFE, REVERSIBLE approaches. Prioritize hypotheses with clear rollback strategies and minimal blast radius.",
-            "MINIMALIST": "User values SIMPLICITY. Favor minimal implementations that solve the core problem without unnecessary complexity.",
-            "CONTROL_ORIENTED": "User wants EXPLICIT CONTROL. Prefer solutions that give user visibility and manual override options.",
-            "AUTOMATION_TRUSTING": "User trusts AUTOMATION. Feel free to propose AI/automated solutions without excessive manual oversight.",
-            "ACCESSIBILITY_FOCUSED": "User prioritizes ACCESSIBILITY. Consider beginner-friendly approaches with good documentation.",
-            "PRAGMATIST": "User seeks BALANCED solutions. Blend theory with practicality, avoid extremes.",
-            "EXPLICIT_CONTROL": "User wants TRANSPARENCY. Prefer explicit configuration over magic/convention.",
-            "SPEED_FOCUSED": "User prioritizes PERFORMANCE. Consider efficiency and fast execution in hypotheses.",
-            "SAFETY_CONSCIOUS": "User values ERROR PREVENTION. Include validation and safety checks in proposed solutions.",
-            "AUTONOMY_FOCUSED": "User wants FREEDOM and flexibility. Avoid overly prescriptive or locked-down solutions.",
-        }
-        
-        # Build trait guidance section
-        trait_guidance = ""
-        if latent_traits:
-            guidance_lines = []
-            for trait_info in latent_traits:
-                trait_name = trait_info.get("trait")
-                confidence = trait_info.get("confidence", 0)
-                if trait_name in TRAIT_GUIDANCE and confidence >= 0.7:
-                    guidance_lines.append(f"- {TRAIT_GUIDANCE[trait_name]}")
-            
-            if guidance_lines:
-                trait_guidance = "\n\nUSER PREFERENCES DETECTED:\n" + "\n".join(guidance_lines)
-                logger.info(f"v21 Phase 3: Added {len(guidance_lines)} trait guidance(s) to instructions")
-        
-        instructions = base_instructions + trait_guidance
+        instructions, latent_traits = build_trait_instructions(cur, session_id)
         
         # =====================================================================
-        # v31: Past Failure Surfacing
-        # Search for relevant past failures to warn agent before hypothesis generation
+        # Helper 4: Surface past failures (v31)
         # =====================================================================
-        past_failure_warnings = _search_relevant_failures(parent_content)
+        past_failure_warnings = surface_past_failures(_search_relevant_failures, parent_content)
         
+        # Build initial response
         response = {
             "success": True,
             "session_id": session_id,
@@ -1377,70 +1298,22 @@ async def prepare_expansion(
             "goal": session["goal"],
             "relevant_laws": laws,
             "instructions": instructions,
-            "latent_traits": latent_traits if latent_traits else None  # v21: Include for transparency
+            "latent_traits": latent_traits if latent_traits else None
         }
         
-        # v31: Add warnings if any found
+        # Add past failure warnings if any
         if past_failure_warnings:
             response["past_failure_warnings"] = past_failure_warnings
-            logger.info(f"v31: Surfaced {len(past_failure_warnings)} failure warning(s)")
         
         # =====================================================================
-        # v38c: Semi-Auto Reference Integration
-        # Extract symbol patterns from goal/parent and suggest lookups
+        # Helper 5: Extract symbol suggestions (v38c)
         # =====================================================================
-        if project_id:
-            try:
-                import re
-                # Extract snake_case and CamelCase patterns from text
-                text_to_search = f"{session['goal']} {parent_content}"
-                
-                # Pattern for Python identifiers (snake_case and CamelCase)
-                # Must have at least one underscore OR be CamelCase with 2+ capital letters
-                snake_pattern = r'\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b'  # snake_case
-                camel_pattern = r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b'    # CamelCase
-                
-                candidates = set()
-                candidates.update(re.findall(snake_pattern, text_to_search))
-                candidates.update(re.findall(camel_pattern, text_to_search))
-                
-                # Remove common false positives
-                false_positives = {'should_be', 'will_be', 'may_be', 'can_be', 'must_be'}
-                candidates = candidates - false_positives
-                
-                if candidates:
-                    # Validate against file_symbols table
-                    cur.execute(
-                        """
-                        SELECT fs.symbol_name, fr.file_path, fs.line_start
-                        FROM file_symbols fs
-                        JOIN file_registry fr ON fs.file_id = fr.id
-                        WHERE fr.project_id = %s AND fs.symbol_name = ANY(%s)
-                        ORDER BY fs.symbol_name, fr.file_path
-                        LIMIT 20
-                        """,
-                        (project_id, list(candidates))
-                    )
-                    
-                    symbol_rows = cur.fetchall()
-                    if symbol_rows:
-                        suggested_lookups = []
-                        for row in symbol_rows:
-                            suggested_lookups.append({
-                                "symbol": row["symbol_name"],
-                                "file": row["file_path"],
-                                "line": row["line_start"],
-                                "match_type": "exact"
-                            })
-                        response["suggested_lookups"] = suggested_lookups
-                        
-                        # v38c: Add explicit instruction to call find_references
-                        symbol_names = [s["symbol"] for s in suggested_lookups[:3]]
-                        response["instructions"] += f"\n\n⚠️ SUGGESTED: Before generating hypotheses, call find_references(project_id='{project_id}', symbol_name='...') for: {', '.join(symbol_names)}. This will show all callers/usages to inform your scope."
-                        
-                        logger.info(f"v38c: Found {len(suggested_lookups)} symbol suggestions for project {project_id}")
-            except Exception as e:
-                logger.warning(f"v38c: Symbol suggestion failed (non-fatal): {e}")
+        suggested_lookups, instruction_add = extract_symbol_suggestions(
+            cur, project_id, session["goal"], parent_content
+        )
+        if suggested_lookups:
+            response["suggested_lookups"] = suggested_lookups
+            response["instructions"] += instruction_add
         
         # =====================================================================
         # v41: Preflight Enforcement - SQL Detection
@@ -1448,7 +1321,6 @@ async def prepare_expansion(
         try:
             from pas.helpers.preflight import detect_sql_operations, log_tool_call
             
-            # Detect SQL operations in goal or parent content
             combined_text = f"{session['goal']} {parent_content}"
             if detect_sql_operations(combined_text):
                 response["schema_check_required"] = True
@@ -1460,152 +1332,38 @@ async def prepare_expansion(
                 "has_suggested_lookups": "suggested_lookups" in response,
                 "has_failure_warnings": "past_failure_warnings" in response,
                 "schema_check_required": response.get("schema_check_required", False),
-                "has_project_id": project_id is not None  # v42a: Track for preflight
+                "has_project_id": project_id is not None
             })
             conn.commit()
         except Exception as e:
             logger.warning(f"v41: Preflight detection failed (non-fatal): {e}")
         
         # =====================================================================
-        # v42a: Auto Semantic Search for Related Modules
-        # Search codebase using goal keywords to surface existing functionality
+        # Helper 6: Search related modules (v42a)
         # =====================================================================
-        if project_id:
-            try:
-                goal_text = session["goal"]
-                # Semantic search on file_registry
-                goal_embedding = get_embedding(goal_text[:1000])
-                cur.execute(
-                    """
-                    SELECT file_path, purpose_cache,
-                           1 - (content_embedding <=> %s::vector) as similarity
-                    FROM file_registry
-                    WHERE project_id = %s
-                      AND content_embedding IS NOT NULL
-                    ORDER BY content_embedding <=> %s::vector
-                    LIMIT 5
-                    """,
-                    (goal_embedding, project_id, goal_embedding)
-                )
-                related_rows = cur.fetchall()
-                
-                if related_rows:
-                    related_modules = []
-                    for row in related_rows:
-                        module_info = {
-                            "file": row["file_path"],
-                            "similarity": round(row["similarity"], 3) if row["similarity"] else None
-                        }
-                        # Include purpose if cached
-                        if row.get("purpose_cache"):
-                            try:
-                                import json
-                                cache = row["purpose_cache"] if isinstance(row["purpose_cache"], dict) else json.loads(row["purpose_cache"])
-                                if cache.get("module_purpose"):
-                                    module_info["purpose"] = cache["module_purpose"][:100]
-                            except:
-                                pass
-                        related_modules.append(module_info)
-                    
-                    response["related_modules"] = related_modules
-                    response["instructions"] += f"\n\n📂 EXISTING MODULES FOUND: Review these {len(related_modules)} related files before hypothesizing: " + ", ".join([m['file'] for m in related_modules[:3]])
-                    logger.info(f"v42a: Found {len(related_modules)} related modules for goal")
-            except Exception as e:
-                logger.warning(f"v42a: Auto semantic search failed (non-fatal): {e}")
+        related_modules, instruction_add = search_related_modules(
+            cur, project_id, session["goal"], get_embedding
+        )
+        if related_modules:
+            response["related_modules"] = related_modules
+            response["instructions"] += instruction_add
         
         # =====================================================================
-        # v43: Project Purpose Grounding
-        # Include project mission to ground hypotheses in teleological context
+        # Helper 7: Fetch project grounding (v43)
         # =====================================================================
-        if project_id:
-            try:
-                cur.execute(
-                    """
-                    SELECT purpose_hierarchy, detected_domain
-                    FROM project_registry
-                    WHERE project_id = %s
-                    """,
-                    (project_id,)
-                )
-                project_purpose_row = cur.fetchone()
-                
-                if project_purpose_row and project_purpose_row["purpose_hierarchy"]:
-                    purpose = project_purpose_row["purpose_hierarchy"]
-                    response["project_grounding"] = {
-                        "mission": purpose.get("mission", ""),
-                        "user_needs": purpose.get("user_needs", []),
-                        "detected_domain": project_purpose_row["detected_domain"]
-                    }
-                    
-                    mission = purpose.get("mission", "")[:150]
-                    if mission:
-                        response["instructions"] += f"\n\n🎯 PROJECT MISSION: {mission}. Ensure hypotheses align with this purpose."
-                        logger.info(f"v43: Added project grounding for {project_id}")
-            except Exception as e:
-                logger.warning(f"v43: Project grounding failed (non-fatal): {e}")
+        project_grounding, instruction_add = fetch_project_grounding(cur, project_id)
+        if project_grounding:
+            response["project_grounding"] = project_grounding
+            response["instructions"] += instruction_add
         
         # =====================================================================
-        # v44d: Cross-Conversation Synthesis (Single-User)
-        # Include historical patterns from detected_patterns using goal-similarity
-        # and recency. Enables LLM to leverage insights from past sessions.
+        # Helper 8: Fetch historical patterns (v44d)
         # =====================================================================
-        try:
-            goal_text = session["goal"]
-            goal_embedding = get_embedding(goal_text[:1000])
-            
-            historical_patterns = []
-            seen_patterns = set()
-            
-            # 1. Goal-similarity patterns (semantic match)
-            cur.execute("""
-                SELECT pattern_type, source_phrase, confidence,
-                       1 - (embedding <=> %s::vector) as similarity
-                FROM detected_patterns
-                WHERE session_id != %s
-                  AND embedding IS NOT NULL
-                ORDER BY embedding <=> %s::vector
-                LIMIT 3
-            """, (goal_embedding, session_id, goal_embedding))
-            
-            for row in cur.fetchall():
-                key = (row["pattern_type"], row["source_phrase"][:50])
-                if key not in seen_patterns:
-                    seen_patterns.add(key)
-                    historical_patterns.append({
-                        "type": row["pattern_type"],
-                        "phrase": row["source_phrase"],
-                        "confidence": float(row["confidence"]) if row["confidence"] else 0.8,
-                        "similarity": round(float(row["similarity"]), 3) if row["similarity"] else None,
-                        "source": "goal_similarity"
-                    })
-            
-            # 2. Recent patterns (last 7 days)
-            cur.execute("""
-                SELECT pattern_type, source_phrase, confidence, created_at
-                FROM detected_patterns
-                WHERE session_id != %s
-                  AND created_at > NOW() - INTERVAL '7 days'
-                ORDER BY created_at DESC
-                LIMIT 3
-            """, (session_id,))
-            
-            for row in cur.fetchall():
-                key = (row["pattern_type"], row["source_phrase"][:50])
-                if key not in seen_patterns:
-                    seen_patterns.add(key)
-                    historical_patterns.append({
-                        "type": row["pattern_type"],
-                        "phrase": row["source_phrase"],
-                        "confidence": float(row["confidence"]) if row["confidence"] else 0.8,
-                        "source": "recency"
-                    })
-            
-            # Add to response if any found
-            if historical_patterns:
-                response["historical_patterns"] = historical_patterns[:5]
-                logger.info(f"v44d: Found {len(historical_patterns[:5])} historical patterns for context")
-        except Exception as e:
-            logger.warning(f"v44d: Historical pattern synthesis failed (non-fatal): {e}")
+        historical_patterns = fetch_historical_patterns(
+            cur, session_id, session["goal"], get_embedding
+        )
+        if historical_patterns:
+            response["historical_patterns"] = historical_patterns
         
         return response
 
@@ -1636,6 +1394,13 @@ async def store_expansion(
     h3_text: Optional[str] = None,
     h3_confidence: Optional[float] = None,
     h3_scope: Optional[str] = None,
+    # v51: Effort-Benefit scoring (1=low, 2=medium, 3=high)
+    h1_effort: Optional[int] = None,
+    h1_benefit: Optional[int] = None,
+    h2_effort: Optional[int] = None,
+    h2_benefit: Optional[int] = None,
+    h3_effort: Optional[int] = None,
+    h3_benefit: Optional[int] = None,
     # v7b: Revision tracking (borrowed from sequential thinking)
     is_revision: bool = False,
     revises_node_id: Optional[str] = None,
@@ -1663,6 +1428,8 @@ async def store_expansion(
         h3_text: Third hypothesis text (optional)
         h3_confidence: Third hypothesis confidence 0.0-1.0 (optional)
         h3_scope: Third hypothesis affected scope
+        h1_effort-h3_effort: Optional effort estimates (1=low, 2=medium, 3=high)
+        h1_benefit-h3_benefit: Optional benefit estimates (1=low, 2=medium, 3=high)
         is_revision: True if these hypotheses revise previous thinking (v7b)
         revises_node_id: Node ID being revised, if is_revision is True
         source_text: v25 - Raw user input that inspired this hypothesis (logged for semantic search)
@@ -1672,14 +1439,15 @@ async def store_expansion(
         Created nodes with Bayesian posterior scores, declared scopes, and revision info
     """
     try:
-        # Build hypotheses list from flattened params
-        hypotheses = []
-        if h1_text:
-            hypotheses.append({"hypothesis": h1_text, "confidence": h1_confidence or 0.5, "scope": h1_scope})
-        if h2_text:
-            hypotheses.append({"hypothesis": h2_text, "confidence": h2_confidence or 0.5, "scope": h2_scope})
-        if h3_text:
-            hypotheses.append({"hypothesis": h3_text, "confidence": h3_confidence or 0.5, "scope": h3_scope})
+        # Build hypotheses list from flattened params - Phase 2 Refactor
+        hypotheses = build_hypotheses_list(
+            h1_text, h1_confidence, h1_scope,
+            h2_text, h2_confidence, h2_scope,
+            h3_text, h3_confidence, h3_scope,
+            h1_effort, h1_benefit,
+            h2_effort, h2_benefit,
+            h3_effort, h3_benefit
+        )
         
         if not hypotheses:
             return {"success": False, "error": "At least one hypothesis (h1_text) is required"}
@@ -1687,37 +1455,17 @@ async def store_expansion(
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Verify session
-        cur.execute("SELECT goal FROM reasoning_sessions WHERE id = %s AND state = 'active'", (session_id,))
-        if not cur.fetchone():
-            return {"success": False, "error": "Session not found or not active"}
+        # Verify session - Phase 2 Refactor
+        session_error = verify_active_session(cur, session_id)
+        if session_error:
+            return session_error
         
-        # Determine parent path
-        if parent_node_id:
-            cur.execute("SELECT path FROM thought_nodes WHERE id = %s", (parent_node_id,))
-            parent = cur.fetchone()
-            if not parent:
-                return {"success": False, "error": "Parent node not found"}
-            parent_path = parent["path"]
-        else:
-            # Create or get root
-            cur.execute("SELECT id, path FROM thought_nodes WHERE session_id = %s AND path = 'root'", (session_id,))
-            root = cur.fetchone()
-            if root:
-                parent_path = "root"
-                parent_node_id = str(root["id"])
-            else:
-                # Create root
-                cur.execute("SELECT goal FROM reasoning_sessions WHERE id = %s", (session_id,))
-                goal = cur.fetchone()["goal"]
-                root_id = str(uuid.uuid4())
-                root_emb = get_embedding(goal)
-                cur.execute(
-                    "INSERT INTO thought_nodes (id, session_id, path, content, node_type, prior_score, likelihood, embedding) VALUES (%s, %s, 'root', %s, 'root', 0.5, 0.5, %s)",
-                    (root_id, session_id, goal, root_emb)
-                )
-                parent_path = "root"
-                parent_node_id = root_id
+        # Determine parent path - Phase 2 Refactor
+        parent_path, parent_node_id, parent_error = resolve_parent_path(
+            cur, session_id, parent_node_id, get_embedding
+        )
+        if parent_error:
+            return parent_error
         
         created_nodes = []
         for i, hyp in enumerate(hypotheses[:3]):
@@ -1729,44 +1477,17 @@ async def store_expansion(
             if not hypothesis_text:
                 continue
             
-            # Generate embedding and find similar law
+            # Generate embedding and find similar law - Phase 2 Refactor
             hyp_emb = get_embedding(hypothesis_text)
-            
-            # v13a: Multi-Law Matching - fetch top-3 similar laws for ensemble prior
-            cur.execute(
-                """
-                SELECT id, law_name, definition, scientific_weight, selection_count, success_count,
-                       1 - (embedding <=> %s::vector) as similarity
-                FROM scientific_laws WHERE embedding IS NOT NULL
-                ORDER BY embedding <=> %s::vector LIMIT 3
-                """,
-                (hyp_emb, hyp_emb)
+            prior, supporting_law, law_name = match_laws_and_compute_prior(
+                cur, hypothesis_text, hyp_emb, _compute_ensemble_prior
             )
-            laws = cur.fetchall()
-            
-            # v13a: Filter by similarity threshold (>0.2) and compute weighted ensemble prior
-            MIN_SIMILARITY = 0.2
-            matching_laws = [l for l in laws if l["similarity"] >= MIN_SIMILARITY]
-            
-            if matching_laws:
-                # v35: Use extracted pure helper for ensemble prior
-                prior, supporting_law_ids, law_name = _compute_ensemble_prior(
-                    matching_laws, hypothesis_text
-                )
-                supporting_law = supporting_law_ids
-                
-                # v12b: Track law selection (DB update must stay inline)
-                for law in matching_laws:
-                    cur.execute(
-                        "UPDATE scientific_laws SET selection_count = selection_count + 1 WHERE id = %s",
-                        (law["id"],)
-                    )
-            else:
-                prior = 0.5
-                supporting_law = []
-                law_name = None
             
             likelihood = llm_confidence
+            
+            # v51: Build metadata with ROI if provided
+            roi_data = hyp.get("roi")
+            metadata_json = json.dumps({"roi": roi_data}) if roi_data else None
             
             # Insert node
             node_id = str(uuid.uuid4())
@@ -1774,11 +1495,11 @@ async def store_expansion(
             
             cur.execute(
                 """
-                INSERT INTO thought_nodes (id, session_id, path, content, node_type, prior_score, likelihood, embedding, supporting_laws, declared_scope)
-                VALUES (%s, %s, %s, %s, 'hypothesis', %s, %s, %s, %s, %s)
+                INSERT INTO thought_nodes (id, session_id, path, content, node_type, prior_score, likelihood, embedding, supporting_laws, declared_scope, metadata)
+                VALUES (%s, %s, %s, %s, 'hypothesis', %s, %s, %s, %s, %s, %s)
                 RETURNING id, path, prior_score, likelihood, posterior_score
                 """,
-                (node_id, session_id, new_path, hypothesis_text, prior, likelihood, hyp_emb, supporting_law, declared_scope)
+                (node_id, session_id, new_path, hypothesis_text, prior, likelihood, hyp_emb, supporting_law, declared_scope, metadata_json)
             )
             node = cur.fetchone()
             
@@ -1790,213 +1511,41 @@ async def store_expansion(
                 "likelihood": float(node["likelihood"]),
                 "posterior_score": float(node["posterior_score"]) if node["posterior_score"] else None,
                 "supporting_law": law_name,
-                "declared_scope": declared_scope
+                "declared_scope": declared_scope,
+                "roi": roi_data  # v51: Include ROI in response if provided
             })
         
         # =====================================================================
-        # v25: Conversation Logging - Store source_text if provided
+        # v25: Conversation Logging - Phase 2 Refactor
         # =====================================================================
         conversation_log_id = None
         if source_text and created_nodes:
-            try:
-                first_node_id = created_nodes[0]["node_id"]
-                source_embedding = get_embedding(source_text[:2000])  # Truncate for embedding (max useful context)
-                
-                cur.execute(
-                    """
-                    INSERT INTO conversation_log (session_id, thought_node_id, user_id, log_type, raw_text, embedding)
-                    VALUES (%s, %s, %s, 'user_input', %s, %s)
-                    RETURNING id
-                    """,
-                    (session_id, first_node_id, user_id, source_text, source_embedding)
-                )
-                log_entry = cur.fetchone()
-                conversation_log_id = str(log_entry["id"]) if log_entry else None
-                logger.info(f"v25: Created conversation_log entry {conversation_log_id} for source_text ({len(source_text)} chars)")
-            except Exception as log_err:
-                logger.warning(f"v25: Failed to create conversation_log entry: {log_err}")
-                # Don't fail the whole operation for logging failure
+            conversation_log_id = log_conversation_source(
+                cur, session_id, source_text, user_id, 
+                created_nodes[0]["node_id"], get_embedding
+            )
         
         conn.commit()
         
-        # Workflow nudge: Find top hypothesis and suggest critique
-        top_node = max(created_nodes, key=lambda n: n.get("posterior_score") or 0) if created_nodes else None
-        next_step = None
-        if top_node:
-            next_step = f"Challenge your top hypothesis. Call prepare_critique(node_id='{top_node['node_id']}')"
+        # Workflow nudges - Phase 2 Refactor
+        nudges = compute_workflow_nudges(created_nodes, is_revision, revises_node_id)
+        next_step = nudges["next_step"]
+        confidence_nudge = nudges["confidence_nudge"]
+        revision_info = nudges["revision_info"]
+        revision_nudge = nudges["revision_nudge"]
         
-        # v7a: Confidence nudge (borrowed from sequential thinking meta-cognition)
-        confidence_nudge = None
-        if created_nodes:
-            avg_confidence = sum(n.get("likelihood", 0.5) for n in created_nodes) / len(created_nodes)
-            if avg_confidence < 0.65:
-                confidence_nudge = f"Low confidence detected (avg: {avg_confidence:.2f}). Consider: (1) expand deeper on uncertain hypothesis, (2) add alternative perspectives, (3) gather more context before deciding."
+        # v21: Scope-Based Failure Matching - Phase 2 Refactor
+        scope_warnings = query_scope_failures(cur, conn, created_nodes)
         
-        # v7b: Revision tracking response
-        revision_info = None
-        revision_nudge = None
-        if is_revision:
-            revision_info = {
-                "is_revision": True,
-                "revises_node_id": revises_node_id,
-                "message": "Revision noted. Original hypothesis preserved for comparison."
-            }
-            if top_node:
-                revision_nudge = f"Revision recorded. Consider critiquing the revised hypothesis. Call prepare_critique(node_id='{top_node['node_id']}')"
+        # v41: Preflight Enforcement Check - Phase 2 Refactor
+        preflight_warnings, preflight_bypassed = run_preflight_checks(
+            cur, conn, session_id, skip_preflight, created_nodes
+        )
         
-        # =====================================================================
-        # v21: Scope-Based Failure Matching
-        # Query historical failures that touched similar files/scopes
-        # =====================================================================
-        scope_warnings = []
-        try:
-            # Collect all declared scopes from this expansion
-            all_scopes = []
-            for node in created_nodes:
-                scope = node.get("declared_scope")
-                if scope:
-                    # Parse comma-separated scope items
-                    all_scopes.extend([s.strip() for s in scope.split(',') if s.strip()])
-            
-            if all_scopes:
-                # Query failures that mention similar files/scopes
-                scope_patterns = ['%' + s.split(':')[0] + '%' for s in all_scopes if s]  # Extract file/module names
-                
-                cur.execute("""
-                    SELECT DISTINCT o.failure_reason, s.goal, t.declared_scope
-                    FROM outcome_records o
-                    JOIN reasoning_sessions s ON o.session_id = s.id
-                    JOIN thought_nodes t ON t.session_id = s.id
-                    WHERE o.outcome = 'failure'
-                    AND o.failure_reason IS NOT NULL
-                    AND t.declared_scope IS NOT NULL
-                    AND (
-                        -- Match if any scope pattern overlaps
-                        t.declared_scope ILIKE ANY(%s)
-                    )
-                    ORDER BY o.created_at DESC
-                    LIMIT 3
-                """, (scope_patterns,))
-                
-                related_failures = cur.fetchall()
-                for r in related_failures:
-                    scope_warnings.append({
-                        "past_goal": r["goal"][:60] + "..." if len(r["goal"]) > 60 else r["goal"],
-                        "past_scope": r["declared_scope"][:80] if r["declared_scope"] else None,
-                        "failure_reason": r["failure_reason"][:120] + "..." if len(r["failure_reason"]) > 120 else r["failure_reason"]
-                    })
-                
-                if scope_warnings:
-                    logger.info(f"v21: Found {len(scope_warnings)} scope-related historical failures")
-        except Exception as e:
-            conn.rollback()  # Clear any transaction issues
-            logger.warning(f"v21: Scope-based failure matching failed: {e}")
-        
-        # =====================================================================
-        # v41: Preflight Enforcement Check
-        # =====================================================================
-        preflight_warnings = []
-        preflight_bypassed = False
-        try:
-            from pas.helpers.preflight import check_preflight_conditions, log_tool_call
-            
-            if skip_preflight:
-                # Log bypass for outcome correlation
-                log_tool_call(cur, session_id, "store_expansion_bypass", {"reason": "skip_preflight=True"})
-                preflight_bypassed = True
-                logger.info("v41: Preflight check bypassed via skip_preflight=True")
-            else:
-                # Get preflight context from session metadata
-                cur.execute(
-                    "SELECT call_metadata FROM session_call_log WHERE session_id = %s AND tool_name = 'prepare_expansion' ORDER BY created_at DESC LIMIT 1",
-                    (session_id,)
-                )
-                prep_call = cur.fetchone()
-                
-                if prep_call and prep_call.get("call_metadata"):
-                    import json
-                    metadata = prep_call["call_metadata"] if isinstance(prep_call["call_metadata"], dict) else json.loads(prep_call["call_metadata"])
-                    
-                    # Check conditions
-                    preflight_warnings = check_preflight_conditions(
-                        cur,
-                        session_id,
-                        has_suggested_lookups=bool(metadata.get("has_suggested_lookups")),
-                        schema_check_required=metadata.get("schema_check_required", False),
-                        has_failure_warnings=bool(metadata.get("has_failure_warnings")),
-                        has_project_id=bool(metadata.get("has_project_id"))  # v42a: Codebase research check
-                    )
-                    
-                    if preflight_warnings:
-                        logger.warning(f"v41: Preflight warnings: {[w['type'] for w in preflight_warnings]}")
-            
-            # Log this store_expansion call
-            log_tool_call(cur, session_id, "store_expansion", {
-                "node_count": len(created_nodes),
-                "preflight_bypassed": preflight_bypassed,
-                "preflight_warning_count": len(preflight_warnings)
-            })
-            conn.commit()
-        except Exception as e:
-            logger.warning(f"v41: Preflight check failed (non-fatal): {e}")
-        
-        # =====================================================================
-        # v42b: Scope-Based Failure Surfacing
-        # Search failures against hypothesis declared_scope, not just goal text
-        # =====================================================================
-        scope_failure_warnings = []
-        try:
-            # Get schema_check_required from session call log
-            schema_check = False
-            try:
-                cur.execute(
-                    "SELECT call_metadata FROM session_call_log WHERE session_id = %s AND tool_name = 'prepare_expansion' ORDER BY created_at DESC LIMIT 1",
-                    (session_id,)
-                )
-                prep_call = cur.fetchone()
-                if prep_call and prep_call.get("call_metadata"):
-                    import json
-                    metadata = prep_call["call_metadata"] if isinstance(prep_call["call_metadata"], dict) else json.loads(prep_call["call_metadata"])
-                    schema_check = metadata.get("schema_check_required", False)
-            except:
-                pass
-            
-            # Get already-surfaced warning IDs for deduplication
-            cur.execute("SELECT COALESCE(surfaced_warning_ids, '{}') FROM reasoning_sessions WHERE id = %s", (session_id,))
-            surfaced_row = cur.fetchone()
-            exclude_ids = set(surfaced_row[0]) if surfaced_row and surfaced_row[0] else set()
-            
-            # Search failures for each hypothesis scope
-            new_surfaced_ids = []
-            for node in created_nodes:
-                scope = node.get("declared_scope", "")
-                if scope:
-                    failures = _search_relevant_failures(
-                        scope,
-                        context_type="scope",
-                        schema_check_required=schema_check,
-                        exclude_ids=exclude_ids
-                    )
-                    for f in failures:
-                        f["hypothesis_path"] = node["path"]
-                        f["matched_scope"] = scope
-                        scope_failure_warnings.append(f)
-                        # Track for deduplication (only if has an ID)
-                        if f.get("id"):
-                            new_surfaced_ids.append(f["id"])
-            
-            # Update surfaced_warning_ids for future deduplication
-            if new_surfaced_ids:
-                cur.execute(
-                    "UPDATE reasoning_sessions SET surfaced_warning_ids = COALESCE(surfaced_warning_ids, '{}') || %s WHERE id = %s",
-                    (new_surfaced_ids, session_id)
-                )
-                conn.commit()
-            
-            if scope_failure_warnings:
-                logger.info(f"v42b: Surfaced {len(scope_failure_warnings)} scope-matched failure(s)")
-        except Exception as e:
-            logger.warning(f"v42b: Scope failure surfacing failed (non-fatal): {e}")
+        # v42b: Scope-Based Failure Surfacing - Phase 2 Refactor
+        scope_failure_warnings = surface_scope_failures(
+            cur, conn, session_id, created_nodes, _search_relevant_failures
+        )
         
         return {
             "success": True, 
@@ -2041,199 +1590,36 @@ async def prepare_critique(
     Returns:
         Context dict with node_content, supporting_laws for critique generation
     """
-
+    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
-        cur.execute(
-            """
-            SELECT t.id, t.session_id, t.path, t.content, t.prior_score, t.likelihood, t.posterior_score, t.supporting_laws, s.goal
-            FROM thought_nodes t JOIN reasoning_sessions s ON t.session_id = s.id WHERE t.id = %s
-            """,
-            (node_id,)
-        )
-        node = cur.fetchone()
+        # Delegate to helpers
+        node, laws_text = fetch_node_with_laws(cur, node_id)
         if not node:
             return {"success": False, "error": f"Node {node_id} not found"}
         
-        # Get supporting laws
-        laws_text = []
-        if node["supporting_laws"]:
-            # v14c.1: Include failure_modes for targeted critique
-            cur.execute("SELECT law_name, definition, failure_modes FROM scientific_laws WHERE id = ANY(%s)", (node["supporting_laws"],))
-            for law in cur.fetchall():
-                laws_text.append({
-                    "law_name": law["law_name"], 
-                    "definition": law["definition"],
-                    "failure_modes": law["failure_modes"] or []  # v14c.1
-                })
-        
-        # v16c: LLM Critique Synthesis - generate suggested critique
-        # v31a: Support critique_mode for different critique perspectives
-        suggested_critique = None
-        negative_space_gaps = None  # v31a: Gaps found in negative_space mode
-        
-        # v31a: Select prompt based on critique mode
-        if critique_mode == "negative_space":
-            critique_prompt = f"""Analyze what this hypothesis does NOT address:
-
-Hypothesis: {node["content"]}
-
-Session Goal: {node["goal"]}
-
-For EACH component of the goal, answer:
-1. Is this component fully addressed by the hypothesis?
-2. What aspects are MISSING or assumed?
-3. What adjacent concerns are NOT considered?
-
-Return ONLY a valid JSON object:
-{{
-  "gaps": [
-    {{"component": "...", "addressed": true/false, "missing": "what's not covered"}},
-    ...
-  ],
-  "blind_spots": ["things taken for granted"],
-  "boundary_issues": ["where the hypothesis ends but the goal continues"],
-  "overall_coverage": 0.8
-}}
-
-Focus on OMISSIONS, not flaws in what IS proposed."""
-            system = "You are a gap analyst. Find what's MISSING, not what's wrong. Return only valid JSON."
-        else:
-            # Standard critique mode (existing behavior)
-            critique_prompt = f"""Critique this hypothesis:
-{node["content"]}
-
-Session Goal: {node["goal"]}
-
-Consider these scientific laws: {', '.join(l.get('law_name', '') for l in laws_text) if laws_text else 'None'}
-
-Return ONLY a valid JSON object:
-{{
-  "counterargument": "Main counter-argument that challenges this hypothesis",
-  "severity": 0.5,
-  "major_flaws": ["flaw1", "flaw2"],
-  "minor_flaws": ["minor issue"],
-  "edge_cases": ["edge case 1"]
-}}
-
-Be specific and constructive. Focus on what could go wrong."""
-            system = "You are a hypothesis critic. Return only valid JSON."
-
-        
-        # v32 FIX: MCP sampling not supported by clients
-        # Instead of calling LLM directly, return prompts for agent to process
-        # Agent will call LLM externally and pass results to store_critique
-        llm_prompt = {
-            "prompt": critique_prompt,
-            "system": system,
-            "expected_format": "JSON object with counterargument/severity/flaws" if critique_mode == "standard" else "JSON object with gaps/blind_spots/boundary_issues"
-        }
+        # Build critique prompt
+        prompt, system, expected_format = build_critique_prompt(
+            node["content"], node["goal"], laws_text, critique_mode
+        )
+        llm_prompt = {"prompt": prompt, "system": system, "expected_format": expected_format}
         logger.info(f"v32: Returning prompt for agent to process (mode: {critique_mode})")
-
         
-        # v27 -> v31: Surface past failures matching this hypothesis content
-        # v31 Enhancement: Add keyword pattern matching in addition to semantic search
-        past_failures = []
+        # Search past failures and critiques
+        past_failures = search_past_failures(cur, conn, node["content"], node_id)
+        past_critiques = search_past_critiques(cur, node["content"], node_id)
         
-        # v31: First check keyword patterns (fast, deterministic)
-        keyword_warnings = _search_relevant_failures(node["content"], semantic_threshold=0.55, limit=3)
-        for w in keyword_warnings:
-            if w.get('source') == 'keyword':
-                past_failures.append({
-                    "pattern": w.get('pattern'),
-                    "warning": w.get('warning'),
-                    "source": "keyword",
-                    "triggered_by": w.get('triggered_by')
-                })
+        # Build assumption extraction prompt
+        assumption_extraction_prompt = build_assumption_extraction_prompt(node["content"])
         
-        # v27: Then add semantic matches
-        try:
-            # Get embedding for current node content
-            node_embedding = get_embedding(node["content"][:1000])
-            cur.execute("""
-                SELECT o.failure_reason, s.goal,
-                       1 - (o.failure_reason_embedding <=> %s::vector) as similarity
-                FROM outcome_records o
-                JOIN reasoning_sessions s ON o.session_id = s.id
-                WHERE o.outcome != 'success'
-                AND o.failure_reason_embedding IS NOT NULL
-                AND 1 - (o.failure_reason_embedding <=> %s::vector) > 0.5
-                ORDER BY similarity DESC
-                LIMIT 3
-            """, (node_embedding, node_embedding))
-            for r in cur.fetchall():
-                # Avoid duplicates from keyword matches
-                if not any(r["failure_reason"][:50] in str(pf.get('warning', '')) for pf in past_failures):
-                    past_failures.append({
-                        "failure_reason": r["failure_reason"][:200],
-                        "session_goal": r["goal"][:100],
-                        "similarity": round(float(r["similarity"]), 3),
-                        "source": "semantic"
-                    })
-            if past_failures:
-                logger.info(f"v31: Found {len(past_failures)} failure warning(s) for node {node_id}")
-        except Exception as e:
-            logger.warning(f"v31 past_failures lookup failed: {e}")
-        
-        # v29: Assumption Surfacing - return prompt for client LLM to extract assumptions
-        # NOTE: MCP sampling via create_message is not supported by all clients,
-        # so we return the prompt for the calling LLM to process directly
-        assumption_extraction_prompt = f"""Analyze this hypothesis and extract 2-3 IMPLICIT ASSUMPTIONS that must be true for it to work:
-
-Hypothesis: {node["content"]}
-
-For each assumption, answer:
-1. What is the assumption? (something taken for granted)
-2. When could this assumption be FALSE? (challenge it)
-3. What happens if this assumption fails? (the risk)
-
-Focus on hidden dependencies, preconditions, and things taken for granted.
-Format your response as a numbered list."""
-        
-        # =====================================================================
-        # v42b: Past Critiques Surfacing
-        # Find critiques from similar hypotheses to inform current critique
-        # =====================================================================
-        past_critiques = []
-        try:
-            node_embedding = get_embedding(node["content"][:1000])
-            cur.execute("""
-                SELECT t.content AS hypothesis, t.critique, t.critique_severity,
-                       1 - (t.embedding <=> %s::vector) as similarity,
-                       s.goal
-                FROM thought_nodes t
-                JOIN reasoning_sessions s ON t.session_id = s.id
-                WHERE t.critique IS NOT NULL
-                  AND t.embedding IS NOT NULL
-                  AND t.id != %s
-                  AND 1 - (t.embedding <=> %s::vector) > 0.65
-                ORDER BY similarity DESC
-                LIMIT 3
-            """, (node_embedding, node_id, node_embedding))
-            
-            for r in cur.fetchall():
-                past_critiques.append({
-                    "similar_hypothesis": r["hypothesis"][:150] + "..." if len(r["hypothesis"]) > 150 else r["hypothesis"],
-                    "critique": r["critique"],
-                    "severity": float(r["critique_severity"]) if r["critique_severity"] else None,
-                    "similarity": round(float(r["similarity"]), 3),
-                    "session_goal": r["goal"][:100]
-                })
-            
-            if past_critiques:
-                logger.info(f"v42b: Found {len(past_critiques)} past critique(s) for similar hypotheses")
-        except Exception as e:
-            logger.warning(f"v42b: Past critiques lookup failed: {e}")
-
         return {
             "success": True,
             "node_id": node_id,
             "path": node["path"],
             "node_content": node["content"],
             "session_goal": node["goal"],
-            # v31a: Include critique mode used
             "critique_mode": critique_mode,
             "current_scores": {
                 "prior": float(node["prior_score"]),
@@ -2241,30 +1627,23 @@ Format your response as a numbered list."""
                 "posterior": float(node["posterior_score"]) if node["posterior_score"] else None
             },
             "supporting_laws": laws_text,
-            # v32: LLM prompt for agent to process (replaces broken MCP sampling)
             "llm_prompt": llm_prompt,
-            # v16c/v31a: These are now populated by agent after processing llm_prompt
             "suggested_critique": None,
             "negative_space_gaps": None,
-            # v27: Past failures matching this hypothesis
             "past_failures": past_failures,
-            # v29: Assumption Surfacing - prompt for client LLM to extract and challenge assumptions
             "assumption_extraction_prompt": assumption_extraction_prompt,
-            # v32: Updated instructions for two-step workflow
             "instructions": f"Process the llm_prompt to generate critique. Mode: {critique_mode}. After generating, call store_critique(node_id='{node_id}', counterargument=..., severity_score=..., logical_flaws='...', edge_cases='...').",
-            # v9b: Constitutional Principles for structured critique
             "constitutional_principles": CONSTITUTIONAL_PRINCIPLES,
-            # v10b: Critic Ensemble Personas
             "critic_personas": CRITIC_PERSONAS,
-            "aggregation_guidance": AGGREGATION_GUIDANCE
+            "aggregation_guidance": AGGREGATION_GUIDANCE,
+            "past_critiques": past_critiques  # v42b
         }
-
         
     except Exception as e:
         logger.error(f"prepare_critique failed: {e}")
         return {"success": False, "error": str(e)}
     finally:
-        if 'conn' in locals():
+        if conn:
             safe_close_connection(conn)
 
 
@@ -2335,9 +1714,24 @@ async def store_critique(
                 "method": "legacy_severity"
             }
         
+        # v52: Persist critique data to metadata for checklist validation
+        critique_data = {
+            "counterargument": counterargument[:500],
+            "major_flaws": [f.strip() for f in major_flaws.replace('\n', ',').split(',') if f.strip()],
+            "minor_flaws": [f.strip() for f in minor_flaws.replace('\n', ',').split(',') if f.strip()],
+            "edge_cases": [c.strip() for c in edge_cases.replace('\n', ',').split(',') if c.strip()],
+            "severity_score": severity
+        }
         cur.execute(
-            "UPDATE thought_nodes SET likelihood = %s, updated_at = NOW() WHERE id = %s RETURNING prior_score, likelihood, posterior_score",
-            (new_likelihood, node_id)
+            """
+            UPDATE thought_nodes 
+            SET likelihood = %s, 
+                updated_at = NOW(),
+                metadata = metadata || %s::jsonb
+            WHERE id = %s 
+            RETURNING prior_score, likelihood, posterior_score
+            """,
+            (new_likelihood, json.dumps({"critique": critique_data}), node_id)
         )
         updated = cur.fetchone()
         conn.commit()
@@ -2722,6 +2116,7 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
     Returns:
         Interview config and generated questions, or indication that no gaps exist
     """
+    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -2747,237 +2142,23 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
                 "message": "Interview already has pending questions. Use get_next_question to continue."
             }
         
-        # v16d.2: Query historical failures for similar goals (domain-agnostic via embedding)
-        historical_questions: list[dict[str, Any]] = []
-        try:
-            cur.execute("""
-                SELECT s.goal, o.notes, o.failure_reason
-                FROM outcome_records o
-                JOIN reasoning_sessions s ON o.session_id = s.id
-                WHERE o.outcome != 'success'
-                AND (o.notes IS NOT NULL OR o.failure_reason IS NOT NULL)
-                AND s.goal_embedding IS NOT NULL
-                AND 1 - (s.goal_embedding <=> (SELECT goal_embedding FROM reasoning_sessions WHERE id = %s)) > 0.6
-                LIMIT 3
-            """, (session_id,))
-            
-            for row in cur.fetchall():
-                reason = row["failure_reason"] or row["notes"]
-                if reason:
-                    historical_questions.append({
-                        "id": f"hist_{len(historical_questions)+1}",
-                        "question_text": f"A similar goal '{row['goal'][:50]}...' failed because: {reason[:100]}. How will you address this?",
-                        "question_type": "open",
-                        "choices": [],  # v37 FIX: Required for get_next_question
-                        "priority": 5,  # High priority - show first
-                        "depth": 1,
-                        "depends_on": [],
-                        "follow_up_rules": [],
-                        "answered": False,
-                        "answer": None,
-                        "source": "historical_failure"
-                    })
-        except Exception as e:
-            conn.rollback()  # Clear aborted transaction state
-            logger.warning(f"v16d.2 historical query failed: {e}")
+        # v16d.2: Query historical failures
+        historical_questions = query_historical_failures(cur, conn, session_id, logger)
         
-        # =====================================================================
-        # v19: Domain Detection + Dimension-Based Questions
-        # Detect goal domain, load dimensions, generate structured questions
-        # =====================================================================
+        # v19: Domain detection + dimension questions
+        detected_domains = detect_domains(cur, session_id, logger)
         domain_questions = []
-        detected_domains: list[dict[str, Any]] = []
-        try:
-            # Query domains by embedding similarity to goal
-            cur.execute("""
-                SELECT id, domain_name, description,
-                       1 - (embedding <=> (SELECT goal_embedding FROM reasoning_sessions WHERE id = %s)) as similarity
-                FROM interview_domains
-                WHERE is_active = true
-                AND embedding IS NOT NULL
-                ORDER BY embedding <=> (SELECT goal_embedding FROM reasoning_sessions WHERE id = %s)
-                LIMIT 2
-            """, (session_id, session_id))
-            
-            similar_domains = cur.fetchall()
-            
-            # Pick domains with similarity > 0.5 (or top 1 if none pass threshold)
-            for row in similar_domains:
-                if row["similarity"] > 0.5 or not detected_domains:
-                    detected_domains.append({
-                        "id": str(row["id"]),
-                        "name": row["domain_name"],
-                        "similarity": row["similarity"]
-                    })
-            
-            if detected_domains:
-                logger.info(f"v19: Detected domains: {[d['name'] for d in detected_domains]}")
-                
-                # Store detected domains in session context
-                context["detected_domains"] = detected_domains
-                
-                # Load dimensions for detected domains, ordered by priority
-                # Use string IDs - PostgreSQL will cast them to UUIDs
-                domain_ids = [d["id"] for d in detected_domains]
-                cur.execute("""
-                    SELECT dim.id, dim.dimension_name, dim.description, dim.is_required, dim.priority,
-                           d.domain_name,
-                           q.question_template, q.question_type, q.choices
-                    FROM interview_dimensions dim
-                    JOIN interview_domains d ON dim.domain_id = d.id
-                    LEFT JOIN interview_questions q ON q.dimension_id = dim.id AND q.is_default = true
-                    WHERE dim.domain_id = ANY(%s::uuid[])
-                    ORDER BY dim.priority ASC
-                """, (domain_ids,))
-                
-                dimensions = cur.fetchall()
-                
-                # Track which dimensions we're asking about
-                dimension_coverage = {}
-                
-                for dim in dimensions:
-                    dim_id = str(dim["id"])
-                    dimension_coverage[dim_id] = {
-                        "name": dim["dimension_name"],
-                        "domain": dim["domain_name"],
-                        "is_required": dim["is_required"],
-                        "covered": False
-                    }
-                    
-                    # Generate question if template exists
-                    if dim["question_template"]:
-                        choices = dim["choices"] if dim["choices"] else []
-                        domain_questions.append({
-                            "id": f"dim_{dim['dimension_name']}",
-                            "dimension_id": dim_id,
-                            "question_text": dim["question_template"],
-                            "question_type": dim["question_type"],
-                            "choices": choices,
-                            "priority": dim["priority"],
-                            "depth": 1,
-                            "depends_on": [],
-                            "follow_up_rules": [],
-                            "answered": False,
-                            "answer": None,
-                            "source": "domain_dimension",
-                            "domain": dim["domain_name"],
-                            "dimension": dim["dimension_name"],
-                            "is_required": dim["is_required"]
-                        })
-                
-                # Store dimension coverage in context for tracking
-                context["dimension_coverage"] = dimension_coverage
-                
-                logger.info(f"v19: Generated {len(domain_questions)} dimension questions for {len(detected_domains)} domain(s)")
+        if detected_domains:
+            context["detected_domains"] = detected_domains
+            domain_ids = [d["id"] for d in detected_domains]
+            domain_questions, dimension_coverage = load_dimension_questions(cur, domain_ids, context, logger)
+            context["dimension_coverage"] = dimension_coverage
         
-        except Exception as e:
-            conn.rollback()  # Clear aborted transaction state
-            logger.warning(f"v19 domain detection failed: {e}")
+        # v21: LLM question prompt (agent processes later via store_gaps_questions)
+        # build_goal_question_prompt(goal) - available but not awaited here
         
-        # Analyze goal to generate questions
-        # v16d.1: LLM-generated goal-derived questions
-        # v17c: Focus on business context only, not code quality
-        # v18: Smart LLM Gating - return [] for specific goals
-        # v19: Skip LLM questions if domain detection succeeded
-        # v21: Hidden Context Question Design - laddering, trade-offs, consequence-framing
-        goal_questions: list[dict[str, Any]] = []
-        try:
-            goal_prompt = f"""Analyze this goal and generate clarifying questions if needed:
-
-GOAL: {goal}
-
-DECISION RULES:
-1. If goal is SPECIFIC (names files/functions, has clear constraints) → return []
-2. If goal is AMBIGUOUS (multiple valid interpretations) → return 1-2 questions max
-3. If goal is OPEN-ENDED (design/architecture/planning) → return 2-3 questions max
-
-EXAMPLES OF SPECIFIC GOALS (return []):
-- "Fix bug in auth.py line 45"
-- "Add logging to UserService.create_user()"
-- "Refactor parse_terminal_output to handle '0 failed'"
-
-=== HIDDEN CONTEXT QUESTION DESIGN (v21) ===
-Use psychology-based techniques to extract more information per question:
-
-1. CONSEQUENCE FRAMING (Laddering):
-   - Frame choices as CONSEQUENCES, not features
-   - BAD: "Which database?" → "PostgreSQL / MySQL / MongoDB"
-   - GOOD: "When data integrity fails, what's the worst outcome?"
-          → "Users lose trust / Debugging becomes hard / Schema breaks"
-
-2. TRADE-OFF BUNDLES (Conjoint):
-   - Force implicit priority decisions
-   - BAD: "Is performance important?" (everyone says yes)
-   - GOOD: "Which trade-off can you live with?"
-          → "50ms slower but consistent / Fast but occasional stale reads"
-
-3. SCENARIO COMPLETION (Projective):
-   - Present a situation and ask what happens next
-   - GOOD: "A critical bug appears at 2am before launch. When you investigate, you find..."
-          → Options reveal risk tolerance, debugging philosophy
-
-4. COGNITIVE LOAD (Keep it simple):
-   - Options < 15 words each
-   - Use concrete scenarios, not abstractions
-   - Gut reaction = true preference
-
-WHAT EACH CHOICE REVEALS:
-- Every option should reveal an underlying VALUE (risk tolerance, priority, philosophy)
-- Include a "hidden_value" field describing what the choice reveals
-- Example: {{"label": "A", "description": "Fast but complex", "hidden_value": "performance_priority"}}
-
-Return format:
-[{{"question_text": "...", "choices": [{{"label": "A", "description": "...", "hidden_value": "...", "pros": ["..."], "cons": ["..."]}}]}}]
-
-Return [] if goal is specific enough. Return ONLY the JSON array."""
-            
-            # v32 FIX: MCP sampling not supported by clients
-            # Return prompt for agent to process - agent stores questions via store_gaps_questions
-            llm_question_prompt = {
-                "prompt": goal_prompt,
-                "system": "You are a structured question generator. Return only valid JSON arrays.",
-                "max_questions": 3
-            }
-            logger.info(f"v32: Returning question generation prompt for agent")
-            
-            # Don't wait for LLM - just return the prompt for agent to process
-            # Agent will call store_gaps_questions after processing
-        except Exception as e:
-            logger.warning(f"v16d.1 goal question prompt setup failed: {e}")
-        
-        # v19: Prefer domain questions over LLM-generated questions
-        # Priority: 1) domain dimensions, 2) goal-derived LLM, 3) catch-all
-        if domain_questions:
-            # Domain detection succeeded - use dimension-based questions
-            questions = domain_questions
-            logger.info(f"v19: Using {len(domain_questions)} domain-based questions")
-        elif goal_questions:
-            # Fallback to LLM-generated questions
-            questions = goal_questions
-        else:
-            questions = []
-        
-        # v18: If no questions at all and no historical, offer catch-all
-        if not questions and not historical_questions:
-            goal_preview = goal[:50] + "..." if len(goal) > 50 else goal
-            questions = [{
-                "id": "q_catchall",
-                "question_text": f"Is there anything specific about '{goal_preview}' I should know before proceeding?",
-                "question_type": "open",
-                "choices": [],
-                "optional": True,
-                "priority": 100,
-                "depth": 1,
-                "depends_on": [],
-                "follow_up_rules": [],
-                "answered": False,
-                "answer": None,
-                "source": "catchall"
-            }]
-            logger.info("v18: Using catch-all question")
-        
-        # v16d.2: Prepend historical questions (higher priority)
-        questions = historical_questions + questions
+        # Prioritize and combine questions
+        questions = prioritize_questions(domain_questions, [], historical_questions, goal)
         
         # Update interview context
         interview["pending_questions"] = questions
@@ -3000,11 +2181,12 @@ Return [] if goal is specific enough. Return ONLY the JSON array."""
         }
         
     except Exception as e:
+        if conn:
+            conn.rollback()
         logger.error(f"identify_gaps failed: {e}")
         return {"success": False, "error": str(e)}
     finally:
-        if 'conn' in locals():
-            safe_close_connection(conn)
+        safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -3106,6 +2288,7 @@ async def submit_answer(session_id: str, question_id: str, answer: str) -> dict[
     Returns:
         Confirmation with any injected follow-up questions
     """
+    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -3124,139 +2307,27 @@ async def submit_answer(session_id: str, question_id: str, answer: str) -> dict[
         if interview.get("early_termination_suggested"):
             interview["early_exit_declined"] = True
             logger.info("v23: User declined early exit, continuing interview")
-
         
-        # Find the question
-        question = None
-        for q in pending:
-            if q["id"] == question_id:
-                question = q
-                break
+        # Find and validate question
+        question, error = find_and_validate_question(pending, question_id)
+        if error:
+            return {"success": False, "error": error}
         
-        if not question:
-            return {"success": False, "error": f"Question {question_id} not found"}
-        
-        if question.get("answered"):
-            return {"success": False, "error": "Question already answered"}
-        
-        # Mark answered
-        question["answered"] = True
-        question["answer"] = answer
+        # Record answer and extract choice details
         config["questions_answered"] = config.get("questions_answered", 0) + 1
+        hidden_value, _ = record_answer_with_choice(question, answer, interview)
         
-        # v21: Extract hidden_value from selected choice
-        hidden_value = None
-        answer_description = None
-        for choice in question.get("choices", []):
-            if choice.get("label") == answer:
-                hidden_value = choice.get("hidden_value")
-                answer_description = choice.get("description")
-                break
-        
-        # Store in history (v21: now includes hidden_value for latent trait inference)
-        interview["answer_history"].append({
-            "question_id": question_id,
-            "question_text": question["question_text"],
-            "answer": answer,
-            "answer_description": answer_description,
-            "hidden_value": hidden_value,  # v21: reveals underlying values/priorities
-            "timestamp": str(uuid.uuid4())[:8]  # Simple timestamp proxy
-        })
-        
-        # =====================================================================
-        # v19: Track dimension coverage for domain-based questions
-        # =====================================================================
-        dimension_covered = None
-        if question.get("source") == "domain_dimension" and question.get("dimension_id"):
-            dim_id = question["dimension_id"]
-            dimension_coverage = context.get("dimension_coverage", {})
-            
-            if dim_id in dimension_coverage:
-                dimension_coverage[dim_id]["covered"] = True
-                dimension_covered = dimension_coverage[dim_id]["name"]
-                logger.info(f"v19: Dimension '{dimension_covered}' covered")
-            
-            # Store answer in interview_answers for conflict detection
-            try:
-                # Find the answer text from choices
-                answer_text = answer
-                for choice in question.get("choices", []):
-                    if choice.get("label") == answer:
-                        answer_text = choice.get("description", answer)
-                        break
-                
-                cur.execute("""
-                    INSERT INTO interview_answers (session_id, dimension_id, question_id, answer_label, answer_text)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (session_id, dimension_id) DO UPDATE SET
-                        answer_label = EXCLUDED.answer_label,
-                        answer_text = EXCLUDED.answer_text,
-                        created_at = NOW()
-                """, (session_id, dim_id, question.get("id"), answer, answer_text))
-                
-                logger.info(f"v19: Persisted answer for dimension {dim_id}")
-            except Exception as e:
-                conn.rollback()  # Clear aborted transaction state before continuing
-                logger.warning(f"v19: Failed to persist answer: {e}")
-        
-        # Check for follow-up injection
-        injected = []
-        follow_up_rules = question.get("follow_up_rules", [])
-        for rule in follow_up_rules:
-            if rule.get("when_answer") == answer:
-                new_q = rule["inject"].copy()
-                
-                # Safety checks
-                if new_q.get("depth", 1) > config["max_depth"]:
-                    logger.warning(f"Skipping injection: depth {new_q['depth']} exceeds max {config['max_depth']}")
-                    continue
-                    
-                if len(pending) >= config["max_questions"]:
-                    logger.warning(f"Skipping injection: max questions {config['max_questions']} reached")
-                    continue
-                
-                # Inject the question
-                new_q["answered"] = False
-                new_q["answer"] = None
-                pending.append(new_q)
-                injected.append(new_q["id"])
-        
-        # Update remaining count
-        config["questions_remaining"] = len([q for q in pending if not q.get("answered")])
-        
-        # =====================================================================
-        # v23: Track evidence delta for plateau detection
-        # =====================================================================
-        evidence_history = interview.get("evidence_history", [])
-        
-        # Calculate current evidence (count of hidden_values detected)
-        previous_total = sum(evidence_history) if evidence_history else 0
-        current_hidden_values: dict[str, int] = {}
-        for entry in interview.get("answer_history", []):
-            hv = entry.get("hidden_value")
-            if hv:
-                current_hidden_values[hv] = current_hidden_values.get(hv, 0) + 1
-        current_total = sum(current_hidden_values.values())
-        
-        # Delta = how many new hidden_value "hits" this answer contributed
-        evidence_delta = 1 if hidden_value else 0  # Simple: count if this answer had a hidden_value
-        evidence_history.append(evidence_delta)
-        interview["evidence_history"] = evidence_history[-5:]  # Keep last 5
-        
-        # Check for plateau (last 3 answers with no new trait info)
-        if len(evidence_history) >= 3:
-            recent_gain = sum(evidence_history[-3:])
-            if recent_gain == 0 and config.get("questions_answered", 0) >= 3:
-                interview["early_termination_suggested"] = True
-                interview["early_termination_reason"] = "diminishing_returns"
-                logger.info("v23: Early termination suggested - no trait evidence in last 3 answers")
+        # Process side effects (v19 dimension tracking + follow-ups + v23 evidence)
+        dimension_covered, injected = process_answer_side_effects(
+            cur, conn, session_id, question, answer, hidden_value,
+            pending, interview, config, context, logger
+        )
         
         # Save to session
         cur.execute(
             "UPDATE reasoning_sessions SET context = %s, updated_at = NOW() WHERE id = %s",
             (json.dumps(context), session_id)
         )
-
         conn.commit()
         
         return {
@@ -3264,20 +2335,19 @@ async def submit_answer(session_id: str, question_id: str, answer: str) -> dict[
             "session_id": session_id,
             "question_id": question_id,
             "answer_recorded": answer,
-            "dimension_covered": dimension_covered,  # v19
+            "dimension_covered": dimension_covered,
             "questions_remaining": config["questions_remaining"],
             "follow_ups_injected": injected if injected else None,
             "message": f"Answer recorded. {config['questions_remaining']} questions remaining."
         }
         
     except Exception as e:
-        if 'conn' in locals():
+        if conn:
             conn.rollback()
         logger.error(f"submit_answer failed: {e}")
         return {"success": False, "error": str(e)}
     finally:
-        if 'conn' in locals():
-            safe_close_connection(conn)
+        safe_close_connection(conn)
 
 
 @mcp.tool()
@@ -3307,123 +2377,26 @@ async def check_interview_complete(session_id: str) -> dict[str, Any]:
         
         unanswered = [q for q in pending if not q.get("answered")]
         answered = [q for q in pending if q.get("answered")]
-        
         is_complete = len(unanswered) == 0 and len(answered) > 0
         
-        # Build context summary from answers
-        context_summary = {}
-        for q in answered:
-            # Find the selected choice details
-            selected = None
-            for c in q.get("choices", []):
-                if c["label"] == q.get("answer"):
-                    selected = c["description"]
-                    break
-            context_summary[q["id"]] = {
-                "question": q["question_text"],
-                "answer": q.get("answer"),
-                "selected": selected
-            }
+        # Phase 5: Use extracted helper for context summary
+        context_summary = build_context_summary(answered) if is_complete else {}
         
-        # =====================================================================
-        # v21 Phase 2: Latent Trait Inference from Hidden Values
-        # Aggregates hidden_values from answer_history and infers user traits
-        # =====================================================================
+        # v21/v22 Trait inference (only when complete)
         latent_traits: list[dict[str, Any]] = []
         hidden_value_counts: dict[str, int] = {}
         
         if is_complete:
-            # Aggregate hidden_values from answer history
-            answer_history = interview.get("answer_history", [])
-            for entry in answer_history:
-                hv = entry.get("hidden_value")
-                if hv:
-                    hidden_value_counts[hv] = hidden_value_counts.get(hv, 0) + 1
+            # Phase 5: Use orchestrated helper for all trait inference
+            latent_traits, hidden_value_counts = run_trait_inference(
+                cur, interview, get_embedding
+            )
             
-            # v35: Use extracted pure helper for trait inference
-            latent_traits = _infer_traits_from_hidden_values(hidden_value_counts)
-            
-            # =================================================================
-            # v22 Feature 3: Hybrid Inference - Semantic Fallback
-            # For answers without hidden_value or unmatched patterns, use
-            # semantic similarity against trait_exemplars
-            # =================================================================
-            unmatched_descriptions = []
-            for entry in answer_history:
-                hv = entry.get("hidden_value")
-                desc = entry.get("answer_description")
-                
-                # If no hidden_value OR hidden_value didn't match any rule pattern
-                if desc and (not hv or not any(p in (hv or "").upper() for p, _, _, _ in TRAIT_RULES)):
-                    unmatched_descriptions.append(desc)
-            
-            semantic_matches = []
-            if unmatched_descriptions:
-                try:
-                    # Check if trait_exemplars table has embeddings
-                    cur.execute("SELECT COUNT(*) FROM trait_exemplars WHERE embedding IS NOT NULL")
-                    exemplar_count = cur.fetchone()[0]
-                    
-                    if exemplar_count > 0:
-                        for desc_text in unmatched_descriptions[:5]:  # Limit to 5 for performance
-                            desc_embedding = get_embedding(desc_text)
-                            
-                            cur.execute("""
-                                SELECT trait_name, 1 - (embedding <=> %s::vector) as similarity
-                                FROM trait_exemplars
-                                WHERE embedding IS NOT NULL
-                                ORDER BY embedding <=> %s::vector
-                                LIMIT 1
-                            """, (desc_embedding, desc_embedding))
-                            
-                            result = cur.fetchone()
-                            if result and result["similarity"] > 0.65:  # Threshold for semantic match
-                                semantic_matches.append({
-                                    "trait": result["trait_name"],
-                                    "similarity": round(float(result["similarity"]), 3),
-                                    "source_text": desc_text[:50]
-                                })
-                                
-                                # Add to trait counts with reduced confidence
-                                trait_name = result["trait_name"]
-                                existing = next((t for t in latent_traits if t["trait"] == trait_name), None)
-                                if existing:
-                                    existing["evidence_count"] = existing.get("evidence_count", 1) + 1
-                                    existing["semantic_boost"] = True
-                                else:
-                                    latent_traits.append({
-                                        "trait": trait_name,
-                                        "confidence": 0.6,  # Lower confidence for semantic matches
-                                        "evidence_count": 1,
-                                        "source": "semantic"
-                                    })
-                                
-                                logger.info(f"v22 Semantic match: '{desc_text[:30]}...' → {trait_name} (sim: {result['similarity']:.2f})")
-                                
-                except ImportError:
-                    logger.debug("v22: sentence-transformers not available for hybrid inference")
-                except Exception as e:
-                    logger.warning(f"v22 Hybrid inference failed: {e}")
-            
-            # Store in session context for downstream use
-            if latent_traits or hidden_value_counts:
-                context["latent_traits"] = latent_traits
-                context["hidden_value_counts"] = hidden_value_counts
-                logger.info(f"v21: Inferred {len(latent_traits)} latent traits from {sum(hidden_value_counts.values())} hidden_values")
-        
-        # Archive interview to history for self-learning
-        if is_complete and not interview.get("archived"):
-            try:
-                archive_interview_to_history(cur, session_id, goal, interview)
-                interview["archived"] = True
-                cur.execute(
-                    "UPDATE reasoning_sessions SET context = %s WHERE id = %s",
-                    (json.dumps(context), session_id)
-                )
-                conn.commit()
-            except Exception as e:
-                logger.warning(f"Failed to archive interview: {e}")
-                conn.rollback()
+            # Phase 5: Persist traits and archive interview
+            persist_interview_context(
+                cur, conn, session_id, goal, context, interview,
+                latent_traits, hidden_value_counts, archive_interview_to_history
+            )
         
         return {
             "success": True,
@@ -3432,8 +2405,8 @@ async def check_interview_complete(session_id: str) -> dict[str, Any]:
             "questions_answered": len(answered),
             "questions_remaining": len(unanswered),
             "context_summary": context_summary if is_complete else None,
-            "latent_traits": latent_traits if latent_traits else None,  # v21 Phase 2
-            "hidden_value_counts": hidden_value_counts if hidden_value_counts else None,  # v21 Phase 2
+            "latent_traits": latent_traits if latent_traits else None,
+            "hidden_value_counts": hidden_value_counts if hidden_value_counts else None,
             "archived_for_learning": interview.get("archived", False),
             "message": "Ready for prepare_expansion" if is_complete else f"{len(unanswered)} questions remaining"
         }
@@ -3469,53 +2442,10 @@ UCT_THRESHOLD = 0.05     # Apply UCT when gap < threshold
 # =============================================================================
 ROLLOUT_WEIGHT = 0.2     # Blend: final = (1-weight)*posterior + weight*rollout
 
-
 # =============================================================================
-# v35: Latent Trait Inference Constants and Helper
+# v35: TRAIT_RULES and _infer_traits_from_hidden_values moved to
+#      helpers/interview.py in Phase 5 refactoring
 # =============================================================================
-
-TRAIT_RULES = [
-    # (hidden_value_pattern, min_count, trait_name, confidence)
-    ("SAFETY", 2, "RISK_AVERSE", 0.8),
-    ("SIMPLICITY", 2, "MINIMALIST", 0.75),
-    ("POWER_USER", 2, "CONTROL_ORIENTED", 0.8),
-    ("AI_", 2, "AUTOMATION_TRUSTING", 0.7),
-    ("BEGINNER", 2, "ACCESSIBILITY_FOCUSED", 0.75),
-    ("BALANCE", 3, "PRAGMATIST", 0.7),
-    ("EXPLICIT", 2, "EXPLICIT_CONTROL", 0.8),
-    ("PERFORMANCE", 2, "SPEED_FOCUSED", 0.75),
-    ("ERROR_PREVENTION", 2, "SAFETY_CONSCIOUS", 0.8),
-    ("FREEDOM", 2, "AUTONOMY_FOCUSED", 0.75),
-]
-
-
-def _infer_traits_from_hidden_values(
-    hidden_value_counts: dict[str, int]
-) -> list[dict[str, Any]]:
-    """
-    v35: Pure function to infer latent traits from hidden value patterns.
-    
-    Args:
-        hidden_value_counts: Dict of hidden_value -> occurrence count
-    
-    Returns:
-        List of trait dicts with trait, confidence, evidence_count
-    """
-    latent_traits = []
-    
-    for pattern, min_count, trait_name, confidence in TRAIT_RULES:
-        matching_count = sum(
-            count for hv, count in hidden_value_counts.items() 
-            if pattern in hv.upper()
-        )
-        if matching_count >= min_count:
-            latent_traits.append({
-                "trait": trait_name,
-                "confidence": confidence,
-                "evidence_count": matching_count
-            })
-    
-    return latent_traits
 
 
 # =============================================================================
@@ -3676,215 +2606,57 @@ async def finalize_session(
     """
     try:
         # v37: Enforce sequential analysis (hard gate with override)
-        if not skip_sequential_analysis:
-            # Check if store_sequential_analysis was called for this session
-            conn_check = get_db_connection()
-            cur_check = conn_check.cursor()
-            cur_check.execute(
-                "SELECT COUNT(*) as cnt FROM thought_nodes WHERE session_id = %s AND metadata->>'sequential_analyzed' = 'true'",
-                (session_id,)
-            )
-            result = cur_check.fetchone()
-            safe_close_connection(conn_check)
-            
-            # If no sequential analysis found, block
-            if not result or result['cnt'] == 0:
-                return {
-                    "success": False,
-                    "sequential_analysis_required": True,
-                    "error": "Sequential gap analysis not done. Call prepare_sequential_analysis + store_sequential_analysis first, or pass skip_sequential_analysis=True to bypass.",
-                    "next_step": f"mcp_pas-server_prepare_sequential_analysis(session_id='{session_id}', top_n=3)"
-                }
-
-        # v36: Apply config defaults if not provided
-        if min_score_threshold is None:
-            min_score_threshold = PAS_CONFIG["quality_gate"]["min_score_threshold"]
-        if min_gap_threshold is None:
-            min_gap_threshold = PAS_CONFIG["quality_gate"]["min_gap_threshold"]
-
+        # Phase 1 Refactor: Use extracted helper
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # Get session info
-        cur.execute(
-            "SELECT goal, context FROM reasoning_sessions WHERE id = %s",
-            (session_id,)
+        gate_result = check_sequential_gate(cur, session_id, skip_sequential_analysis)
+        if gate_result:
+            safe_close_connection(conn)
+            return gate_result
+
+        # v36: Apply config defaults - Phase 1 Refactor
+        min_score_threshold, min_gap_threshold = apply_config_defaults(
+            min_score_threshold, min_gap_threshold, PAS_CONFIG
         )
-        session = cur.fetchone()
+        
+        # Get session info - Phase 1 Refactor
+        session = fetch_session(cur, session_id)
         if not session:
             return {"success": False, "error": "Session not found"}
         
-        # Get all thought nodes ordered by posterior score
-        cur.execute(
-            """
-            SELECT id, path, content, node_type, depth,
-                   prior_score, likelihood, posterior_score,
-                   supporting_laws
-            FROM thought_nodes
-            WHERE session_id = %s AND node_type = 'hypothesis'
-            ORDER BY posterior_score DESC
-            LIMIT %s
-            """,
-            (session_id, top_n)
-        )
-        candidates = cur.fetchall()
-        
+        # Get candidate hypotheses - Phase 1 Refactor
+        candidates = fetch_candidates(cur, session_id, top_n)
         if not candidates:
             return {
                 "success": False, 
                 "error": "No hypotheses found. Run prepare_expansion first."
             }
         
-        # Get sibling counts for shallow_alternatives penalty
-        # (count how many siblings each node has at its level)
-        cur.execute(
-            """
-            SELECT SUBPATH(path, 0, NLEVEL(path) - 1) as parent_path, 
-                   COUNT(*) as sibling_count
-            FROM thought_nodes
-            WHERE session_id = %s AND node_type = 'hypothesis'
-            GROUP BY SUBPATH(path, 0, NLEVEL(path) - 1)
-            """,
-            (session_id,)
+        # Fetch sibling data for penalty calculations - Phase 1 Refactor
+        sibling_counts, law_diversity = fetch_sibling_data(cur, session_id)
+        
+        # Process each candidate - Phase 1 Refactor
+        processed = process_candidates(
+            cur, candidates, sibling_counts, law_diversity,
+            _apply_heuristic_penalties, _build_processed_candidate
         )
-        sibling_counts = {str(row["parent_path"]): row["sibling_count"] for row in cur.fetchall()}
         
-        # v13b: Get unique law counts per parent path for monoculture detection
-        cur.execute(
-            """
-            SELECT SUBPATH(path, 0, NLEVEL(path) - 1) as parent_path,
-                   COUNT(DISTINCT supporting_laws[1]) as unique_laws,
-                   COUNT(*) as total_siblings
-            FROM thought_nodes
-            WHERE session_id = %s AND node_type = 'hypothesis' 
-                  AND supporting_laws IS NOT NULL AND array_length(supporting_laws, 1) > 0
-            GROUP BY SUBPATH(path, 0, NLEVEL(path) - 1)
-            """,
-            (session_id,)
+        # v40: Complementarity Detection - Phase 1 Refactor
+        processed, complementarity_result = check_complementarity(
+            processed, top_n, detect_complementarity, 
+            extract_addressed_goals, synthesize_hypothesis_text, session_id
         )
-        law_diversity = {str(row["parent_path"]): (row["unique_laws"], row["total_siblings"]) 
-                        for row in cur.fetchall()}
         
-        # Check if nodes have been critiqued (likelihood changed from initial)
-        # A critiqued node will have likelihood != 0.X initial value
-        
-        # Process each candidate
-        processed = []
-        for node in candidates:
-            # v35: Use extracted pure helper for penalty calculations
-            adjusted_score, penalties = _apply_heuristic_penalties(
-                node, sibling_counts, law_diversity
-            )
-            
-            # v11b: Calculate law-grounded rollout score
-            supporting_law_ids = node["supporting_laws"] or []
-            rollout_score = 0.5  # Default neutral
-            if supporting_law_ids:
-                cur.execute(
-                    """
-                    SELECT AVG(scientific_weight) as avg_weight
-                    FROM scientific_laws
-                    WHERE id = ANY(%s) AND scientific_weight IS NOT NULL
-                    """,
-                    (supporting_law_ids,)
-                )
-                rollout_result = cur.fetchone()
-                if rollout_result and rollout_result["avg_weight"]:
-                    rollout_score = float(rollout_result["avg_weight"])
-            
-            # v35b: Build processed dict via helper
-            processed.append(_build_processed_candidate(
-                node, adjusted_score, penalties, rollout_score
-            ))
-        
-        # Sort by final score (includes rollout blending)
-        processed.sort(key=lambda x: x["final_score"], reverse=True)
-        
-        # v40: Complementarity Detection - check if top candidates address different goals
-        complementarity_result = None
-        if len(processed) >= 2:
-            # Build candidate list for complementarity check
-            comp_candidates = [
-                {"content": p["content"], "scope": p.get("declared_scope", "")}
-                for p in processed[:top_n]
-            ]
-            is_complementary, covered_goals, avg_overlap = detect_complementarity(
-                comp_candidates, threshold=0.5
-            )
-            
-            if is_complementary:
-                logger.info(f"v40: Complementarity detected in session {session_id}: {covered_goals}")
-                # Store goals addressed by each candidate
-                for p in processed:
-                    goals = extract_addressed_goals(p["content"], p.get("declared_scope", ""))
-                    p["addressed_goals"] = goals
-                
-                complementarity_result = {
-                    "detected": True,
-                    "covered_goals": covered_goals,
-                    "avg_overlap": round(avg_overlap, 3),
-                    "synthesis_suggestion": "Top candidates are complementary, not competitive. Consider using synthesize_hypotheses() to create a unified approach.",
-                    "synthesis_prompt": synthesize_hypothesis_text(comp_candidates)
-                }
-        
-        # Deep critique mode - return requests for LLM
+        # Deep critique mode - Phase 1 Refactor
         if deep_critique and len(processed) >= 1:
-            critique_requests = []
-            for p in processed[:2]:  # Top 2 only
-                # Get supporting laws for context
-                cur.execute(
-                    """
-                    SELECT sl.law_name, sl.definition
-                    FROM scientific_laws sl
-                    JOIN thought_nodes tn ON sl.id = ANY(tn.supporting_laws)
-                    WHERE tn.id = %s
-                    LIMIT 3
-                    """,
-                    (p["node_id"],)
-                )
-                laws = cur.fetchall()
-                critique_requests.append({
-                    "node_id": p["node_id"],
-                    "content": p["content"],
-                    "supporting_laws": [{"name": l["law_name"], "definition": l["definition"]} for l in laws]
-                })
-            
-            return {
-                "success": True,
-                "needs_critique": True,
-                "message": "Generate critiques for these nodes, then call store_critique for each, then call finalize_session again.",
-                "critique_requests": critique_requests
-            }
+            critique_result = build_deep_critique_requests(cur, processed, count=2)
+            if critique_result:
+                return critique_result
         
-        # Compare top 2 (comparative critique)
-        recommendation = processed[0]
-        runner_up = processed[1] if len(processed) > 1 else None
-        
-        # v11a/v35b: UCT tiebreaking for close decisions (using pure helper)
-        uct_applied = False
-        if runner_up:
-            gap = recommendation["final_score"] - runner_up["final_score"]
-            
-            # v35b: Apply UCT tiebreaking via helper
-            should_swap, uct_applied = _apply_uct_tiebreaking(
-                recommendation["final_score"], recommendation["depth"],
-                runner_up["final_score"], runner_up["depth"]
-            )
-            if should_swap:
-                recommendation, runner_up = runner_up, recommendation
-                processed[0], processed[1] = processed[1], processed[0]
-                gap = recommendation["final_score"] - runner_up["final_score"]
-            
-            # v35b: Compute decision quality via helper
-            rec_conf = recommendation.get("confidence", 0.5)
-            run_conf = runner_up.get("confidence", 0.5)
-            decision_quality, gap_analysis = _compute_decision_quality(
-                gap, rec_conf, run_conf, uct_applied
-            )
-        else:
-            decision_quality = "medium"
-            gap_analysis = "Only one candidate available."
-            gap = 0  # Single candidate, no gap
+        # Compare top 2 and apply UCT tiebreaking - Phase 1 Refactor
+        recommendation, runner_up, decision_quality, gap_analysis, uct_applied, gap = apply_uct_and_compute_decision(
+            processed, _apply_uct_tiebreaking, _compute_decision_quality, session_id
+        )
         
         # v20: Compute adaptive depth quality metrics
         quality_result = compute_quality_metrics(
@@ -3894,181 +2666,54 @@ async def finalize_session(
             gap=gap
         )
         
-        # Get interview context summary if available
-        context = session["context"] or {}
-        interview = context.get("interview", {})
-        context_summary = None
-        if interview.get("answer_history"):
-            context_summary = {
-                h["question_id"]: h["answer"] 
-                for h in interview["answer_history"]
-            }
+        # Get interview context summary - Phase 1 Refactor
+        context_summary = get_context_summary(session)
         
-        # Determine next_step guidance based on decision quality and depth
-        winner_depth = recommendation.get("depth", 2)
-        next_step = None
-        if decision_quality == "low" and winner_depth < 4:
-            next_step = f"Decision is close. Expand the winning hypothesis deeper. Call prepare_expansion(session_id='{session_id}', parent_node_id='{recommendation['node_id']}')"
-        elif decision_quality == "medium" and winner_depth < 3:
-            next_step = f"Consider refining the recommendation. Call prepare_expansion(session_id='{session_id}', parent_node_id='{recommendation['node_id']}')"
+        # Determine next_step guidance - Phase 1 Refactor
+        next_step = build_next_step_guidance(decision_quality, recommendation, session_id)
         
         # v8a: Outcome prompt to close self-learning loop
         # v17c: Focus on business value, not code quality (RLVR handles that)
         outcome_prompt = f"Did this solve your business problem? record_outcome(session_id='{session_id}', outcome='success'|'partial'|'failure'). Note: Code quality is validated automatically by RLVR."
         
-        # v48: Parallel Critique Window - identify mid-range candidates for optional exploration
-        pending_critiques: list[dict[str, Any]] = []
-        explore_alternatives_prompt = None
-        try:
-            pc_config = config.get("parallel_critique", {})
-            if pc_config.get("enabled", False) and len(processed) > 1:
-                ratio = pc_config.get("critique_ratio", 0.7)
-                max_cand = pc_config.get("max_candidates", 3)
-                threshold = recommendation["final_score"] * ratio
-                
-                for p in processed[1:]:  # Skip winner
-                    if p["final_score"] >= threshold and len(pending_critiques) < max_cand:
-                        pending_critiques.append({
-                            "node_id": p["node_id"],
-                            "content": p["content"][:200],
-                            "score": round(p["final_score"], 4)
-                        })
-                
-                if pending_critiques:
-                    # Store in session context
-                    updated_context = session.get("context") or {}
-                    updated_context["pending_critiques"] = pending_critiques
-                    cur.execute(
-                        "UPDATE reasoning_sessions SET context = %s WHERE id = %s",
-                        (json.dumps(updated_context), session_id)
-                    )
-                    conn.commit()
-                    explore_alternatives_prompt = f"Mid-range alternatives available. Call explore_alternatives(session_id='{session_id}') to review."
-                    logger.info(f"v48: Queued {len(pending_critiques)} alternatives for exploration in session {session_id}")
-        except Exception as e:
-            logger.warning(f"v48: Parallel critique identification failed: {e}")
+        # v48: Parallel Critique Window - Phase 1 Refactor
+        pending_critiques, explore_alternatives_prompt = identify_pending_critiques(
+            PAS_CONFIG,
+            processed,
+            recommendation["final_score"],
+            session.get("context"),
+            cur,
+            conn,
+            session_id
+        )
         
-        # v8c: Implementation checklist - bridge reasoning to action
-        implementation_checklist = []
+        # v8c: Implementation checklist - Phase 1 Refactor: Use extracted helper
         winning_content = recommendation["content"]
         winning_scope = recommendation.get("declared_scope", "")
-        
-        # Parse scope to generate checklist items
-        if winning_scope:
-            scope_items = [s.strip() for s in winning_scope.split(",") if s.strip()]
-            for item in scope_items:
-                implementation_checklist.append(f"[ ] Modify: {item}")
-        if not implementation_checklist:
-            implementation_checklist.append("[ ] Implement the recommended approach")
-        
-        # Add standard checklist items
-        implementation_checklist.extend([
-            "[ ] Write/update tests",
-            "[ ] Verify changes work as expected"
-        ])
+        implementation_checklist = build_implementation_checklist(winning_scope)
         
         # =====================================================================
-        # v32b: Warning Persistence - Dual-Source Search with Checklist Injection
-        # Search BOTH goal and recommendation, dedupe, inject into checklist
+        # v32b: Warning Persistence & v26: Tag Suggestions - Phase 1 Refactor
         # =====================================================================
-        warnings_surfaced: list[dict[str, Any]] = []
-        try:
-            # Search goal for warnings
-            goal_warnings = _search_relevant_failures(session["goal"])
-            # Search recommendation content for warnings  
-            rec_warnings = _search_relevant_failures(recommendation["content"])
-            
-            # Dedupe by pattern
-            seen_patterns: set[str] = set()
-            for w in goal_warnings + rec_warnings:
-                pattern = w.get("pattern", "")
-                if pattern and pattern not in seen_patterns:
-                    seen_patterns.add(pattern)
-                    warnings_surfaced.append(w)
-            
-            # Prepend ⚠️ items to implementation_checklist
-            for w in reversed(warnings_surfaced):
-                pattern = w.get("pattern", "UNKNOWN")
-                warning_text = w.get("warning", "Review this warning")
-                implementation_checklist.insert(0, f"[ ] ⚠️ {pattern}: {warning_text}")
-            
-            if warnings_surfaced:
-                logger.info(f"v32b: Surfaced {len(warnings_surfaced)} warning(s) in finalize_session")
-        except Exception as e:
-            logger.warning(f"v32b warning surfacing failed: {e}")
+        warnings_surfaced, suggested_tags, implementation_checklist = surface_warnings_and_tags(
+            _search_relevant_failures,
+            _generate_suggested_tags,
+            session,
+            recommendation,
+            implementation_checklist,
+            cur,
+            conn,
+            session_id
+        )
         
-        # v26/v35b: Suggest tags based on goal and recommendation (using pure helper)
-        suggested_tags: list[str] = []
-        try:
-            suggested_tags = _generate_suggested_tags(session["goal"], winning_content)
-            
-            if suggested_tags:
-                logger.info(f"v26: Suggested tags for session {session_id}: {suggested_tags}")
-                # v34: Store suggested_tags in DB for auto-application on record_outcome
-                try:
-                    cur.execute(
-                        "UPDATE reasoning_sessions SET suggested_tags = %s WHERE id = %s",
-                        (json.dumps(suggested_tags), session_id)
-                    )
-                    conn.commit()
-                except Exception as e:
-                    logger.warning(f"v34 suggested_tags DB write failed: {e}")
-        except Exception as e:
-            logger.warning(f"v26 tag suggestion failed: {e}")
+        # v15b: Query past failures - Phase 1 Refactor
+        past_failures = query_past_failures(cur, session)
         
-        # v15b: Query past failures with similar goals (domain-agnostic via semantic similarity)
-        past_failures = []
-        try:
-            if session.get("goal_embedding"):
-                cur.execute("""
-                    SELECT o.notes, o.failure_reason, s.goal 
-                    FROM outcome_records o 
-                    JOIN reasoning_sessions s ON o.session_id = s.id
-                    WHERE o.outcome != 'success' 
-                    AND (o.notes IS NOT NULL OR o.failure_reason IS NOT NULL)
-                    AND s.goal_embedding IS NOT NULL
-                    AND 1 - (s.goal_embedding <=> %s) > 0.7
-                    LIMIT 3
-                """, (session["goal_embedding"],))
-                for r in cur.fetchall():
-                    reason = r["failure_reason"] or r["notes"]
-                    if reason:
-                        past_failures.append({"goal": r["goal"][:100], "reason": reason})
-        except Exception as e:
-            logger.warning(f"v15b past_failures lookup failed: {e}")
+        # v16b.1: Confidence calibration warning - Phase 1 Refactor
+        calibration_warning = query_calibration_warning(cur)
         
-        # v16b.1: Compute confidence calibration warning (LLM nudge, not adjustment)
-        calibration_warning = None
-        try:
-            cur.execute("""
-                SELECT 
-                    COUNT(*) FILTER (WHERE o.outcome = 'success') as successes,
-                    COUNT(*) as total
-                FROM outcome_records o
-                JOIN thought_nodes t ON t.session_id = o.session_id
-                WHERE t.likelihood >= 0.8
-                AND o.created_at > NOW() - INTERVAL '30 days'
-            """)
-            cal = cur.fetchone()
-            if cal and cal["total"] >= 5:
-                success_rate = cal["successes"] / cal["total"]
-                if success_rate < 0.7:
-                    calibration_warning = f"⚠️ Calibration: High-confidence (≥0.8) hypotheses succeed only {success_rate:.0%} of the time in recent sessions"
-        except Exception as e:
-            logger.warning(f"v16b.1 calibration query failed: {e}")
-        
-        # v15b: Construct scope_guidance (domain-agnostic)
-        winning_scope = recommendation.get("declared_scope", "") or ""
-        scope_guidance = {
-            "context": {
-                "goal": session["goal"],
-                "scope": winning_scope,
-                "recommendation": recommendation["content"][:200]
-            },
-            "prompt": "What validation or follow-up steps are needed for this specific context? If this is pure reasoning with no action items, respond 'No follow-up needed'.",
-            "past_failures": past_failures,
-            "calibration_warning": calibration_warning  # v16b.1
-        }
+        # v15b: Construct scope_guidance - Phase 1 Refactor
+        scope_guidance = build_scope_guidance(session, recommendation, past_failures, calibration_warning)
         
         # v17b: RLVR Auto-Recording - parse terminal output and auto-record outcome
         rlvr_result = None
@@ -4084,38 +2729,9 @@ async def finalize_session(
                 logger.warning(f"v17b RLVR auto-record failed: {e}")
                 rlvr_result = {"success": False, "error": str(e)}
         
-        # v31b: Exhaustive Check - layer-by-layer gap analysis
-        # v32 FIX: MCP sampling not supported - return prompt for agent to process
+        # v31b: Exhaustive Check - Phase 1 Refactor
         exhaustive_gaps = None
-        exhaustive_prompt = None
-        if exhaustive_check and recommendation:
-            exhaustive_prompt = {
-                "prompt": f"""Analyze this recommendation for what it does NOT address:
-
-Recommendation: {recommendation["content"]}
-Goal: {session["goal"]}
-
-For EACH of these layers, identify what's covered vs missing:
-1. CODE STRUCTURE: What code changes are needed? Any not mentioned?
-2. DEPENDENCIES: What packages/systems are assumed but not stated?
-3. DATA FLOW: What data moves where? Any gaps in the data path?
-4. INTERFACES: What APIs/contracts are affected? Any missing?
-5. WORKFLOWS: What user/system flows change? Any not addressed?
-
-Return ONLY a valid JSON object:
-{{
-  "gaps": [
-    {{"layer": "...", "covered": "...", "missing": "..."}}
-  ],
-  "critical_gaps": ["gaps that could cause failure"],
-  "overall_coverage": 0.8
-}}
-
-Focus on OMISSIONS, not flaws.""",
-                "system": "You are a gap analyst. Find what's MISSING, not what's wrong. Return only valid JSON.",
-                "instructions": "Process this prompt and review the gaps. If critical gaps found, consider deepening your analysis."
-            }
-            logger.info(f"v32: Returning exhaustive_prompt for agent to process")
+        exhaustive_prompt = build_exhaustive_prompt(recommendation, session, exhaustive_check)
 
         
         # v32: Sequential analysis moved to run_sequential_analysis tool
@@ -4123,57 +2739,28 @@ Focus on OMISSIONS, not flaws.""",
         sequential_analysis: list[dict[str, Any]] = []  # Populated by run_sequential_analysis if called
         systemic_gaps: list[str] = []
         
-        # v31d: Quality Gate - check score and gap thresholds
+        # v31d: Quality Gate - Phase 1 Refactor: Use extracted helpers
         winner_score = recommendation["adjusted_score"]
         runner_up_score = runner_up["adjusted_score"] if runner_up else 0.0
-        gap = winner_score - runner_up_score if runner_up else 1.0
         
-        quality_gate = {
-            "score": round(winner_score, 4),
-            "score_threshold": min_score_threshold,
-            "score_ok": winner_score >= min_score_threshold,
-            "gap": round(gap, 4),
-            "gap_threshold": min_gap_threshold,
-            "gap_ok": gap >= min_gap_threshold,
-            "passed": winner_score >= min_score_threshold and gap >= min_gap_threshold
-        }
+        quality_gate, quality_gate_enforced = compute_quality_gate(
+            winner_score, runner_up_score,
+            min_score_threshold, min_gap_threshold,
+            skip_quality_gate
+        )
         
-        # v31e: Score Improvement Suggestions
-        score_improvement_suggestions = []
-        if not quality_gate["passed"]:
-            if not quality_gate["score_ok"]:
-                score_improvement_suggestions.append({
-                    "lever": "score",
-                    "current": round(winner_score, 3),
-                    "threshold": min_score_threshold,
-                    "action": "Expand deeper with higher confidence (0.9+) or address critique penalties"
-                })
-            if not quality_gate["gap_ok"]:
-                score_improvement_suggestions.append({
-                    "lever": "gap",
-                    "current": round(gap, 3),
-                    "threshold": min_gap_threshold,
-                    "action": "Explore more diverse alternatives to differentiate the best solution"
-                })
+        # v31e: Score Improvement Suggestions - Phase 1 Refactor: Use extracted helper
+        score_improvement_suggestions = build_score_improvement_suggestions(
+            quality_gate, winner_score, quality_gate["gap"],
+            min_score_threshold, min_gap_threshold
+        )
         
-        # v33: Quality gate enforcement
-        quality_gate_enforced = quality_gate["passed"] or skip_quality_gate
-        
-        # v33: If gate not passed AND not skipped, prefix [UNVERIFIED] and log
-        recommendation_content = recommendation["content"]
-        if not quality_gate_enforced:
-            recommendation_content = f"[UNVERIFIED] {recommendation['content']}"
-            # Log enforcement violation to DB
-            try:
-                cur.execute("""
-                    UPDATE reasoning_sessions 
-                    SET context = COALESCE(context, '') || E'\n[ENFORCEMENT VIOLATION at ' || NOW()::text || ']'
-                    WHERE id = %s
-                """, (session_id,))
-                conn.commit()
-                logger.warning(f"v33: Quality gate not enforced for session {session_id} (score={winner_score:.3f}, gap={gap:.3f})")
-            except Exception as log_err:
-                logger.error(f"Failed to log enforcement violation: {log_err}")
+        # v33: If gate not passed AND not skipped, prefix [UNVERIFIED] - Phase 1 Refactor
+        recommendation_content = apply_unverified_prefix(
+            cur, conn, session_id, recommendation["content"],
+            quality_gate_enforced, winner_score, quality_gate["gap"]
+        )
+
         
         return {
             "success": True,
@@ -4222,7 +2809,14 @@ Focus on OMISSIONS, not flaws.""",
             "complementarity": complementarity_result,
             # v48: Parallel critique window
             "pending_critiques": pending_critiques if pending_critiques else None,
-            "explore_alternatives_prompt": explore_alternatives_prompt
+            "explore_alternatives_prompt": explore_alternatives_prompt,
+            # v49: Plan template prompt (when gate passes)
+            # Detects multi-phase work by keywords in goal
+            "plan_template_prompt": _build_plan_template_prompt(
+                quality_gate, session.get("goal", "")
+            ) if quality_gate["passed"] else None,
+            # v51: Effort-Benefit ROI analysis
+            "roi_analysis": build_roi_analysis(processed, recommendation)
         }
 
 
@@ -6171,112 +4765,28 @@ async def record_outcome(
         
         winning_path = best_node["path"]
         
-        # v15b: Get scope embedding for learning (from best node's declared_scope)
-        scope_embedding = None
-        try:
-            cur.execute(
-                "SELECT declared_scope FROM thought_nodes WHERE id = %s",
-                (best_node["id"],)
-            )
-            scope_row = cur.fetchone()
-            if scope_row and scope_row.get("declared_scope"):
-                scope_embedding = get_embedding(scope_row["declared_scope"])
-        except Exception as e:
-            logger.warning(f"v15b scope embedding failed: {e}")
-            conn.rollback()  # Clear aborted transaction state before continuing
+        # =====================================================================
+        # Phase 4 Refactor: Use extracted helpers
+        # =====================================================================
         
-        # v27: Embed failure_reason for semantic search (if provided)
-        failure_reason_embedding = None
-        if failure_reason:
-            try:
-                failure_reason_embedding = get_embedding(failure_reason[:2000])
-                logger.info(f"v27: Embedded failure_reason for session {session_id}")
-            except Exception as e:
-                logger.warning(f"v27 failure_reason embedding failed: {e}")
-        
-        # Record the outcome with v15b + v27 fields
-        cur.execute(
-            """
-            INSERT INTO outcome_records (session_id, outcome, confidence, winning_path, notes, failure_reason, scope_embedding, failure_reason_embedding)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id, created_at
-            """,
-            (session_id, outcome, confidence, winning_path, notes, failure_reason, scope_embedding, failure_reason_embedding)
+        # Helper 1: v15b/v27 - Compute embeddings
+        scope_embedding, failure_reason_embedding = compute_outcome_embeddings(
+            cur, best_node["id"], failure_reason, get_embedding
         )
-        record = cur.fetchone()
         
-        # Count attributed nodes and laws
-        cur.execute(
-            """
-            SELECT COUNT(*) as node_count,
-                   ARRAY_AGG(DISTINCT unnest) as laws
-            FROM thought_nodes, UNNEST(supporting_laws)
-            WHERE session_id = %s AND path <@ %s
-            """,
-            (session_id, winning_path)
+        # Helper 2: Insert + attribute + v12b success counts
+        record, stats = insert_and_attribute_outcome(
+            cur, session_id, outcome, confidence, winning_path,
+            notes, failure_reason, scope_embedding, failure_reason_embedding
         )
-        stats = cur.fetchone()
         
-        # v12b: Update success_count for Thompson Sampling on success outcomes
-        if outcome == 'success' and stats and stats["laws"]:
-            attributed_laws = [l for l in stats["laws"] if l is not None]
-            if attributed_laws:
-                cur.execute(
-                    "UPDATE scientific_laws SET success_count = success_count + 1 WHERE id = ANY(%s)",
-                    (attributed_laws,)
-                )
+        # Helper 3: v12a - Log training data
+        log_training_data(cur, session_id, winning_path, outcome)
         
-        # v12a: Log training data for PRM fine-tuning
-        cur.execute(
-            """
-            SELECT content, path, supporting_laws FROM thought_nodes
-            WHERE session_id = %s AND path <@ %s AND node_type = 'hypothesis'
-            """,
-            (session_id, winning_path)
+        # Helper 4: v13c - Record critique accuracy
+        record_critique_accuracy(
+            cur, session_id, winning_path, outcome, _compute_critique_accuracy
         )
-        for node in cur.fetchall():
-            # Get first supporting law name
-            law_name = None
-            if node["supporting_laws"]:
-                cur.execute("SELECT law_name FROM scientific_laws WHERE id = %s", (node["supporting_laws"][0],))
-                law_row = cur.fetchone()
-                law_name = law_row["law_name"] if law_row else None
-            
-            cur.execute(
-                """
-                INSERT INTO training_data (hypothesis_text, goal_text, outcome, depth, law_name, session_id)
-                VALUES (%s, (SELECT goal FROM reasoning_sessions WHERE id = %s), %s, %s, %s, %s)
-                """,
-                (node["content"], session_id, outcome, len(str(node["path"]).split(".")), law_name, session_id)
-            )
-        
-        # v13c: Track critique accuracy for self-learning calibration
-        # Find all critiqued nodes in session (nodes where likelihood was modified from initial)
-        cur.execute(
-            """
-            SELECT tn.id, tn.path, tn.likelihood, tn.posterior_score
-            FROM thought_nodes tn
-            WHERE tn.session_id = %s 
-              AND tn.node_type = 'hypothesis'
-              AND tn.likelihood NOT IN (0.8, 0.85, 0.9, 0.95, 0.88, 0.92, 0.75, 0.7)
-            """,
-            (session_id,)
-        )
-        critiqued_nodes = cur.fetchall()
-        
-        for cnode in critiqued_nodes:
-            # v35: Use extracted pure helper for critique accuracy
-            is_winner = str(cnode["path"]).startswith(str(winning_path)) or str(winning_path).startswith(str(cnode["path"]))
-            critique_accurate = _compute_critique_accuracy(cnode["path"], winning_path, outcome)
-            
-            cur.execute(
-                """
-                INSERT INTO critique_accuracy 
-                    (session_id, node_id, critique_severity, was_top_hypothesis, actual_outcome, critique_accurate)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                (session_id, cnode["id"], 1.0 - float(cnode["likelihood"]), is_winner, outcome, critique_accurate)
-            )
         
         # Auto-complete session if outcome is definitive (not partial) and not keep_open
         session_completed = False
@@ -6287,126 +4797,19 @@ async def record_outcome(
             )
             session_completed = True
         
-        # =====================================================================
-        # v40 Phase 3: Log calibration data for CSR
-        # =====================================================================
-        try:
-            # Get the winning node's adjusted score from finalize_session
-            cur.execute(
-                """
-                SELECT tn.id, tn.posterior_score
-                FROM thought_nodes tn
-                WHERE tn.session_id = %s AND tn.path::text = %s
-                """,
-                (session_id, winning_path)
-            )
-            winning_node = cur.fetchone()
-            
-            if winning_node:
-                predicted_conf = winning_node["posterior_score"]
-                actual_outcome = map_outcome_to_numeric(outcome)
-                
-                cur.execute(
-                    """
-                    INSERT INTO calibration_records 
-                    (session_id, winning_node_id, predicted_confidence, actual_outcome)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    (session_id, winning_node["id"], predicted_conf, actual_outcome)
-                )
-                logger.info(f"v40: Logged calibration record - predicted: {predicted_conf:.3f}, actual: {actual_outcome}")
-        except Exception as e:
-            logger.warning(f"v40: Calibration logging failed: {e}")
+        # Helper 5: v40 - Log calibration data
+        log_calibration_record(cur, session_id, winning_path, outcome, map_outcome_to_numeric)
         
-        # =====================================================================
-        # v22 Feature 1b: Persist Traits to user_trait_profiles
-        # Store session traits with outcome-based weighting
-        # =====================================================================
-        traits_persisted = 0
-        try:
-            # Get session context for user_id and latent_traits
-            cur.execute("SELECT context FROM reasoning_sessions WHERE id = %s", (session_id,))
-            ctx_row = cur.fetchone()
-            session_context = ctx_row["context"] if ctx_row and ctx_row["context"] else {}
-            
-            user_id = session_context.get("user_id")
-            latent_traits = session_context.get("latent_traits", [])
-            
-            if user_id and latent_traits:
-                # v35: Use extracted pure helper
-                outcome_multiplier = _get_outcome_multiplier(outcome)
-                
-                for trait_info in latent_traits:
-                    trait_name = trait_info.get("trait")
-                    if not trait_name:
-                        continue
-                    
-                    evidence = trait_info.get("confidence", 0.5) * outcome_multiplier
-                    
-                    cur.execute("""
-                        INSERT INTO user_trait_profiles (user_id, trait_name, cumulative_score, evidence_count)
-                        VALUES (%s, %s, %s, 1)
-                        ON CONFLICT (user_id, trait_name) DO UPDATE SET
-                            cumulative_score = user_trait_profiles.cumulative_score + %s,
-                            evidence_count = user_trait_profiles.evidence_count + 1,
-                            last_reinforced_at = now()
-                    """, (user_id, trait_name, evidence, evidence))
-                    traits_persisted += 1
-                
-                if traits_persisted > 0:
-                    logger.info(f"v22: Persisted {traits_persisted} traits for user {user_id[:8]}...")
-                    
-        except Exception as e:
-            logger.warning(f"v22: Failed to persist traits: {e}")
+        # Helper 6: v22 - Persist user traits
+        traits_persisted = persist_user_traits(cur, session_id, outcome, _get_outcome_multiplier)
         
         conn.commit()
         
-        # v8b: Auto-trigger refresh_law_weights after sufficient outcomes
-        auto_refresh_result = None
-        MIN_SAMPLES_THRESHOLD = 5
-        try:
-            cur.execute("SELECT COUNT(*) FROM outcome_records")
-            total_outcomes = cur.fetchone()[0]
-            if total_outcomes >= MIN_SAMPLES_THRESHOLD and total_outcomes % MIN_SAMPLES_THRESHOLD == 0:
-                # Trigger refresh on every Nth outcome (5, 10, 15, etc.)
-                auto_refresh_result = await refresh_law_weights(min_samples=MIN_SAMPLES_THRESHOLD)
-        except Exception as refresh_err:
-            logger.warning(f"Auto-refresh check failed: {refresh_err}")
+        # Helper 7: v8b - Auto-trigger refresh (post-commit)
+        auto_refresh_result = await trigger_auto_refresh(cur, refresh_law_weights)
         
-        # =====================================================================
-        # v34: Auto-apply suggested_tags on success/partial outcomes
-        # =====================================================================
-        auto_tagged = None
-        if outcome in ('success', 'partial'):
-            try:
-                cur.execute(
-                    "SELECT suggested_tags FROM reasoning_sessions WHERE id = %s",
-                    (session_id,)
-                )
-                tags_row = cur.fetchone()
-                if tags_row and tags_row.get("suggested_tags"):
-                    suggested = tags_row["suggested_tags"]
-                    if isinstance(suggested, str):
-                        suggested = json.loads(suggested)
-                    if suggested:
-                        # Apply tags using existing tag_session logic
-                        for tag in suggested:
-                            # Normalize tag
-                            normalized = tag.strip().lower()
-                            if normalized:
-                                cur.execute(
-                                    """
-                                    INSERT INTO session_tags (session_id, tag)
-                                    VALUES (%s, %s)
-                                    ON CONFLICT (session_id, tag) DO NOTHING
-                                    """,
-                                    (session_id, normalized)
-                                )
-                        conn.commit()
-                        auto_tagged = suggested
-                        logger.info(f"v34: Auto-tagged session {session_id} with {suggested}")
-            except Exception as e:
-                logger.warning(f"v34 auto-tagging failed: {e}")
+        # Helper 8: v34 - Auto-apply tags (post-commit)
+        auto_tagged = apply_auto_tags(cur, conn, session_id, outcome)
         
         return {
             "success": True,
@@ -6462,6 +4865,7 @@ async def parse_terminal_output(
     Returns:
         Detected signal with confidence and matches
     """
+    # Handle empty input
     if not terminal_text or not terminal_text.strip():
         return {
             "success": True,
@@ -6471,108 +4875,47 @@ async def parse_terminal_output(
             "message": "Empty terminal output provided"
         }
     
-    # Case-insensitive matching
-    success_matches = []
-    failure_matches = []
+    # Delegate to helper for core pattern matching
+    parsed = parse_terminal_signals(terminal_text)
     
-    for pattern in SUCCESS_PATTERNS:
-        matches = re.findall(pattern, terminal_text, re.IGNORECASE)
-        if matches:
-            success_matches.extend(matches)
-    
-    for pattern in FAILURE_PATTERNS:
-        matches = re.findall(pattern, terminal_text, re.IGNORECASE)
-        if matches:
-            failure_matches.extend(matches)
-    
-    # v17a.2: Filter out false-positive failures from success contexts
-    # "0 failed", "passed", etc. should not count as failure signals
-    false_positive_context = re.search(r'\b0\s+failed\b', terminal_text, re.IGNORECASE)
-    if false_positive_context:
-        # Remove one 'failed' match for each '0 failed' context found
-        zero_failed_count = len(re.findall(r'\b0\s+failed\b', terminal_text, re.IGNORECASE))
-        for _ in range(zero_failed_count):
-            for i, m in enumerate(failure_matches):
-                if m.lower() == 'failed':
-                    failure_matches.pop(i)
-                    break
-    
-    # Determine signal and confidence
-    success_count = len(success_matches)
-    failure_count = len(failure_matches)
-    total = success_count + failure_count
-    
-    if total == 0:
-        signal = "unknown"
-        confidence = 0.0
-        all_matches = []
-    elif failure_count > 0 and success_count == 0:
-        signal = "failure"
-        confidence = min(0.95, 0.7 + (failure_count * 0.05))
-        all_matches = failure_matches
-    elif success_count > 0 and failure_count == 0:
-        signal = "success"
-        confidence = min(0.95, 0.7 + (success_count * 0.05))
-        all_matches = success_matches
-    else:
-        # Mixed signals - failure takes precedence
-        if failure_count >= success_count:
-            signal = "failure"
-            confidence = 0.6
-        else:
-            signal = "success"
-            confidence = 0.5
-        all_matches = failure_matches + success_matches
-    
-    # v17b.2: Extract failure reason for semantic learning
-    failure_reason = None
-    if signal == "failure":
-        for pattern in FAILURE_REASON_PATTERNS:
-            match = re.search(pattern, terminal_text, re.IGNORECASE)
-            if match:
-                try:
-                    failure_reason = match.group('reason').strip()[:200]  # Limit length
-                    break
-                except IndexError:
-                    continue
-    
+    # Format MCP response
     result = {
         "success": True,
         "session_id": session_id,
-        "signal": signal,
-        "confidence": round(confidence, 2),
-        "success_matches": success_matches[:5],  # Limit to first 5
-        "failure_matches": failure_matches[:5],
-        "total_success_signals": success_count,
-        "total_failure_signals": failure_count,
-        "failure_reason": failure_reason,  # v17b.2
-        "message": f"Detected {signal} signal with {confidence:.0%} confidence"
+        "signal": parsed["signal"],
+        "confidence": round(parsed["confidence"], 2),
+        "success_matches": parsed["success_matches"],
+        "failure_matches": parsed["failure_matches"],
+        "total_success_signals": parsed["success_count"],
+        "total_failure_signals": parsed["failure_count"],
+        "failure_reason": parsed["failure_reason"],
+        "message": f"Detected {parsed['signal']} signal with {parsed['confidence']:.0%} confidence"
     }
     
     # Auto-record if enabled and confidence is high
-    if auto_record and signal != "unknown" and confidence >= 0.7:
+    if auto_record and parsed["signal"] != "unknown" and parsed["confidence"] >= 0.7:
         try:
             outcome_result = await record_outcome(
                 session_id=session_id,
-                outcome=signal,
-                confidence=confidence,
-                notes=f"Auto-recorded by v17a RLVR. Matches: {all_matches[:3]}",
-                failure_reason=failure_reason  # v17b.2: pass extracted reason
+                outcome=parsed["signal"],
+                confidence=parsed["confidence"],
+                notes=f"Auto-recorded by v17a RLVR. Matches: {parsed['matches'][:3]}",
+                failure_reason=parsed["failure_reason"]
             )
             result["auto_recorded"] = True
             result["outcome_result"] = outcome_result
-            result["message"] = str(result["message"]) + f" Auto-recorded as {signal}."
-            if failure_reason:
+            result["message"] = str(result["message"]) + f" Auto-recorded as {parsed['signal']}."
+            if parsed["failure_reason"]:
                 result["message"] = str(result["message"]) + " Failure reason extracted."
         except Exception as e:
             result["auto_recorded"] = False
             result["auto_record_error"] = str(e)
     else:
         result["auto_recorded"] = False
-        if auto_record and signal == "unknown":
+        if auto_record and parsed["signal"] == "unknown":
             result["message"] = str(result["message"]) + " Signal too ambiguous for auto-record."
-        elif auto_record and confidence < 0.7:
-            result["message"] = str(result["message"]) + f" Confidence too low ({confidence:.0%}) for auto-record."
+        elif auto_record and parsed["confidence"] < 0.7:
+            result["message"] = str(result["message"]) + f" Confidence too low ({parsed['confidence']:.0%}) for auto-record."
     
     return result
 
@@ -7243,19 +5586,19 @@ def _compute_file_hash(file_path: Path) -> str:
 async def sync_project(
     project_path: str,
     project_id: Optional[str] = None,
-    max_files: int = 500,
+    max_files: Optional[int] = None,
     max_file_size_kb: int = 100
 ) -> dict[str, Any]:
     """
     Index a project directory for codebase understanding.
     
-    Walks the directory, computes file hashes, extracts symbols via tree-sitter,
-    and stores embeddings for semantic search. Uses project_id for isolation.
+    v51 Delta Sync: Uses mtime gating to skip unchanged files and
+    purges orphan records for deleted files.
     
     Args:
         project_path: Absolute path to project root
         project_id: Optional custom project ID (auto-derived from path if not provided)
-        max_files: Maximum files to index (default 500)
+        max_files: Maximum files to index (None = unlimited, default None)
         max_file_size_kb: Skip files larger than this (default 100KB)
     
     Returns:
@@ -7272,12 +5615,12 @@ async def sync_project(
         # Normalize project_id
         pid = project_id or _normalize_project_id(project_path)
         
-        # Get existing files for this project
+        # v51: Get existing files with mtime for delta sync
         cur.execute(
-            "SELECT file_path, file_hash FROM file_registry WHERE project_id = %s",
+            "SELECT file_path, file_hash, mtime_ns FROM file_registry WHERE project_id = %s",
             (pid,)
         )
-        existing = {row['file_path']: row['file_hash'] for row in cur.fetchall()}
+        existing = {row['file_path']: {'hash': row['file_hash'], 'mtime': row['mtime_ns']} for row in cur.fetchall()}
         
         stats = {
             'files_scanned': 0,
@@ -7285,13 +5628,27 @@ async def sync_project(
             'files_updated': 0,
             'files_unchanged': 0,
             'files_skipped': 0,
+            'files_purged': 0,  # v51: orphan purge count
             'symbols_extracted': 0,
+            'lsp_symbols': 0,  # v52: LSP-sourced symbols
+            'treesitter_fallback': 0,  # v52: files using tree-sitter fallback
             'errors': []
         }
+        seen_paths: set[str] = set()  # v51: track for orphan detection
+        
+        # v52: Initialize LSP pool for symbol extraction
+        lsp_pool = None
+        try:
+            from pas.lsp.lsp_pool import LspPool
+            lsp_pool = await LspPool.get(str(path))
+            logger.info(f"sync_project: LSP pool active for {path}")
+        except Exception as lsp_err:
+            logger.info(f"sync_project: LSP not available, using tree-sitter only: {lsp_err}")
         
         # Walk directory
         for file_path in path.rglob('*'):
-            if stats['files_scanned'] >= max_files:
+            # v51: max_files is optional (None = unlimited)
+            if max_files is not None and stats['files_scanned'] >= max_files:
                 break
             
             # Skip directories and non-files
@@ -7321,15 +5678,22 @@ async def sync_project(
             
             stats['files_scanned'] += 1
             rel_path = str(file_path.relative_to(path))
+            seen_paths.add(rel_path)  # v51: track for orphan detection
             
             try:
-                # Compute hash
-                file_hash = _compute_file_hash(file_path)
+                # v51: Get current mtime for delta detection
+                file_stat = file_path.stat()
+                current_mtime = file_stat.st_mtime_ns
                 
-                # Check if unchanged
-                if rel_path in existing and existing[rel_path] == file_hash:
-                    stats['files_unchanged'] += 1
-                    continue
+                # v51: mtime gating - skip I/O if mtime unchanged
+                if rel_path in existing:
+                    stored = existing[rel_path]
+                    if stored['mtime'] and current_mtime <= stored['mtime']:
+                        stats['files_unchanged'] += 1
+                        continue
+                
+                # Compute hash (only if mtime changed or new file)
+                file_hash = _compute_file_hash(file_path)
                 
                 # Read content
                 content = file_path.read_text(encoding='utf-8', errors='replace')
@@ -7339,20 +5703,21 @@ async def sync_project(
                 # Use first 2000 chars for embedding
                 embedding = get_embedding(content[:2000])
                 
-                # Upsert file_registry
+                # Upsert file_registry with mtime
                 cur.execute(
                     """
-                    INSERT INTO file_registry (project_id, file_path, file_hash, language, line_count, content_embedding)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO file_registry (project_id, file_path, file_hash, language, line_count, content_embedding, mtime_ns)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (project_id, file_path) DO UPDATE SET
                         file_hash = EXCLUDED.file_hash,
                         language = EXCLUDED.language,
                         line_count = EXCLUDED.line_count,
                         content_embedding = EXCLUDED.content_embedding,
+                        mtime_ns = EXCLUDED.mtime_ns,
                         updated_at = NOW()
                     RETURNING id
                     """,
-                    (pid, rel_path, file_hash, language, line_count, embedding)
+                    (pid, rel_path, file_hash, language, line_count, embedding, current_mtime)
                 )
                 file_id = cur.fetchone()['id']
                 
@@ -7361,8 +5726,21 @@ async def sync_project(
                 else:
                     stats['files_added'] += 1
                 
-                # Extract and store symbols
-                symbols = _extract_symbols(content, language)
+                # v52: Extract symbols - try LSP first, fallback to tree-sitter
+                symbols = []
+                if lsp_pool and language == "python":
+                    try:
+                        symbols = await _extract_symbols_lsp(str(file_path), lsp_pool)
+                        if symbols:
+                            stats['lsp_symbols'] += len(symbols)
+                    except Exception as lsp_e:
+                        logger.debug(f"LSP symbol extraction failed for {rel_path}: {lsp_e}")
+                
+                if not symbols:
+                    # Fallback to tree-sitter
+                    symbols = _extract_symbols(content, language)
+                    if symbols:
+                        stats['treesitter_fallback'] += 1
                 
                 # Clear old symbols for this file
                 cur.execute("DELETE FROM file_symbols WHERE file_id = %s", (file_id,))
@@ -7389,22 +5767,33 @@ async def sync_project(
         
         conn.commit()
         
-        # v43: Upsert project_registry entry
+        # v51: Purge orphan files (deleted from disk but still in DB)
+        orphan_paths = set(existing.keys()) - seen_paths
+        if orphan_paths:
+            cur.execute(
+                "DELETE FROM file_registry WHERE project_id = %s AND file_path = ANY(%s)",
+                (pid, list(orphan_paths))
+            )
+            stats['files_purged'] = len(orphan_paths)
+            conn.commit()
+        
+        # v43/v51: Upsert project_registry with project_root
         try:
             cur.execute(
                 """
-                INSERT INTO project_registry (project_id, project_path)
-                VALUES (%s, %s)
+                INSERT INTO project_registry (project_id, project_path, project_root)
+                VALUES (%s, %s, %s)
                 ON CONFLICT (project_id) DO UPDATE SET
                     project_path = EXCLUDED.project_path,
+                    project_root = EXCLUDED.project_root,
                     updated_at = NOW()
                 """,
-                (pid, str(path))
+                (pid, str(path), str(path))
             )
             conn.commit()
             stats['project_registered'] = True
         except Exception as reg_error:
-            logger.warning(f"v43: project_registry upsert failed: {reg_error}")
+            logger.warning(f"v51: project_registry upsert failed: {reg_error}")
             stats['project_registered'] = False
         
         return {
@@ -7424,6 +5813,115 @@ async def sync_project(
         if 'conn' in locals():
             safe_close_connection(conn)
 
+
+# =============================================================================
+# v52: Auto-Sync File Watcher
+# =============================================================================
+
+# Module-level watcher singleton
+_active_watcher = None
+_active_handler = None
+
+
+@mcp.tool()
+async def start_auto_sync(
+    project_path: str,
+    debounce_seconds: float = 2.0
+) -> dict[str, Any]:
+    """
+    Start watching project for file changes and auto-sync.
+    
+    Uses inotify to detect file saves and updates symbols in real-time.
+    Files are synced after a debounce period (default 2s) to batch rapid saves.
+    
+    Args:
+        project_path: Absolute path to project root
+        debounce_seconds: Wait time after last change before syncing (default: 2.0)
+        
+    Returns:
+        Status including directories watched
+    """
+    global _active_watcher, _active_handler
+    
+    from pas.lsp.watcher import InotifyWatcher, DebouncedSyncHandler
+    from pas.lsp.lsp_pool import LspPool
+    from pas.helpers.codebase import sync_file_incremental
+    
+    try:
+        path = Path(project_path).resolve()
+        if not path.exists():
+            return {"success": False, "error": f"Path does not exist: {project_path}"}
+        
+        # Stop existing watcher if running
+        if _active_watcher and _active_watcher.is_running:
+            await _active_watcher.stop()
+            logger.info("Stopped previous auto-sync watcher")
+        
+        # Initialize LSP pool
+        lsp_pool = None
+        try:
+            lsp_pool = await LspPool.get(str(path))
+        except Exception as e:
+            logger.warning(f"LSP not available for auto-sync: {e}")
+        
+        project_id = _normalize_project_id(str(path))
+        
+        # Create sync callback
+        async def sync_callback(file_path: str):
+            result = await sync_file_incremental(
+                file_path, 
+                project_id, 
+                str(path),
+                lsp_pool
+            )
+            logger.info(f"Auto-sync: {result.get('file', file_path)} -> {result.get('symbols', 0)} symbols")
+        
+        # Create handler and watcher
+        _active_handler = DebouncedSyncHandler(sync_callback, debounce_seconds)
+        _active_watcher = InotifyWatcher(str(path))
+        await _active_watcher.start(_active_handler.on_change)
+        
+        return {
+            "success": True,
+            "project_path": str(path),
+            "project_id": project_id,
+            "directories_watched": _active_watcher.watched_directories,
+            "debounce_seconds": debounce_seconds,
+            "lsp_available": lsp_pool is not None,
+            "message": f"Watching {_active_watcher.watched_directories} directories for changes"
+        }
+        
+    except Exception as e:
+        logger.error(f"start_auto_sync failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def stop_auto_sync() -> dict[str, Any]:
+    """
+    Stop watching project for file changes.
+    
+    Returns:
+        Status confirmation
+    """
+    global _active_watcher, _active_handler
+    
+    if not _active_watcher or not _active_watcher.is_running:
+        return {"success": True, "message": "No active watcher to stop"}
+    
+    try:
+        await _active_watcher.stop()
+        _active_watcher = None
+        _active_handler = None
+        
+        return {
+            "success": True,
+            "message": "Auto-sync watcher stopped"
+        }
+        
+    except Exception as e:
+        logger.error(f"stop_auto_sync failed: {e}")
+        return {"success": False, "error": str(e)}
 
 @mcp.tool()
 async def query_codebase(
@@ -7560,176 +6058,6 @@ async def query_codebase(
             safe_close_connection(conn)
 
 
-# =============================================================================
-# v38: LSIF Integration Tools
-# =============================================================================
-
-
-@mcp.tool()
-async def import_lsif(
-    project_id: str,
-    lsif_path: str,
-    clear_existing: bool = True
-) -> dict[str, Any]:
-    """
-    Import LSIF index for precision code navigation.
-
-    LSIF (Language Server Index Format) provides pre-computed references,
-    definitions, and call hierarchies. Generate with: pyright --outputtype lsif
-
-    Args:
-        project_id: Project identifier for isolation
-        lsif_path: Absolute path to LSIF JSON file
-        clear_existing: If True, delete existing references for project first
-
-    Returns:
-        Import stats with count of references imported
-    """
-    import json as json_module
-    from pathlib import Path as PathLib
-    
-    try:
-        # Validate file exists
-        path = PathLib(lsif_path)
-        if not path.exists():
-            return {"success": False, "error": f"File not found: {lsif_path}"}
-        
-        if not path.suffix.lower() == '.json':
-            return {"success": False, "error": "LSIF file must be JSON format"}
-        
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Clear existing if requested
-        if clear_existing:
-            cur.execute(
-                "DELETE FROM symbol_references WHERE project_id = %s",
-                (project_id,)
-            )
-            deleted = cur.rowcount
-        else:
-            deleted = 0
-        
-        # Parse LSIF file
-        with open(path, 'r') as f:
-            lsif_data = json_module.load(f)
-        
-        if not isinstance(lsif_data, list):
-            return {"success": False, "error": "Invalid LSIF format: expected array"}
-        
-        # Build lookup tables for vertices
-        documents = {}  # id -> uri
-        ranges = {}     # id -> {start: {line, char}, end: ...}
-        
-        # First pass: collect vertices
-        for item in lsif_data:
-            if item.get('type') != 'vertex':
-                continue
-            
-            vid = item.get('id')
-            label = item.get('label')
-            
-            if label == 'document':
-                documents[vid] = item.get('uri', '')
-            elif label == 'range':
-                ranges[vid] = {
-                    'start': item.get('start', {}),
-                    'end': item.get('end', {})
-                }
-        
-        # Second pass: collect edges and build references
-        references_list = []
-        range_to_doc = {}
-        
-        for item in lsif_data:
-            if item.get('type') != 'edge':
-                continue
-            
-            label = item.get('label')
-            
-            if label == 'contains':
-                out_v = item.get('outV')
-                in_vs = item.get('inVs', [])
-                if out_v in documents:
-                    for range_id in in_vs:
-                        range_to_doc[range_id] = out_v
-            
-            elif label == 'textDocument/references':
-                out_v = item.get('outV')
-                in_v = item.get('inV')
-                if out_v in ranges and in_v:
-                    references_list.append({
-                        'source_range': out_v,
-                        'result_id': in_v
-                    })
-        
-        # Batch insert references
-        inserted = 0
-        batch = []
-        
-        for ref in references_list:
-            source_range = ranges.get(ref['source_range'])
-            if not source_range:
-                continue
-            
-            source_doc_id = range_to_doc.get(ref['source_range'])
-            source_file = documents.get(source_doc_id, 'unknown')
-            source_line = source_range.get('start', {}).get('line', 0)
-            source_symbol = f"range_{ref['source_range']}"
-            
-            batch.append((
-                project_id, source_file, source_line, source_symbol,
-                None, None, source_file, source_line, source_symbol, 'reference'
-            ))
-            
-            if len(batch) >= 1000:
-                cur.executemany(
-                    """
-                    INSERT INTO symbol_references 
-                    (project_id, source_file, source_line, source_symbol, 
-                     symbol_qualified_name, symbol_type, target_file, target_line, 
-                     target_symbol, relation_type)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    batch
-                )
-                inserted += len(batch)
-                batch = []
-        
-        if batch:
-            cur.executemany(
-                """
-                INSERT INTO symbol_references 
-                (project_id, source_file, source_line, source_symbol, 
-                 symbol_qualified_name, symbol_type, target_file, target_line, 
-                 target_symbol, relation_type)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                batch
-            )
-            inserted += len(batch)
-        
-        conn.commit()
-        
-        return {
-            "success": True,
-            "project_id": project_id,
-            "deleted_existing": deleted,
-            "references_imported": inserted,
-            "documents_found": len(documents),
-            "ranges_parsed": len(ranges),
-            "message": f"Imported {inserted} references from {len(documents)} documents"
-        }
-        
-    except Exception as e:
-        if 'conn' in locals():
-            conn.rollback()
-        logger.error(f"import_lsif failed: {e}")
-        return {"success": False, "error": str(e)}
-    finally:
-        if 'conn' in locals():
-            safe_close_connection(conn)
-
 
 @mcp.tool()
 async def find_references(
@@ -7740,6 +6068,9 @@ async def find_references(
     """
     Find all references to a symbol in the codebase.
 
+    v52 Phase 4b: Uses LSP via LspManager with symbol-to-position lookup.
+    Falls back to Jedi/LSIF if LSP is unavailable.
+
     Args:
         project_id: Project identifier
         symbol_name: Symbol to find references for (partial match supported)
@@ -7748,145 +6079,177 @@ async def find_references(
     Returns:
         List of locations where symbol is referenced
     """
-    from pathlib import Path as PathLib
+    from pas.lsp.manager import LspManager
+    import time as _time  # Debug timing
     
-    # v38b: Try live Jedi first (always fresh), fall back to LSIF
+    _t0 = _time.time()
+    logger.info(f"[DEBUG] find_references ENTRY: {project_id}, {symbol_name}")
+    
     references = []
-    source_used = "jedi"
+    source_used = "lsp"
+    conn = None
     
     try:
-        import jedi
-        
-        # Get files from file_registry
         conn = get_db_connection()
+        logger.info(f"[TIMING] DB connection: {_time.time()-_t0:.2f}s")
         cur = conn.cursor()
-        cur.execute(
-            "SELECT file_path FROM file_registry WHERE project_id = %s AND file_path LIKE %s",
-            (project_id, "%.py")
-        )
-        rows = cur.fetchall()
-        if not rows:
-            safe_close_connection(conn)
-            return {"success": False, "error": f"No Python files found for project '{project_id}'"}
         
-        rel_paths = [r['file_path'] for r in rows]
-        safe_close_connection(conn)
-        
-        # Try to find project root by checking if relative paths exist from cwd
-        # This is a heuristic - assumes cwd is project root or files are absolute
-        project_root = None
-        for potential_root in [PathLib.cwd(), PathLib.home()]:
-            test_path = potential_root / rel_paths[0]
-            if test_path.exists():
-                project_root = potential_root
-                break
-        
-        # If not found, check common paths
-        if not project_root:
-            # Check if paths might already be absolute
-            if PathLib(rel_paths[0]).exists():
-                project_root = PathLib("")  # Empty means paths are absolute
-            else:
-                # Last resort: try deriving from project_id
-                # mcp-pas often means /home/*/Documents/MCP/PAS
-                possible_roots = [
-                    PathLib("/home") / "nocoma" / "Documents" / "MCP" / "PAS",
-                ]
-                for root in possible_roots:
-                    if (root / rel_paths[0]).exists():
-                        project_root = root
-                        break
+        # Get project root from registry
+        project_root = fetch_project_root(project_id, cur)
         
         if not project_root:
-            source_used = "lsif"
-            # Fall through to LSIF fallback
-        else:
-            # Search each Python file for symbol references using Jedi
-            for rel_path in rel_paths:
-                file_path = project_root / rel_path if project_root else PathLib(rel_path)
-                
-                if not file_path.exists():
-                    continue
-                
-                try:
-                    with open(file_path, 'r') as f:
-                        source = f.read()
-                    
-                    script = jedi.Script(source, path=file_path)
-                    
-                    # Use string search to find lines with symbol, then use Jedi
-                    for i, line in enumerate(source.splitlines(), 1):
-                        if symbol_name in line:
-                            col = line.find(symbol_name)
-                            if col >= 0:
-                                try:
-                                    refs = script.get_references(line=i, column=col, scope='file')
-                                    for ref in refs:
-                                        if ref.name == symbol_name:
-                                            references.append({
-                                                "file": str(file_path),
-                                                "line": ref.line,
-                                                "symbol": ref.name,
-                                                "relation": "definition" if ref.is_definition() else "reference"
-                                            })
-                                    break  # Found refs for this file
-                                except Exception:
-                                    continue
-                except Exception:
-                    continue
-
-        
-        # Deduplicate
-        seen = set()
-        unique_refs = []
-        for ref in references:
-            key = (ref['file'], ref['line'], ref['symbol'])
-            if key not in seen:
-                seen.add(key)
-                if include_definitions or ref['relation'] != 'definition':
-                    unique_refs.append(ref)
-        references = unique_refs
-        
-    except ImportError:
-        source_used = "lsif"
-        # Fall back to LSIF if Jedi not available
-        pass
-    except Exception as e:
-        logger.warning(f"Jedi analysis failed, falling back to LSIF: {e}")
-        source_used = "lsif"
-    
-    # If Jedi found nothing or failed, try LSIF
-    if not references and source_used == "lsif":
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            
-            relation_filter = "IN ('reference', 'definition')" if include_definitions else "= 'reference'"
-            
+            # Fallback: try to resolve from file_registry
             cur.execute(
-                f"""
-                SELECT source_file, source_line, source_symbol, 
-                       symbol_qualified_name, symbol_type, relation_type
-                FROM symbol_references
-                WHERE project_id = %s
-                  AND (source_symbol ILIKE %s OR symbol_qualified_name ILIKE %s)
-                  AND relation_type {relation_filter}
-                ORDER BY source_file, source_line
-                LIMIT 100
+                "SELECT file_path FROM file_registry WHERE project_id = %s LIMIT 10",
+                (project_id,)
+            )
+            rows = cur.fetchall()
+            rel_paths = [r['file_path'] for r in rows]
+            project_root = resolve_project_root(rel_paths)
+            
+            if not project_root:
+                safe_close_connection(conn)
+                return {"success": False, "error": f"No project root found for '{project_id}'"}
+        
+        # Step 1: Use query_codebase to find symbol position (semantic lookup)
+        symbol_position = None
+        try:
+            # Search symbols for the exact name
+            query_embedding = get_embedding(symbol_name)
+            logger.info(f"[TIMING] Embedding: {_time.time()-_t0:.2f}s")
+            cur.execute(
+                """
+                SELECT fr.file_path, fs.line_start, fs.symbol_name
+                FROM file_symbols fs
+                JOIN file_registry fr ON fs.file_id = fr.id
+                WHERE fr.project_id = %s AND fs.symbol_name ILIKE %s
+                ORDER BY fs.embedding <=> %s::vector
+                LIMIT 1
                 """,
-                (project_id, f"%{symbol_name}%", f"%{symbol_name}%")
+                (project_id, f"%{symbol_name}%", query_embedding)
+            )
+            row = cur.fetchone()
+            if row:
+                symbol_position = {
+                    "file_path": str(project_root / row['file_path']),
+                    "line": row['line_start'] - 1,  # LSP is 0-indexed
+                    "col": 0  # Start of line
+                }
+        except Exception as e:
+            logger.debug(f"Symbol lookup failed, will try name-based: {e}")
+        
+        # Step 2: Try LSP if we have position (uses warm pooled servers)
+        if symbol_position:
+            try:
+                from pas.lsp import get_pool
+                logger.info(f"[LSP] Attempting LSP with position: {symbol_position}")
+                logger.info(f"[TIMING] Pre-LSP: {_time.time()-_t0:.2f}s")
+                lsp_pool = await get_pool(str(project_root))
+                logger.info(f"[TIMING] LSP pool started: {lsp_pool._started}")
+                logger.info(f"[TIMING] LSP pool: {_time.time()-_t0:.2f}s")
+                
+                # First try find_references directly from symbol position
+                lsp_refs = await lsp_pool.find_references(
+                    symbol_position["file_path"],
+                    symbol_position["line"],
+                    symbol_position["col"]
+                )
+                
+                # If no refs, the position might be a reference not a definition
+                # Jump to definition first, then try refs from there
+                if not lsp_refs:
+                    logger.info("[LSP] No refs from position, trying go_to_definition first")
+                    defn = await lsp_pool.find_definition(
+                        symbol_position["file_path"],
+                        symbol_position["line"],
+                        symbol_position["col"]
+                    )
+                    if defn and defn.get("uri"):
+                        # Extract definition location and retry refs
+                        def_file = defn.get("uri", "").replace("file://", "")
+                        def_line = defn.get("line", 0)
+                        logger.info(f"[LSP] Definition found at {def_file}:{def_line}, retrying refs")
+                        lsp_refs = await lsp_pool.find_references(def_file, def_line, 0)
+                
+                logger.info(f"[LSP] find_references returned: {len(lsp_refs) if lsp_refs else 0} refs")
+                
+                if lsp_refs:
+                    for ref in lsp_refs:
+                        references.append({
+                            "file": str(Path(ref.get("uri", ref.get("file", ""))).relative_to(project_root)) if ref.get("uri") or ref.get("file") else "",
+                            "line": ref.get("range", {}).get("start", {}).get("line", ref.get("line", 0)) + 1,
+                            "symbol": symbol_name,
+                            "relation": "definition" if ref.get("is_definition") else "reference"
+                        })
+                    source_used = "lsp"
+                else:
+                    logger.info("[LSP] No refs from LSP, falling back to jedi")
+            except Exception as e:
+                logger.warning(f"LSP find_references failed, falling back: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+                source_used = "jedi"
+        else:
+            logger.info(f"[LSP] No symbol_position found, using jedi fallback")
+            source_used = "jedi"
+        
+        # Step 3: Fallback to Jedi/LSIF if LSP didn't return results
+        if not references:
+            # Get Python files
+            cur.execute(
+                "SELECT file_path FROM file_registry WHERE project_id = %s AND file_path LIKE %s",
+                (project_id, "%.py")
+            )
+            rows = cur.fetchall()
+            if not rows:
+                safe_close_connection(conn)
+                return {"success": False, "error": f"No Python files found for project '{project_id}'"}
+            
+            rel_paths = [r['file_path'] for r in rows]
+            abs_paths = [project_root / rp for rp in rel_paths] if project_root else []
+            
+            # Pre-filter candidate files
+            candidate_files = prefilter_files(
+                symbol=symbol_name,
+                project_root=project_root,
+                file_paths=abs_paths
             )
             
-            rows = cur.fetchall()
-            references = [{"file": r['source_file'], "line": r['source_line'], 
-                           "symbol": r['source_symbol'], "relation": r['relation_type']} for r in rows]
-            
-        except Exception as e:
-            logger.error(f"find_references LSIF fallback failed: {e}")
-            return {"success": False, "error": str(e)}
-        finally:
-            if 'conn' in locals():
+            if not candidate_files:
                 safe_close_connection(conn)
+                return {
+                    "success": True, "project_id": project_id, "symbol_name": symbol_name,
+                    "references": [], "count": 0, "source": "prefilter",
+                    "note": "No files contain this symbol. Ensure project is synced."
+                }
+            
+            # Try Jedi
+            try:
+                import jedi
+                if project_root is not None:
+                    candidate_rel_paths = []
+                    for f in candidate_files:
+                        if f.exists():
+                            try:
+                                candidate_rel_paths.append(str(f.relative_to(project_root)))
+                            except ValueError:
+                                candidate_rel_paths.append(str(f))
+                    
+                    references = find_references_jedi(project_root, candidate_rel_paths, symbol_name)
+                    source_used = "jedi"
+            except ImportError:
+                source_used = "lsif"
+            except Exception as e:
+                logger.warning(f"Jedi analysis failed: {e}")
+        
+        # Deduplicate
+        references = deduplicate_references(references, include_definitions)
+        
+    except Exception as e:
+        logger.error(f"find_references failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        safe_close_connection(conn)
     
     if not references:
         return {
@@ -7897,6 +6260,7 @@ async def find_references(
     
     return {"success": True, "project_id": project_id, "symbol_name": symbol_name,
             "references": references[:100], "count": len(references), "source": source_used}
+
 
 
 
@@ -8026,6 +6390,114 @@ async def call_hierarchy(
 
 
 # =============================================================================
+# v52: Plan Validation Tool
+# =============================================================================
+
+@mcp.tool()
+async def validate_plan(
+    session_id: str,
+    plan_text: str,
+    skip_validation: bool = False,
+    lsp_impact: Optional[dict] = None,
+) -> dict[str, Any]:
+    """
+    Validate implementation plan addresses all critiques.
+    
+    OPT-OUT: Enabled by default. Set skip_validation=True only with explicit
+    user approval (will be logged for outcome correlation).
+    
+    Args:
+        session_id: The reasoning session UUID
+        plan_text: Full text of implementation plan to validate
+        skip_validation: If True, bypass validation (logged)
+        lsp_impact: Optional result from get_lsp_impact() to validate scope
+        
+    Returns:
+        Validation result with missing/addressed critiques and scope warnings
+    """
+    if skip_validation:
+        logger.warning(f"validate_plan SKIPPED for session {session_id}")
+        return {
+            "valid": True,
+            "skipped": True,
+            "warning": "Validation bypassed - outcomes may be affected"
+        }
+    
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Get critique checklist
+        from pas.helpers.finalize import build_critique_checklist
+        checklist = build_critique_checklist(cur, session_id)
+        
+        if not checklist:
+            return {
+                "valid": True,
+                "message": "No critiques to validate against",
+                "checklist_count": 0
+            }
+        
+        plan_lower = plan_text.lower()
+        addressed = []
+        missing = []
+        
+        for item in checklist:
+            # Extract key terms from critique text (words > 3 chars)
+            terms = [t.strip().lower() for t in item["text"].split() if len(t) > 3]
+            # Check if at least 2 key terms appear in plan
+            matches = sum(1 for t in terms if t in plan_lower)
+            threshold = min(2, len(terms))
+            
+            if matches >= threshold:
+                addressed.append(item["id"])
+            else:
+                missing.append({
+                    "id": item["id"],
+                    "type": item["type"],
+                    "text": item["text"],
+                    "severity": item["severity"]
+                })
+        
+        coverage = len(addressed) / len(checklist) if checklist else 1.0
+        has_high_severity_missing = any(m["severity"] == "high" for m in missing)
+        
+        # v52 Phase 3: LSP scope validation
+        scope_warnings = []
+        if lsp_impact and lsp_impact.get("lsp_available"):
+            callers_outside = lsp_impact.get("callers_outside_scope", [])
+            for caller in callers_outside:
+                # Check if caller file is mentioned in plan
+                from pathlib import Path
+                caller_name = Path(caller).name.lower()
+                if caller_name not in plan_lower:
+                    scope_warnings.append({
+                        "type": "scope_miss",
+                        "file": caller,
+                        "message": f"File '{caller_name}' uses symbols from scope but not in plan"
+                    })
+        
+        return {
+            "valid": len(missing) == 0 or not has_high_severity_missing,
+            "coverage": round(coverage, 2),
+            "total_critiques": len(checklist),
+            "addressed_count": len(addressed),
+            "addressed_ids": addressed,
+            "missing_count": len(missing),
+            "missing": missing,
+            "scope_warnings": scope_warnings if scope_warnings else None,
+            "recommendation": "Address missing HIGH severity items before proceeding" if has_high_severity_missing else None
+        }
+        
+    except Exception as e:
+        logger.error(f"validate_plan failed: {e}")
+        return {"valid": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+# =============================================================================
 # Entry Point
 # =============================================================================
 
@@ -8034,6 +6506,16 @@ async def call_hierarchy(
 def main():
     """Run the MCP server."""
     logger.info("Starting PAS (Scientific Reasoning) MCP Server...")
+    
+    # Pre-warm embedding model for instant tool calls (avoids 10s cold start)
+    try:
+        logger.info("Pre-warming embedding model...")
+        from pas.utils import get_embedding_model
+        get_embedding_model()
+        logger.info("Embedding model ready")
+    except Exception as e:
+        logger.warning(f"Embedding pre-warm failed (will load on first use): {e}")
+    
     mcp.run()
 
 

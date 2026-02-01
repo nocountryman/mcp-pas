@@ -319,3 +319,188 @@ Session `49ea0e60` showed that v42 Feature Tracker planning missed `purpose_help
 
 > **v43 Change**: Roadmap/Implementation distinction is now enforced with templates.
 
+---
+
+## Rule 11: Mandatory Warning Acknowledgment 🛑 (v50)
+
+**When `prepare_expansion` returns `past_failure_warnings`, you MUST acknowledge them.**
+
+### The Problem (Phase 10 Bug)
+
+In Phase 10, PAS warned about `SCOPE_BOUNDARY_CROSSING` but I ignored it and proceeded to `store_expansion`, resulting in 3 import errors that required debugging.
+
+### Required Action
+
+```python
+# 1. Check for warnings in prepare_expansion result
+result = mcp_pas-server_prepare_expansion(session_id="...", project_id="mcp-pas")
+
+# 2. If past_failure_warnings present, MUST acknowledge
+if result.get("past_failure_warnings"):
+    for warning in result["past_failure_warnings"]:
+        # Log acknowledgment before proceeding
+        mcp_pas-server_log_conversation(
+            session_id="...",
+            log_type="context",
+            raw_text=f"ACKNOWLEDGED WARNING: {warning['pattern']} - {warning['warning']}. Mitigation: [your plan here]"
+        )
+
+# 3. ONLY NOW can you call store_expansion
+```
+
+### Why This Matters
+
+- Advisory warnings are useless if ignored
+- Logging forces conscious decision-making
+- PAS learns from acknowledged vs. ignored warnings
+
+### Enforcement
+
+| Level | Mechanism |
+|-------|-----------|
+| **Soft** | This rule in GEMINI.md |
+| **Medium** | `preflight_warnings.unacknowledged_warnings` |
+| **Hard** | Consider blocking `store_expansion` if `past_failure_warnings` not logged |
+
+> **v50 Change**: Warning acknowledgment is now mandatory before hypothesis generation.
+
+---
+
+## Rule 12: Post-Synthesis Critique 🔄 (v50)
+
+**When you call `synthesize_hypotheses`, you MUST critique the hybrid node before recording outcome.**
+
+### The Problem (Phase 10 Bug)
+
+I called `synthesize_hypotheses` which created a hybrid node (score 0.96), then immediately called `record_outcome` without validating the synthesis.
+
+### Required Synthesis Flow
+
+```mermaid
+graph LR
+    A[synthesize_hypotheses] --> B[prepare_critique<br/>hybrid_node]
+    B --> C[store_critique]
+    C --> D[prepare_sequential_analysis]
+    D --> E[store_sequential_analysis]
+    E --> F[finalize_session]
+    F --> G[record_outcome]
+```
+
+```python
+# Correct synthesis workflow
+result = mcp_pas-server_synthesize_hypotheses(session_id="...", node_ids=[...])
+hybrid_node_id = result["hybrid_node"]["node_id"]
+
+# MUST critique the hybrid
+mcp_pas-server_prepare_critique(node_id=hybrid_node_id)
+mcp_pas-server_store_critique(node_id=hybrid_node_id, ...)
+
+# MUST run gap analysis
+mcp_pas-server_prepare_sequential_analysis(session_id="...")
+mcp_pas-server_store_sequential_analysis(session_id="...", results="[...]")
+
+# Re-finalize
+mcp_pas-server_finalize_session(session_id="...")
+
+# NOW record outcome
+mcp_pas-server_record_outcome(session_id="...", outcome="success")
+```
+
+### Why This Matters
+
+- Synthesis combines hypotheses but doesn't validate the combination
+- Hybrid node inherits scores but may have new emergent flaws
+- Uncritiqued synthesis = untested assumption
+
+### Enforcement
+
+The `synthesize_hypotheses` response already includes:
+```json
+"next_step": "Critique the hybrid hypothesis. Call prepare_critique(node_id='...')"
+```
+
+**You MUST follow this instruction.**
+
+> **v50 Change**: Post-synthesis critique is now explicitly required. Skipping invalidates the session.
+
+---
+
+## Rule 13: Import Verification Before New Files 📁 (v50)
+
+**Before creating a new helper file, verify import paths with `grep_search` for ALL functions you plan to import.**
+
+### The Problem (Phase 10 Bug)
+
+Created `helpers/critique.py` with incorrect imports:
+- `from pas.helpers.embedding import get_embedding` ❌ (should be `pas.utils`)
+- `from pas.db import get_db_connection` ❌ (should be `pas.utils`)
+- `from pas.helpers.reasoning import _search_relevant_failures` ❌ (creates circular import)
+
+### Required Verification
+
+```python
+# Before writing ANY import statement, verify the function location
+mcp_pas-server_find_references(project_id="mcp-pas", symbol_name="get_embedding")
+# OR
+grep_search(Query="def get_embedding", SearchPath="/path/to/project")
+```
+
+### Checklist for New Helper Files
+
+Before creating a new helper file:
+- [ ] List all functions you plan to import
+- [ ] For EACH function, run `grep_search` or `find_references` to verify location
+- [ ] Check for circular import risks (don't import from server.py into helpers)
+- [ ] Document verified imports in implementation plan
+
+> **v50 Change**: Import verification is now mandatory before creating new files.
+
+---
+
+## Rule 14: Terminal Environment for Agent Commands 🖥️
+
+**ALL `run_command` tool calls MUST include venv activation and environment loading.**
+
+### The Problem
+
+Agent `run_command` calls run in isolated subprocesses that:
+- Do NOT inherit `~/.bashrc` settings
+- Do NOT auto-activate virtualenvs
+- Do NOT load `.env` files via direnv
+- Do NOT have access to `DATABASE_URL` or other env vars
+
+### Required Command Pattern
+
+```bash
+# ALWAYS prefix commands with activation + env loading
+source .venv312/bin/activate && set -a && source .env && set +a && <your_command>
+
+# Example: Running tests
+source .venv312/bin/activate && set -a && source .env && set +a && pytest tests/
+
+# Example: Database queries
+source .venv312/bin/activate && set -a && source .env && set +a && psql "$DATABASE_URL" -c "SELECT 1"
+
+# Example: Python scripts
+source .venv312/bin/activate && set -a && source .env && set +a && python -m pas.server
+```
+
+### Quick Reference
+
+| What | Value |
+|------|-------|
+| **Venv path** | `.venv312/bin/activate` |
+| **Env file** | `.env` |
+| **Python** | `.venv312/bin/python` |
+| **DATABASE_URL** | `postgresql://mcp_admin:12345@localhost:5432/mcp_pas` |
+
+### Alternative: Absolute Paths
+
+When activation isn't needed:
+```bash
+.venv312/bin/python -m pytest tests/
+.venv312/bin/python -c "from pas import server; print('ok')"
+```
+
+> **Platform Constraint**: This is a fundamental limitation of Antigravity's subprocess isolation. No IDE setting can change this.
+

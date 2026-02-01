@@ -3,7 +3,6 @@ Layer 1: Codebase Flow Tool Tests
 
 Tests for code navigation and understanding tools:
 - sync_project
-- import_lsif
 - query_codebase
 - find_references
 - go_to_definition
@@ -35,30 +34,6 @@ class TestCodebaseSync:
         # API returns files_scanned, files_added, files_updated, etc.
         assert result.get("files_scanned", 0) >= 0 or result.get("files_added", 0) >= 0
     
-    @pytest.mark.asyncio
-    async def test_import_lsif(self, db_connection):
-        """Verify LSIF import."""
-        from pas.server import import_lsif
-        import os
-        
-        lsif_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "fixtures",
-            "sample.lsif.json"
-        )
-        
-        # Skip if fixture doesn't exist
-        if not os.path.exists(lsif_path):
-            pytest.skip("LSIF fixture not found")
-        
-        result = await import_lsif(
-            project_id="test-lsif",
-            lsif_path=lsif_path,
-            clear_existing=True
-        )
-        
-        assert result["success"] is True
-
 
 class TestCodebaseQuery:
     """Tests for semantic code search."""
@@ -334,3 +309,81 @@ class TestProjectPurpose:
         assert "summary" in result
         # At least system_map should be populated for synced project
         assert result["stats"]["sections_populated"] >= 0
+
+
+class TestPrefilterFiles:
+    """Tests for v51 Phase 2 pre-filtering functions."""
+    
+    @pytest.fixture
+    def temp_project(self, tmp_path):
+        """Create a temporary project with Python files."""
+        (tmp_path / "file1.py").write_text("def my_function():\n    pass\n")
+        (tmp_path / "file2.py").write_text("def other_function():\n    result = my_function()\n")
+        (tmp_path / "file3.py").write_text("# This file has no references\n")
+        return tmp_path
+    
+    def test_prefilter_python_finds_symbol(self, temp_project):
+        """Python fallback finds files containing symbol."""
+        from pas.helpers.codebase import prefilter_python
+        files = list(temp_project.glob("*.py"))
+        result = prefilter_python("my_function", files)
+        assert len(result) == 2
+        assert temp_project / "file1.py" in result
+        assert temp_project / "file2.py" in result
+    
+    def test_prefilter_python_respects_boundaries(self, temp_project):
+        """Python fallback uses identifier-aware boundaries."""
+        from pas.helpers.codebase import prefilter_python
+        (temp_project / "partial.py").write_text("def my_function_extended():\n    pass\n")
+        files = list(temp_project.glob("*.py"))
+        result = prefilter_python("my_function", files)
+        # Should NOT match my_function_extended
+        assert temp_project / "partial.py" not in result
+    
+    def test_prefilter_python_empty_files(self, temp_project):
+        """Python fallback handles empty file list gracefully."""
+        from pas.helpers.codebase import prefilter_python
+        result = prefilter_python("my_function", [])
+        assert result == []
+    
+    @pytest.mark.skipif(
+        not __import__("shutil").which('rg'),
+        reason="ripgrep not installed"
+    )
+    def test_prefilter_rg_finds_symbol(self, temp_project):
+        """Ripgrep path finds files containing symbol."""
+        from pas.helpers.codebase import prefilter_rg
+        result = prefilter_rg("my_function", temp_project)
+        assert len(result) == 2
+    
+    @pytest.mark.skipif(
+        not __import__("shutil").which('rg'),
+        reason="ripgrep not installed"
+    )
+    def test_prefilter_rg_respects_boundaries(self, temp_project):
+        """Ripgrep -w flag respects word boundaries."""
+        from pas.helpers.codebase import prefilter_rg
+        (temp_project / "partial.py").write_text("def my_function_extended():\n    pass\n")
+        result = prefilter_rg("my_function", temp_project)
+        # ripgrep -w should NOT match my_function_extended
+        partial_path = temp_project / "partial.py"
+        assert partial_path not in result
+    
+    def test_prefilter_files_auto_fallback(self, temp_project):
+        """Unified interface falls back to Python when ripgrep disabled."""
+        from pas.helpers.codebase import prefilter_files
+        files = list(temp_project.glob("*.py"))
+        result = prefilter_files("my_function", temp_project, files, use_rg=False)
+        assert len(result) == 2
+    
+    def test_prefilter_files_no_project_root(self, temp_project):
+        """Unified interface works without project_root (Python only)."""
+        from pas.helpers.codebase import prefilter_files
+        files = list(temp_project.glob("*.py"))
+        result = prefilter_files("my_function", None, files)
+        assert len(result) == 2
+    
+    def test_has_ripgrep_defined(self):
+        """HAS_RIPGREP module constant is defined."""
+        from pas.helpers.codebase import HAS_RIPGREP
+        assert isinstance(HAS_RIPGREP, bool)

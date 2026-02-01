@@ -154,6 +154,10 @@ def parse_terminal_signals(terminal_text: str) -> dict[str, Any]:
         "signal": signal,
         "confidence": confidence,
         "matches": all_matches[:10],  # Limit to avoid huge responses
+        "success_matches": success_matches[:5],
+        "failure_matches": failure_matches[:5],
+        "success_count": success_count,
+        "failure_count": failure_count,
         "failure_reason": failure_reason
     }
 
