@@ -5584,7 +5584,9 @@ async def sync_project(
     project_path: str,
     project_id: Optional[str] = None,
     max_files: Optional[int] = None,
-    max_file_size_kb: int = 100
+    max_file_size_kb: int = 100,
+    include_references: bool = False,
+    include_call_hierarchy: bool = False
 ) -> dict[str, Any]:
     """
     Index a project directory for codebase understanding.
@@ -5597,6 +5599,8 @@ async def sync_project(
         project_id: Optional custom project ID (auto-derived from path if not provided)
         max_files: Maximum files to index (None = unlimited, default None)
         max_file_size_kb: Skip files larger than this (default 100KB)
+        include_references: If True, index symbol references via LSP (slower)
+        include_call_hierarchy: If True, index call hierarchy via LSP (slower)
     
     Returns:
         Sync results with counts and any errors
@@ -5629,6 +5633,8 @@ async def sync_project(
             'symbols_extracted': 0,
             'lsp_symbols': 0,  # v52: LSP-sourced symbols
             'treesitter_fallback': 0,  # v52: files using tree-sitter fallback
+            'references_indexed': 0,  # v68: LSP reference count
+            'calls_indexed': 0,  # v68: LSP call hierarchy count
             'errors': []
         }
         seen_paths: set[str] = set()  # v51: track for orphan detection
@@ -5756,6 +5762,70 @@ async def sync_project(
                          sym.get('line_end'), sym.get('signature'), sym.get('docstring'), sym_embedding)
                     )
                     stats['symbols_extracted'] += 1
+                
+                # v68: Index references via LSP if requested
+                if include_references and lsp_pool and language == "python":
+                    # Clear old references for this file
+                    cur.execute(
+                        "DELETE FROM symbol_references WHERE source_file = %s AND project_id = %s",
+                        (rel_path, pid)
+                    )
+                    for sym in symbols:
+                        try:
+                            sym_line = sym.get('line_start', 1)
+                            lsp_line = sym_line - 1  # LSP is 0-indexed
+                            refs = await lsp_pool.find_references(str(file_path), lsp_line, 0)
+                            for ref in refs:
+                                target_uri = ref.get('uri', '')
+                                if target_uri.startswith('file://'):
+                                    target_file = target_uri[7:]
+                                    try:
+                                        target_rel = str(Path(target_file).relative_to(path))
+                                    except ValueError:
+                                        target_rel = target_file
+                                    cur.execute(
+                                        """
+                                        INSERT INTO symbol_references 
+                                        (project_id, source_file, source_line, source_symbol, target_file, target_line, target_symbol, relation_type)
+                                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                        ON CONFLICT DO NOTHING
+                                        """,
+                                        (pid, rel_path, sym_line, sym['name'], target_rel, ref.get('line', 0), sym['name'], 'reference')
+                                    )
+                                    stats['references_indexed'] += 1
+                        except Exception as ref_e:
+                            logger.debug(f"Reference indexing failed for {sym['name']}: {ref_e}")
+                
+                # v68: Index call hierarchy via LSP if requested
+                if include_call_hierarchy and lsp_pool and language == "python":
+                    for sym in symbols:
+                        if sym.get('type') in ('function', 'method'):
+                            try:
+                                sym_line = sym.get('line_start', 1)
+                                lsp_line = sym_line - 1
+                                calls = await lsp_pool.call_hierarchy(str(file_path), lsp_line, 0, 'incoming')
+                                for call in calls:
+                                    caller_uri = call.get('uri', '')
+                                    if caller_uri.startswith('file://'):
+                                        caller_file = caller_uri[7:]
+                                        try:
+                                            caller_rel = str(Path(caller_file).relative_to(path))
+                                        except ValueError:
+                                            caller_rel = caller_file
+                                        caller_name = call.get('name', 'unknown')
+                                        caller_line = call.get('line', 0)
+                                        cur.execute(
+                                            """
+                                            INSERT INTO symbol_references 
+                                            (project_id, source_file, source_line, source_symbol, target_file, target_line, target_symbol, relation_type)
+                                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                            ON CONFLICT DO NOTHING
+                                            """,
+                                            (pid, caller_rel, caller_line, caller_name, rel_path, sym_line, sym['name'], 'call')
+                                        )
+                                        stats['calls_indexed'] += 1
+                            except Exception as call_e:
+                                logger.debug(f"Call hierarchy indexing failed for {sym['name']}: {call_e}")
                 
             except Exception as e:
                 stats['errors'].append(f"{rel_path}: {str(e)[:100]}")

@@ -184,6 +184,50 @@ async def handle_request(client: Any, request: dict, project_root: str) -> Any:
         flatten_symbols(result)
         return symbols
     
+    elif cmd == "call_hierarchy":
+        file_path = request["file_path"]
+        line = request["line"]
+        col = request["col"]
+        direction = request.get("direction", "incoming")
+        
+        # Make path relative if absolute
+        path = Path(file_path)
+        if path.is_absolute():
+            try:
+                file_path = str(path.relative_to(project_root))
+            except ValueError:
+                pass
+        
+        pos = Position(line=line, character=col)
+        
+        try:
+            # lsp-client uses single-step call hierarchy methods
+            if direction == "incoming":
+                calls = await client.request_call_hierarchy_incoming_call(file_path, pos)
+            else:
+                calls = await client.request_call_hierarchy_outgoing_call(file_path, pos)
+            
+            # Convert to serializable format
+            result = []
+            for call in (calls or []):
+                try:
+                    # IncomingCall has 'from_', OutgoingCall has 'to'
+                    item = getattr(call, 'from_', None) or getattr(call, 'to', None)
+                    if item:
+                        result.append({
+                            "name": getattr(item, 'name', ''),
+                            "kind": getattr(item, 'kind', None).name if hasattr(getattr(item, 'kind', None), 'name') else '',
+                            "uri": getattr(item, 'uri', ''),
+                            "line": getattr(getattr(item, 'range', None), 'start', None).line if hasattr(item, 'range') else 0,
+                            "direction": direction
+                        })
+                except:
+                    pass
+            return result
+        except Exception as e:
+            logger.warning(f"call_hierarchy failed: {e}")
+            return []
+    
     return None
 
 
@@ -346,6 +390,46 @@ class LspSubprocess:
             return []
         except Exception as e:
             logger.warning(f"LSP document_symbols error: {e}")
+            return []
+    
+    async def call_hierarchy(
+        self, 
+        file_path: str, 
+        line: int, 
+        col: int, 
+        direction: str = "incoming"
+    ) -> list[dict]:
+        """Get call hierarchy via subprocess."""
+        if not self._started:
+            if not await self.start():
+                return []
+        
+        self._request_id += 1
+        request = {
+            "id": self._request_id,
+            "command": "call_hierarchy",
+            "file_path": file_path,
+            "line": line,
+            "col": col,
+            "direction": direction
+        }
+        
+        try:
+            self._request_queue.put(request)
+            response = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None, self._response_queue.get, True, 30
+                ),
+                timeout=30
+            )
+            if response.get("id") == self._request_id:
+                return response.get("result", [])
+            return []
+        except asyncio.TimeoutError:
+            logger.warning("LSP call_hierarchy timeout")
+            return []
+        except Exception as e:
+            logger.warning(f"LSP call_hierarchy error: {e}")
             return []
 
 

@@ -124,10 +124,12 @@ class LspPool:
         ) -> list[dict]:
         """Get call hierarchy for symbol at position.
         
-        Note: Not implemented via subprocess. Use LspManager.call_hierarchy() directly.
+        Uses subprocess to call LSP prepareCallHierarchy + incomingCalls/outgoingCalls.
         """
-        logger.debug("call_hierarchy not available via pool - use LspManager")
-        return []
+        await self._ensure_started()
+        if not self._subprocess or not self._started:
+            return []
+        return await self._subprocess.call_hierarchy(file_path, line, col, direction)
 
     
     async def document_symbols(self, file_path: str) -> list[dict]:

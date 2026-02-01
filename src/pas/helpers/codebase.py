@@ -518,7 +518,9 @@ async def sync_file_incremental(
     file_path: str,
     project_id: str,
     project_root: str,
-    lsp_pool=None
+    lsp_pool=None,
+    include_references: bool = False,
+    include_call_hierarchy: bool = False
 ) -> dict:
     """
     Sync a single file to the database.
@@ -531,9 +533,11 @@ async def sync_file_incremental(
         project_id: Project identifier
         project_root: Project root directory
         lsp_pool: Optional LspPool instance for LSP extraction
+        include_references: If True, index symbol references via LSP
+        include_call_hierarchy: If True, index call hierarchy via LSP
         
     Returns:
-        Dict with success status and symbol count
+        Dict with success status, symbol count, and reference count
     """
     from pas.utils import get_embedding, get_db_connection
     
@@ -577,6 +581,9 @@ async def sync_file_incremental(
         
         # Update database
         conn = get_db_connection()
+        references_indexed = 0
+        calls_indexed = 0
+        
         try:
             cur = conn.cursor()
             
@@ -599,6 +606,13 @@ async def sync_file_incremental(
             # Clear old symbols
             cur.execute("DELETE FROM file_symbols WHERE file_id = %s", (file_id,))
             
+            # Clear old references for this file if re-indexing
+            if include_references or include_call_hierarchy:
+                cur.execute(
+                    "DELETE FROM symbol_references WHERE source_file = %s",
+                    (rel_path,)
+                )
+            
             # Insert new symbols
             for sym in symbols:
                 embed_text = sym.get('signature', '') + '\n' + sym.get('docstring', '')
@@ -613,13 +627,72 @@ async def sync_file_incremental(
                      sym.get('line_end'), sym.get('signature'), sym.get('docstring'), sym_embedding)
                 )
             
+            # Index references via LSP if requested
+            if include_references and lsp_pool and language == "python":
+                for sym in symbols:
+                    try:
+                        line = sym.get('line_start', 1) - 1  # LSP is 0-indexed
+                        refs = await lsp_pool.find_references(file_path, line, 0)
+                        for ref in refs:
+                            target_uri = ref.get('uri', '')
+                            if target_uri.startswith('file://'):
+                                target_file = target_uri[7:]  # Remove file:// prefix
+                                try:
+                                    target_rel = str(Path(target_file).relative_to(project_root))
+                                except ValueError:
+                                    target_rel = target_file
+                                
+                                cur.execute(
+                                    """
+                                    INSERT INTO symbol_references 
+                                    (source_file, source_symbol, target_file, target_line, direction, project_id)
+                                    VALUES (%s, %s, %s, %s, %s, %s)
+                                    ON CONFLICT DO NOTHING
+                                    """,
+                                    (rel_path, sym['name'], target_rel, ref.get('line', 0), 'reference', project_id)
+                                )
+                                references_indexed += 1
+                    except Exception as e:
+                        logger.debug(f"Reference indexing failed for {sym['name']}: {e}")
+            
+            # Index call hierarchy via LSP if requested
+            if include_call_hierarchy and lsp_pool and language == "python":
+                for sym in symbols:
+                    if sym.get('type') in ('function', 'method'):
+                        try:
+                            line = sym.get('line_start', 1) - 1  # LSP is 0-indexed
+                            calls = await lsp_pool.call_hierarchy(file_path, line, 0, 'incoming')
+                            for call in calls:
+                                caller_uri = call.get('uri', '')
+                                if caller_uri.startswith('file://'):
+                                    caller_file = caller_uri[7:]
+                                    try:
+                                        caller_rel = str(Path(caller_file).relative_to(project_root))
+                                    except ValueError:
+                                        caller_rel = caller_file
+                                    
+                                    cur.execute(
+                                        """
+                                        INSERT INTO symbol_references 
+                                        (source_file, source_symbol, target_file, target_line, direction, project_id)
+                                        VALUES (%s, %s, %s, %s, %s, %s)
+                                        ON CONFLICT DO NOTHING
+                                        """,
+                                        (caller_rel, call.get('name', ''), rel_path, line, 'incoming', project_id)
+                                    )
+                                    calls_indexed += 1
+                        except Exception as e:
+                            logger.debug(f"Call hierarchy indexing failed for {sym['name']}: {e}")
+            
             conn.commit()
             
             return {
                 "success": True, 
                 "file": rel_path,
                 "symbols": len(symbols),
-                "lsp_used": lsp_used
+                "lsp_used": lsp_used,
+                "references_indexed": references_indexed,
+                "calls_indexed": calls_indexed
             }
             
         finally:
@@ -628,3 +701,4 @@ async def sync_file_incremental(
     except Exception as e:
         logger.error(f"sync_file_incremental error: {e}")
         return {"success": False, "error": str(e)}
+
