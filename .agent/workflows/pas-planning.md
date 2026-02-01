@@ -19,34 +19,35 @@ description: Enforce PAS-driven implementation planning for non-trivial changes
 
 ```
 1. start_reasoning_session(user_goal="...")
-2. prepare_expansion(session_id="...", project_id="...")
+2. sync_project(project_path="...")  // Ensure DB is current (v53 delta sync)
+3. prepare_expansion(session_id="...", project_id="...")
    → Check suggested_lookups, call find_references for each
    → Review related_modules returned
    → **v50: If past_failure_warnings present → MUST log_conversation to acknowledge**
-3. store_expansion(h1_text, h1_confidence, h1_scope, h2_text, ...)
-4. prepare_critique(node_id="<top hypothesis>")
-5. store_critique(counterargument, severity_score, major_flaws, minor_flaws)
-6. prepare_sequential_analysis(session_id="...")
-7. store_sequential_analysis(session_id="...", results="[...]")
-8. finalize_session(session_id="...")
+4. store_expansion(h1_text, h1_confidence, h1_scope, h2_text, ...)
+5. prepare_critique(node_id="<top hypothesis>")
+6. store_critique(counterargument, severity_score, major_flaws, minor_flaws)
+7. prepare_sequential_analysis(session_id="...")
+8. store_sequential_analysis(session_id="...", results="[...]")
+9. finalize_session(session_id="...")
    → HARD BLOCK: score < 0.9 = DO NOT PROCEED
    → If quality_gate.passed = false, deepen or expand more hypotheses
 
 ## 🔍 LSP Impact Analysis (v52 Phase 1)
-8b. Before creating plan, gather LSP data:
+9b. Before creating plan, gather LSP data:
    → Call find_references for key symbols in scope
    → Document affected files in plan's "LSP Impact Analysis" section
    → If callers discovered outside scope → expand scope or document why excluded
 
 ## ⛔ HARD BLOCK: Implementation Plan Required
-9. Create implementation_plan.md using template BEFORE any code edits
+10. Create implementation_plan.md using template BEFORE any code edits
    → Template: `.agent/templates/implementation_plan_template.md`
    → Request user review via notify_user(PathsToReview=[...], BlockedOnUser=True)
    → DO NOT write code until user approves or auto-proceeds
    → The plan is YOUR structured checklist - without it you skip verification steps
 
-10. AFTER user approval: Execute code changes following plan
-11. record_outcome(session_id="...", outcome="...")
+11. AFTER user approval: Execute code changes following plan
+12. record_outcome(session_id="...", outcome="...")
 ```
 
 > **Enforcement Rationale**: The implementation plan is not just user documentation—it's the agent's structured execution checklist. Skipping it leads to missed verification steps, scope drift, and undocumented decisions.
