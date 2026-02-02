@@ -60,6 +60,16 @@ description: Enforce PAS-driven implementation planning for non-trivial changes
       - `scope_warnings` addressed or documented
    → If validation fails, update plan before proceeding
 
+## 🔍 Related Files Check (v85)
+10b. Before creating ANY new file (code, template, config):
+   → Search for related files: `find_by_name(Pattern="*<keyword>*", SearchDirectory="...")`
+   → Example: Before creating `research_template.md`, check for `*research*` or `*template*`
+   → If related files found:
+      - Review their content to understand overlap
+      - Decide: consolidate, extend existing, or create new with clear distinction
+      - Document decision in implementation plan
+   → **Why**: Prevents duplication (e.g., creating `research_template.md` when `research_plan_template.md` exists)
+
 11. AFTER user approval: Execute code changes following plan
 12. record_outcome(session_id="...", outcome="...")
 ```
@@ -127,7 +137,7 @@ After synthesize_hypotheses() creates hybrid node:
 |----------|-------------|---------------|
 | [implementation_plan_template.md](file:///.agent/templates/implementation_plan_template.md) | Single-phase work | Nudges, dual-plan section, constraint footer |
 | [roadmap_template.md](file:///.agent/templates/roadmap_template.md) | Multi-phase work | Per-phase guidance, mermaid examples |
-| [research_plan_template.md](file:///.agent/templates/research_plan_template.md) | Research mode sessions | Findings-based structure, source attribution |
+| [research_template.md](file:///.agent/templates/research_template.md) | Research mode sessions | Architecture, gaps, findings, priority matrix |
 
 ### Template Features
 - **Agent Context Header**: Role, constraints, mode reminder
