@@ -293,3 +293,145 @@ def format_lsp_impact_for_plan(impact: dict) -> str:
         lines.append("**Callers outside scope**: None discovered")
     
     return "\n".join(lines)
+
+
+# =============================================================================
+# Phase 9: LSP Session Tracking
+# =============================================================================
+
+
+def log_lsp_lookup(
+    session_id: str,
+    symbol_name: str,
+    lookup_type: str,  # 'find_references' or 'call_hierarchy'
+    result_count: int,
+    conn=None
+) -> bool:
+    """
+    Record LSP lookup in session context for tracking.
+    
+    Args:
+        session_id: The reasoning session UUID
+        symbol_name: Symbol that was looked up
+        lookup_type: Type of lookup performed
+        result_count: Number of results found
+        conn: Optional existing connection
+        
+    Returns:
+        True if logged successfully
+    """
+    from pas.utils import get_db_connection
+    import json
+    
+    should_close = conn is None
+    if conn is None:
+        conn = get_db_connection()
+    
+    try:
+        cur = conn.cursor()
+        
+        # Get current context
+        cur.execute(
+            "SELECT context FROM reasoning_sessions WHERE id = %s",
+            (session_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return False
+        
+        context = row["context"] or {}
+        
+        # Initialize lsp_lookups list if needed
+        if "lsp_lookups" not in context:
+            context["lsp_lookups"] = []
+        
+        # Append lookup record
+        context["lsp_lookups"].append({
+            "symbol": symbol_name,
+            "type": lookup_type,
+            "count": result_count
+        })
+        
+        # Update session context
+        cur.execute(
+            "UPDATE reasoning_sessions SET context = %s WHERE id = %s",
+            (json.dumps(context), session_id)
+        )
+        conn.commit()
+        
+        return True
+        
+    except Exception as e:
+        logger.debug(f"log_lsp_lookup failed: {e}")
+        return False
+    finally:
+        if should_close:
+            conn.close()
+
+
+def get_lsp_summary(session_id: str, conn=None) -> dict:
+    """
+    Get LSP lookup summary for a session.
+    
+    Compares performed lookups against suggested lookups from prepare_expansion.
+    
+    Args:
+        session_id: The reasoning session UUID
+        conn: Optional existing connection
+        
+    Returns:
+        {
+            "performed": [{"symbol": str, "type": str, "count": int}, ...],
+            "suggested": [str, ...],  # From prepare_expansion suggested_lookups
+            "coverage_ratio": float,  # performed/suggested
+            "missing": [str, ...]     # Suggested but not performed
+        }
+    """
+    from pas.utils import get_db_connection
+    
+    should_close = conn is None
+    if conn is None:
+        conn = get_db_connection()
+    
+    try:
+        cur = conn.cursor()
+        
+        cur.execute(
+            "SELECT context FROM reasoning_sessions WHERE id = %s",
+            (session_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return {"performed": [], "suggested": [], "coverage_ratio": 0.0, "missing": []}
+        
+        context = row["context"] or {}
+        
+        performed = context.get("lsp_lookups", [])
+        suggested = context.get("suggested_lsp_lookups", [])
+        
+        # Extract performed symbol names
+        performed_symbols = {p.get("symbol") for p in performed if isinstance(p, dict)}
+        suggested_symbols = set(suggested) if isinstance(suggested, list) else set()
+        
+        # Compute coverage
+        if suggested_symbols:
+            covered = performed_symbols & suggested_symbols
+            coverage_ratio = len(covered) / len(suggested_symbols)
+        else:
+            coverage_ratio = 1.0 if performed_symbols else 0.0
+        
+        missing = list(suggested_symbols - performed_symbols)
+        
+        return {
+            "performed": performed,
+            "suggested": suggested,
+            "coverage_ratio": round(coverage_ratio, 2),
+            "missing": missing
+        }
+        
+    except Exception as e:
+        logger.debug(f"get_lsp_summary failed: {e}")
+        return {"performed": [], "suggested": [], "coverage_ratio": 0.0, "missing": [], "error": str(e)}
+    finally:
+        if should_close:
+            conn.close()

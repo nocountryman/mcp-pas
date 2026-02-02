@@ -416,3 +416,63 @@ def apply_auto_tags(
     except Exception as e:
         logger.warning(f"v34 auto-tagging failed: {e}")
     return None
+
+
+def check_synthesis_critique_warning(
+    cur,
+    session_id: str
+) -> Optional[dict]:
+    """
+    Phase 4: Check if any synthesized (hybrid) nodes exist but lack critiques.
+    
+    Synthesized nodes have synthesized_from populated or metadata->is_hybrid = true.
+    Critiques are stored in metadata->critique.
+    
+    Args:
+        cur: Database cursor
+        session_id: Session UUID
+        
+    Returns:
+        Warning dict if uncritiqued hybrid nodes exist, None otherwise
+    """
+    try:
+        cur.execute(
+            """
+            SELECT id, content, synthesized_from, metadata
+            FROM thought_nodes
+            WHERE session_id = %s
+              AND (
+                  synthesized_from IS NOT NULL 
+                  OR (metadata->>'is_hybrid')::boolean = true
+              )
+            """,
+            (session_id,)
+        )
+        hybrid_nodes = cur.fetchall()
+        
+        if not hybrid_nodes:
+            return None
+        
+        uncritiqued = []
+        for node in hybrid_nodes:
+            metadata = node.get("metadata") or {}
+            if not metadata.get("critique"):
+                uncritiqued.append({
+                    "node_id": str(node["id"]),
+                    "content": node["content"][:100] if node.get("content") else "",
+                    "synthesized_from": [str(s) for s in (node.get("synthesized_from") or [])]
+                })
+        
+        if uncritiqued:
+            return {
+                "warning_type": "UNCRITIQUED_SYNTHESIS",
+                "message": f"⚠️ {len(uncritiqued)} synthesized node(s) were not critiqued before recording outcome",
+                "uncritiqued_nodes": uncritiqued,
+                "suggested_action": f"Next time, call prepare_critique(node_id='...') on hybrid nodes before record_outcome"
+            }
+        
+        return None
+        
+    except Exception as e:
+        logger.warning(f"Phase 4: Synthesis critique check failed: {e}")
+        return None

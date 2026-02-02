@@ -341,7 +341,7 @@ mcp_pas-server_call_hierarchy(symbol_name="record_outcome", direction="incoming"
 **Success Criteria**:
 - [x] `store_expansion` errors if past_failure_warnings present and not acknowledged
 - [x] `finalize_session` errors if top hypothesis has no critique
-- [ ] `record_outcome` warns if synthesized node skipped critique (future)
+- [x] `record_outcome` warns if synthesized node skipped critique (v82 check_synthesis_critique_warning)
 - [x] Escape hatches logged for outcome correlation
 
 **Estimated Effort**: Medium (2)
@@ -349,6 +349,8 @@ mcp_pas-server_call_hierarchy(symbol_name="record_outcome", direction="incoming"
 ---
 
 ### Phase 5: Dual-Plan Output (Balanced vs Aspirational) (v69+)
+
+**Status**: COMPLETED ✅ (Feb 2, 2026)
 
 **Goal**: Two complete plans differing only in effort consideration.
 
@@ -370,11 +372,13 @@ mcp_pas-server_call_hierarchy(symbol_name="record_outcome", direction="incoming"
 **Dependencies**: Phase 2 (ROI scoring), Phase 3 (LSP impact)
 
 **Success Criteria**:
-- [ ] `finalize_session` returns balanced + aspirational recommendations
-- [ ] Agent generates two complete implementation plans
+- [x] `finalize_session` returns balanced + aspirational recommendations (v59 `compute_dual_recommendation`)
+- [x] `_build_plan_template_prompt` accepts `dual_recommendation` parameter (v69)
+- [x] `plan_template_prompt` includes `dual_plan_output` section with instructions when aspirational differs
+- [x] Agent can generate two complete implementation plans from template prompts
 
 **Affected Files**:
-- `src/pas/server.py` - finalize_session selection
+- `src/pas/server.py` - finalize_session selection, _build_plan_template_prompt enhanced
 - `src/pas/helpers/finalize.py` - dual recommendation helper
 
 **Estimated Effort**: Medium (2)

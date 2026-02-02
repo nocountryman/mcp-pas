@@ -325,8 +325,8 @@ def check_critique_gate(
     cur.execute("""
         SELECT COUNT(*) as critique_count
         FROM thought_nodes
-        WHERE node_id = %s
-        AND counterargument IS NOT NULL
+        WHERE id = %s
+        AND metadata ? 'critique'
     """, (top_node_id,))
     result = cur.fetchone()
     critique_count = result['critique_count'] if result else 0

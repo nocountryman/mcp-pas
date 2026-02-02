@@ -259,6 +259,20 @@ from pas.helpers.outcomes import (
     persist_user_traits,
     trigger_auto_refresh,
     apply_auto_tags,
+    check_synthesis_critique_warning,
+)
+
+# Phase 6: Project Governance helpers
+from pas.helpers.governance import (
+    get_or_create_project_vision,
+    get_roadmap_phases,
+    create_roadmap_phase,
+    store_artifact,
+    get_artifact_versions,
+    get_latest_artifact,
+    search_artifacts_by_tag,
+    search_artifacts_semantic,
+    get_governance_hierarchy,
 )
 
 # Shared utilities (singleton embedding model)
@@ -499,12 +513,22 @@ KEYWORD_FAILURE_PATTERNS: dict[str, tuple[str, str]] = {
 }
 
 
-def _build_plan_template_prompt(quality_gate: dict, goal: str) -> dict | None:
+def _build_plan_template_prompt(
+    quality_gate: dict,
+    goal: str,
+    dual_recommendation: dict | None = None
+) -> dict | None:
     """
     v49: Detect whether roadmap or implementation plan template is appropriate.
+    v69: Add dual-plan output section when aspirational differs from balanced.
     
     Keywords like 'roadmap', 'multi-phase', 'architecture', 'phases' suggest
     multi-phase work requiring a roadmap. Otherwise, implementation plan.
+    
+    Args:
+        quality_gate: Quality gate result from finalize
+        goal: Session goal text
+        dual_recommendation: v69 - Dual recommendation with balanced/aspirational
     
     Returns template prompt dict or None if gate not passed.
     """
@@ -514,6 +538,12 @@ def _build_plan_template_prompt(quality_gate: dict, goal: str) -> dict | None:
     goal_lower = goal.lower()
     roadmap_keywords = ["roadmap", "multi-phase", "phases", "architecture", "design system", "restructure"]
     is_roadmap = any(kw in goal_lower for kw in roadmap_keywords)
+    
+    # v69: Check if dual-plan output is needed
+    has_aspirational = (
+        dual_recommendation is not None
+        and dual_recommendation.get("aspirational") is not None
+    )
     
     if is_roadmap:
         return {
@@ -530,21 +560,46 @@ def _build_plan_template_prompt(quality_gate: dict, goal: str) -> dict | None:
             "enforcement": "SOFT - use roadmap for multi-phase work"
         }
     else:
-        return {
+        # Base required sections for implementation plan
+        sections = [
+            "PAS Reasoning Summary (session ID, hypotheses table, scores)",
+            "Key Critiques & How Addressed",
+            "Sequential Gap Analysis Results",
+            "Scope Declaration (files modified/created/deleted)",
+            "Detailed Changes (exact before/after code)",
+            "Verification Plan (copy-paste runnable commands)",
+            "Environment (venv path)",
+            "Pre-submission Checklist"
+        ]
+        
+        result = {
             "template_type": "implementation_plan",
             "template_path": ".agent/templates/implementation_plan_template.md",
-            "required_sections": [
-                "PAS Reasoning Summary (session ID, hypotheses table, scores)",
-                "Key Critiques & How Addressed",
-                "Sequential Gap Analysis Results",
-                "Scope Declaration (files modified/created/deleted)",
-                "Detailed Changes (exact before/after code)",
-                "Verification Plan (copy-paste runnable commands)",
-                "Environment (venv path)",
-                "Pre-submission Checklist"
-            ],
+            "required_sections": sections,
             "enforcement": "SOFT - template shown, agent should follow"
         }
+        
+        # v69: Add dual-plan section when aspirational differs
+        if has_aspirational:
+            balanced = dual_recommendation.get("balanced", {})
+            aspirational = dual_recommendation.get("aspirational", {})
+            result["dual_plan_output"] = {
+                "required": True,
+                "instruction": (
+                    "Generate TWO complete implementation plans:\n"
+                    f"1. **Balanced Plan** (node {balanced.get('node_id', 'N/A')[:8]}...): "
+                    f"Best ROI - {balanced.get('content', '')[:100]}...\n"
+                    f"2. **Aspirational Plan** (node {aspirational.get('node_id', 'N/A')[:8]}...): "
+                    f"Highest benefit - {aspirational.get('content', '')[:100]}...\n\n"
+                    "Include a **Comparison Section** highlighting:\n"
+                    "- Scope differences between plans\n"
+                    "- Effort/benefit tradeoffs\n"
+                    "- Recommendation for which to use based on constraints"
+                ),
+                "note": dual_recommendation.get("aspirational_note", "Consider aspirational if effort is unconstrained")
+            }
+        
+        return result
 
 
 
@@ -3235,13 +3290,16 @@ async def finalize_session(
         winning_scope = recommendation.get("declared_scope", "")
         implementation_checklist = build_implementation_checklist(winning_scope)
         
+        # Phase 9: LSP session tracking import
+        from pas.helpers.lsp_enrichment import get_lsp_summary
+        
         # =====================================================================
         # Phase 3: LSP Impact Analysis - Gather blast radius for winning scope
         # =====================================================================
         lsp_impact_result = None
         if winning_scope:
             try:
-                from pas.helpers.lsp_enrichment import get_lsp_impact_from_scope
+                from pas.helpers.lsp_enrichment import get_lsp_impact_from_scope, get_lsp_summary
                 from pas.lsp.lsp_pool import LspPool
                 
                 # Get project root from session context if available
@@ -3432,17 +3490,19 @@ async def finalize_session(
             # v48: Parallel critique window
             "pending_critiques": pending_critiques if pending_critiques else None,
             "explore_alternatives_prompt": explore_alternatives_prompt,
-            # v49: Plan template prompt (when gate passes)
-            # Detects multi-phase work by keywords in goal
+            # v82: Dual recommendation - compute first for use in plan_template_prompt
+            "dual_recommendation": (dual_rec := compute_dual_recommendation(processed, recommendation)),
+            # v49/v69: Plan template prompt (when gate passes)
+            # Detects multi-phase work by keywords in goal, adds dual-plan section if aspirational differs
             "plan_template_prompt": _build_plan_template_prompt(
-                quality_gate, session.get("goal", "")
+                quality_gate, session.get("goal", ""), dual_rec
             ) if quality_gate["passed"] else None,
             # v51: Effort-Benefit ROI analysis
             "roi_analysis": build_roi_analysis(processed, recommendation),
-            # v82: Dual recommendation - show aspirational alternative when no_mvp preferred
-            "dual_recommendation": compute_dual_recommendation(processed, recommendation),
             # Phase 3: LSP blast radius analysis for implementation plan
             "lsp_impact": lsp_impact_result,
+            # Phase 9: LSP session tracking summary
+            "lsp_summary": get_lsp_summary(session_id, conn) if session_id else None,
             # Phase 8: Mode-aware session info
             "session_mode": session_mode,
             "mode_label": mode_config["finalize_label"],  # "recommendation" or "synthesis"
@@ -5500,6 +5560,9 @@ async def record_outcome(
         # Helper 8: v34 - Auto-apply tags (post-commit)
         auto_tagged = apply_auto_tags(cur, conn, session_id, outcome)
         
+        # Phase 4: Check if synthesis was skipped in critique flow
+        synthesis_warning = check_synthesis_critique_warning(cur, session_id)
+        
         return {
             "success": True,
             "session_id": session_id,
@@ -5513,10 +5576,12 @@ async def record_outcome(
             "auto_refresh_triggered": auto_refresh_result is not None,
             "auto_refresh_result": auto_refresh_result,
             "auto_tagged": auto_tagged,  # v34
+            "synthesis_warning": synthesis_warning,  # Phase 4
             "message": f"Outcome recorded. {stats['node_count'] or 0} nodes in winning path." + 
                       (" Session auto-completed." if session_completed else "") +
                       (f" Auto-refreshed {auto_refresh_result.get('laws_updated', 0)} law weights." if auto_refresh_result else "") +
-                      (f" Auto-tagged: {auto_tagged}" if auto_tagged else "")
+                      (f" Auto-tagged: {auto_tagged}" if auto_tagged else "") +
+                      (f" {synthesis_warning['message']}" if synthesis_warning else "")
         }
         
     except Exception as e:
@@ -7068,7 +7133,8 @@ async def query_codebase(
 async def find_references(
     project_id: str,
     symbol_name: str,
-    include_definitions: bool = False
+    include_definitions: bool = False,
+    session_id: str = None
 ) -> dict[str, Any]:
     """
     Find all references to a symbol in the codebase.
@@ -7212,6 +7278,11 @@ async def find_references(
     finally:
         safe_close_connection(conn)
     
+    # Phase 9: Log lookup to session context if session_id provided
+    if session_id:
+        from pas.helpers.lsp_enrichment import log_lsp_lookup
+        log_lsp_lookup(session_id, symbol_name, "find_references", len(references))
+    
     if not references:
         return {
             "success": True, "project_id": project_id, "symbol_name": symbol_name,
@@ -7284,7 +7355,8 @@ async def call_hierarchy(
     project_id: str,
     symbol_name: str,
     direction: str = "incoming",
-    max_depth: int = 3
+    max_depth: int = 3,
+    session_id: str = None
 ) -> dict[str, Any]:
     """
     Build call hierarchy for a symbol.
@@ -7338,6 +7410,11 @@ async def call_hierarchy(
         hierarchy = [{"caller": {"file": r['source_file'], "line": r['source_line'], "symbol": r['source_symbol']},
                       "callee": {"file": r['target_file'], "line": r['target_line'], "symbol": r['target_symbol']}} 
                      for r in rows]
+        
+        # Phase 9: Log lookup to session context if session_id provided
+        if session_id:
+            from pas.helpers.lsp_enrichment import log_lsp_lookup
+            log_lsp_lookup(session_id, symbol_name, "call_hierarchy", len(hierarchy))
         
         return {"success": True, "project_id": project_id, "symbol_name": symbol_name,
                 "direction": direction, "hierarchy": hierarchy, "count": len(hierarchy)}
@@ -7497,6 +7574,202 @@ async def validate_plan(
     finally:
         if 'conn' in locals():
             safe_close_connection(conn)
+
+
+# =============================================================================
+# Phase 6: Project Governance Tools
+# =============================================================================
+
+
+@mcp.tool()
+async def get_project_governance(
+    project_id: str
+) -> dict[str, Any]:
+    """
+    Get full governance hierarchy for a project.
+    
+    Returns vision, roadmap phases, and their artifacts.
+    
+    Args:
+        project_id: Project identifier
+        
+    Returns:
+        Nested hierarchy: vision -> phases -> artifacts
+    """
+    try:
+        hierarchy = get_governance_hierarchy(project_id)
+        return {
+            "success": True,
+            **hierarchy
+        }
+    except Exception as e:
+        logger.error(f"get_project_governance failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def store_governance_artifact(
+    project_id: str,
+    name: str,
+    content: str,
+    artifact_type: str = "implementation_plan",
+    session_id: str | None = None,
+    roadmap_phase_id: str | None = None,
+    source_verbatim_log_id: str | None = None,
+    tags: str | None = None
+) -> dict[str, Any]:
+    """
+    Store a versioned artifact with governance linkage.
+    
+    Args:
+        project_id: Project identifier
+        name: Artifact name (used for versioning - same name = new version)
+        content: Full artifact content
+        artifact_type: roadmap, implementation_plan, walkthrough, vision, other
+        session_id: Optional PAS session that generated this
+        roadmap_phase_id: Optional link to roadmap phase
+        source_verbatim_log_id: Optional link to verbatim prompt in conversation_log
+        tags: Comma-separated tags (e.g., "feature,backend,v71")
+        
+    Returns:
+        Created artifact with version number
+    """
+    try:
+        tag_list = [t.strip() for t in tags.split(",")] if tags else []
+        
+        result = store_artifact(
+            project_id=project_id,
+            name=name,
+            content=content,
+            artifact_type=artifact_type,
+            session_id=session_id,
+            roadmap_phase_id=roadmap_phase_id,
+            source_verbatim_log_id=source_verbatim_log_id,
+            tags=tag_list
+        )
+        
+        return {
+            "success": True,
+            **result,
+            "message": f"Artifact '{name}' v{result['version']} stored"
+        }
+    except Exception as e:
+        logger.error(f"store_governance_artifact failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def list_artifact_versions(
+    project_id: str,
+    name: str
+) -> dict[str, Any]:
+    """
+    Get version history for an artifact.
+    
+    Args:
+        project_id: Project identifier
+        name: Artifact name
+        
+    Returns:
+        List of versions (newest first)
+    """
+    try:
+        versions = get_artifact_versions(project_id, name)
+        return {
+            "success": True,
+            "project_id": project_id,
+            "name": name,
+            "versions": versions,
+            "version_count": len(versions)
+        }
+    except Exception as e:
+        logger.error(f"list_artifact_versions failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def search_artifacts(
+    project_id: str,
+    query: str | None = None,
+    tags: str | None = None,
+    limit: int = 10
+) -> dict[str, Any]:
+    """
+    Search artifacts by semantic query or tags.
+    
+    Args:
+        project_id: Project identifier
+        query: Natural language query (semantic search)
+        tags: Comma-separated tags to filter by (tag overlap search)
+        limit: Maximum results
+        
+    Returns:
+        Matching artifacts
+    """
+    try:
+        results = []
+        search_type = None
+        
+        if query:
+            results = search_artifacts_semantic(project_id, query, limit)
+            search_type = "semantic"
+        elif tags:
+            tag_list = [t.strip() for t in tags.split(",")]
+            results = search_artifacts_by_tag(project_id, tag_list, limit)
+            search_type = "tags"
+        else:
+            return {"success": False, "error": "Either query or tags required"}
+        
+        return {
+            "success": True,
+            "project_id": project_id,
+            "search_type": search_type,
+            "results": results,
+            "count": len(results)
+        }
+    except Exception as e:
+        logger.error(f"search_artifacts failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def create_governance_phase(
+    project_id: str,
+    phase_name: str,
+    description: str | None = None,
+    status: str = "planned"
+) -> dict[str, Any]:
+    """
+    Create a new roadmap phase for a project.
+    
+    Args:
+        project_id: Project identifier
+        phase_name: Name of the phase
+        description: Phase description
+        status: planned, active, complete, blocked
+        
+    Returns:
+        Created phase with sequence number
+    """
+    try:
+        # Ensure vision exists
+        get_or_create_project_vision(project_id)
+        
+        phase = create_roadmap_phase(
+            project_id=project_id,
+            phase_name=phase_name,
+            description=description,
+            status=status
+        )
+        
+        return {
+            "success": True,
+            **phase,
+            "message": f"Phase '{phase_name}' created at sequence {phase['sequence']}"
+        }
+    except Exception as e:
+        logger.error(f"create_governance_phase failed: {e}")
+        return {"success": False, "error": str(e)}
 
 
 # =============================================================================

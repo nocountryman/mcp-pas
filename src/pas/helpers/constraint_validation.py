@@ -195,3 +195,92 @@ def get_constraint_summary(project_id: str) -> dict[str, Any]:
         "constraint_prompt": constraint_prompt,
         "blocking_count": sum(1 for c in visible_constraints if c["enforcement"] == "block")
     }
+
+
+def validate_lsp_section(plan_text: str) -> dict[str, Any]:
+    """
+    Validate that implementation plan has proper LSP Impact Analysis section.
+    
+    Phase 9: LSP Enforcement in Planning
+    
+    Checks for:
+    - Section heading exists
+    - Either has symbol content OR explicit skip reasoning
+    
+    Args:
+        plan_text: Full implementation plan text
+        
+    Returns:
+        {
+            "passed": bool,
+            "has_section": bool,
+            "has_content": bool,
+            "has_skip_reasoning": bool,
+            "message": str
+        }
+    """
+    # Check for LSP section heading
+    lsp_pattern = r"##\s*LSP\s*Impact\s*Analysis"
+    has_section = bool(re.search(lsp_pattern, plan_text, re.IGNORECASE))
+    
+    if not has_section:
+        return {
+            "passed": False,
+            "has_section": False,
+            "has_content": False,
+            "has_skip_reasoning": False,
+            "message": "Missing '## LSP Impact Analysis' section"
+        }
+    
+    # Extract section content (from heading to next ## or end)
+    section_match = re.search(
+        r"##\s*LSP\s*Impact\s*Analysis.*?(?=\n##|\Z)",
+        plan_text,
+        re.IGNORECASE | re.DOTALL
+    )
+    
+    if not section_match:
+        return {
+            "passed": False,
+            "has_section": True,
+            "has_content": False,
+            "has_skip_reasoning": False,
+            "message": "LSP section found but empty"
+        }
+    
+    section_content = section_match.group(0)
+    
+    # Check for symbol content (tables with backticks, function names)
+    has_symbols = bool(re.search(r"`[a-zA-Z_][a-zA-Z0-9_]*`", section_content))
+    has_table = bool(re.search(r"\|.*\|.*\|", section_content))
+    has_content = has_symbols or has_table
+    
+    # Check for skip reasoning
+    skip_patterns = [
+        r"skip\s*reason",
+        r"not\s*(needed|required|applicable)",
+        r"N/?A",
+        r"no\s*LSP\s*(analysis\s*)?(needed|required)",
+        r"trivial\s*(change|fix)",
+        r"single\s*file"
+    ]
+    has_skip_reasoning = any(
+        re.search(p, section_content, re.IGNORECASE) 
+        for p in skip_patterns
+    )
+    
+    passed = has_content or has_skip_reasoning
+    
+    if passed:
+        message = "LSP section valid"
+    else:
+        message = "LSP section missing content. Add symbols OR skip reasoning."
+    
+    return {
+        "passed": passed,
+        "has_section": True,
+        "has_content": has_content,
+        "has_skip_reasoning": has_skip_reasoning,
+        "message": message
+    }
+
