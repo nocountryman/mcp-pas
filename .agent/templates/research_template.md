@@ -2,38 +2,33 @@
 
 <!--
 === AGENT CONTEXT ===
-Role: Research Agent
-Project: [Fill from context]
-Mode: research (PAS unconstrained mode)
+Role: Research & Exploration Agent
+Project: [Fill from PAS session project_id]
+Mode: research
 -->
 
-> **🎯 Your Role**: Conduct comprehensive research on a topic/feature before implementation planning.
+> **🎯 Your Role**: Explore and understand, not solve. Document findings for future implementation.
 > 
-> **📋 When to Use This Template**:
-> - Complex features requiring deep understanding
-> - Multi-phase work needing architecture analysis
-> - New technology/pattern evaluation
-> - Debugging systemic issues
+> **📋 Research Mode Mindset**:
+> - State what you're trying to UNDERSTAND, not SOLVE
+> - Exploration is valid - not every research leads to action
+> - Document dead ends - they prevent future rework
 > 
 > **⚠️ Section Optionality**: Mark sections as `N/A` with reasoning if not applicable.
 
 ---
 
-## 1. Problem Statement & Context
+## 1. Research Objective
 
-> **Purpose**: Define what we're researching and why.
+> [!TIP] **Research vs Implementation**
+> Research answers "What/How/Why?" not "Do this."
+> If you know the solution, use implementation_plan_template instead.
 
-### Research Goal
+**Question**: [What are we trying to understand?]
 
-[What are we trying to understand or solve?]
+**Scope**: [Boundaries of the research]
 
-### Background Context
-
-[Why is this research needed? What prompted it?]
-
-### Success Criteria
-
-[How will we know the research is complete?]
+**Success Criteria**: [How do we know research is complete?]
 
 - [ ] Architecture understood
 - [ ] Gaps identified with evidence
@@ -45,6 +40,8 @@ Mode: research (PAS unconstrained mode)
 ## 2. Current System Architecture
 
 > **Purpose**: Document what exists before proposing changes.
+> 
+> **Mark N/A**: If researching new technology with no existing code.
 
 ### Architecture Diagram
 
@@ -67,17 +64,21 @@ graph TB
 |-----------|---------|---------|--------------|
 | [Name] | [path] | [what it does] | [what it uses] |
 
-### Data Flow
-
-[How does data move through the system?]
-
 ---
 
-## 3. Deep Code Review
+## 3. Information Sources & Code Review
 
-> **Purpose**: Understand existing implementation details.
-> 
-> **Mark N/A**: If researching new technology with no existing code.
+> [!IMPORTANT] **Source Attribution**
+> Every finding must link to a source.
+> Mark assumptions: "⚠️ Assumed: [statement]"
+
+### Sources Consulted
+
+| Source | Type | Reliability |
+|--------|------|-------------|
+| [Doc/File/URL] | Documentation | High/Medium/Low |
+| [Codebase: file.py] | Code Analysis | High |
+| [Conversation: id] | Prior Work | Medium |
 
 ### Files Analyzed
 
@@ -85,19 +86,34 @@ graph TB
 |------|-----------|------------------|
 | [path] | `func1`, `func2` | [what you learned] |
 
-### Implementation Patterns
+---
 
-[What patterns does the existing code follow?]
+## 4. Findings
 
-### Code Quality Observations
+> [!TIP] **Finding Format**
+> - One finding per subsection
+> - Link to source
+> - Flag contradictions between sources
 
-- **Strengths**: [What's done well]
-- **Concerns**: [Technical debt, complexity]
-- **Test Coverage**: [Are there tests? Quality?]
+### Finding 1: [Title]
+
+**Source**: [Link or reference]
+
+**Summary**: [What was learned]
+
+**Implications**: [How this affects the research question]
 
 ---
 
-## 4. Gap Identification
+### Finding 2: [Title]
+
+**Source**: [Link or reference]
+
+**Summary**: [What was learned]
+
+---
+
+## 5. Gap Identification
 
 > **Purpose**: Document what's missing or needs improvement.
 > 
@@ -110,43 +126,32 @@ graph TB
 | G1 | [What's missing] | [How you know] | High/Medium/Low |
 | G2 | [What's missing] | [How you know] | High/Medium/Low |
 
-### Root Cause Analysis
+### Limitations & Uncertainty
 
-[Why do these gaps exist?]
+> [!WARNING] **What's Missing?**
+> - What couldn't be answered?
+> - What assumptions remain unverified?
+> - What would change the conclusions?
 
-### Blast Radius
-
-[What would be affected by addressing these gaps?]
-
----
-
-## 5. External Research
-
-> **Purpose**: Incorporate knowledge beyond the codebase.
-> 
-> **Mark N/A**: If pure internal code analysis.
-
-### Sources Consulted
-
-| Source | Type | Key Findings |
-|--------|------|--------------|
-| [URL/Paper] | Docs/Paper/Tool | [What you learned] |
-
-### Industry Patterns
-
-[What do others do in similar situations?]
-
-### Relevant Technologies
-
-| Technology | Fit | Pros | Cons |
-|------------|-----|------|------|
-| [Name] | Good/Partial/Poor | [Benefits] | [Drawbacks] |
+| Gap | Impact | Follow-up Needed? |
+|-----|--------|-------------------|
+| [What's missing] | [How it affects conclusions] | Yes/No |
 
 ---
 
-## 6. Recommendations with Priority Matrix
+## 6. Synthesis & Recommendations
 
-> **Purpose**: Actionable next steps with prioritization.
+> [!IMPORTANT] **Answer the Question**
+> Connect findings to directly answer the research question.
+> Acknowledge uncertainty and gaps.
+
+### Answer to Research Question
+
+[Synthesized understanding based on findings]
+
+**Confidence**: High/Medium/Low
+
+**Reasoning**: [Why this confidence level]
 
 ### Priority Taxonomy
 
@@ -164,40 +169,43 @@ graph TB
 | P0 | [Recommendation 1] | G1 | Low/Med/High | [Context] |
 | P1 | [Recommendation 2] | G2 | Low/Med/High | [Context] |
 
-### Implementation Phases
+---
 
-```mermaid
-graph LR
-    subgraph P0[P0: Critical]
-        R1[Recommendation 1]
-    end
-    
-    subgraph P1[P1: High Leverage]
-        R2[Recommendation 2]
-    end
-    
-    R1 --> R2
-```
+## 7. Next Steps
 
-### Next Steps
+> [!TIP] **Research → Action**
+> - If research complete: Create implementation_plan.md
+> - If gaps remain: Define follow-up research
+> - If dead end: Document why and close
 
-1. [ ] [Immediate action]
-2. [ ] [Follow-up action]
-3. [ ] [Future consideration]
+- [ ] [Action 1]
+- [ ] [Action 2]
+
+---
+
+## Pre-Submission Checklist
+
+> **Research Quality Checks**:
+> - Findings linked to sources (not just opinions)
+> - Contradictions flagged and resolved
+> - Confidence level justified
+> - Gaps acknowledged
+
+- [ ] Research question clearly stated
+- [ ] Architecture documented (or marked N/A)
+- [ ] All findings linked to sources
+- [ ] Gaps and limitations acknowledged
+- [ ] Synthesis answers the research question
+- [ ] Confidence level stated with reasoning
+- [ ] Recommendations prioritized (P0-P3)
+- [ ] Next steps defined
 
 ---
 
 ## Appendix
 
-### Glossary
-
-| Term | Definition |
-|------|------------|
-| [Term] | [Definition] |
-
 ### Related Artifacts
 
-- [Link to related research]
 - [Link to related implementation plan]
 - [Link to roadmap phase]
 
@@ -206,3 +214,8 @@ graph LR
 **PAS Session**: `[uuid if applicable]`
 **Conversation ID**: `[uuid]`
 **Date**: [YYYY-MM-DD]
+
+---
+
+> **📋 Mode Reminder**: Research mode explores possibilities.
+> Implementation mode executes solutions. Don't mix them.
