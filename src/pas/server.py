@@ -5602,7 +5602,7 @@ async def create_handoff(
     session_id: str,
     summary: str,
     next_task: Optional[str] = None,
-    context: Optional[str] = None,
+    context: Optional[str | dict] = None,
     linked_artifacts: Optional[str] = None,
     linked_sessions: Optional[str] = None
 ) -> dict[str, Any]:
@@ -5628,7 +5628,13 @@ async def create_handoff(
     conn = get_db_connection()
     try:
         # Parse optional JSON/list parameters
-        context_dict = json.loads(context) if context else None
+        # Handle context as either JSON string or dict (MCP may pass either)
+        if context is None:
+            context_dict = None
+        elif isinstance(context, dict):
+            context_dict = context
+        else:
+            context_dict = json.loads(context)
         artifacts_list = [a.strip() for a in linked_artifacts.split(",")] if linked_artifacts else None
         sessions_list = [s.strip() for s in linked_sessions.split(",")] if linked_sessions else None
         
