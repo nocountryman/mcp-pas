@@ -774,7 +774,9 @@ mcp_pas-server_start_reasoning_session(
 
 ### Phase 9: LSP Enforcement in Planning (v75+)
 
-**Status**: 🔲 PLANNED
+**Status**: ✅ COMPLETED (Feb 2, 2026)
+
+**PAS Session**: `ef050e41-6279-4675-8e87-3b3abbae0150` (score: 0.95)
 
 **Goal**: Ensure LSP lookups (find_references, call_hierarchy) are performed during planning and their results appear in implementation plans - either as findings or explicit skip reasoning.
 
@@ -860,7 +862,11 @@ Only trigger enforcement when:
 
 ### Phase 10: Research Template Standardization (v77+)
 
-**Status**: 🔲 PLANNED
+**Status**: ✅ COMPLETED (Feb 2, 2026)
+
+**PAS Session**: `5a4d35ad-8df1-4034-bf4e-a4f98512799b`
+
+**Deliverable**: `.agent/templates/research_template.md`
 
 **Goal**: Create a standardized research template for complex feature planning.
 
