@@ -24,16 +24,14 @@ def create_handoff_record(
     # Validate session exists
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, project_id FROM reasoning_sessions WHERE id = %s",
+        "SELECT id FROM reasoning_sessions WHERE id = %s",
         (session_id,)
     )
     session = cur.fetchone()
     if not session:
         return {"success": False, "error": f"Session {session_id} not found"}
     
-    # Use session's project_id if not provided
-    if not project_id:
-        project_id = session.get("project_id") if hasattr(session, 'get') else session[1]
+    # project_id must be provided explicitly (reasoning_sessions doesn't store it)
     
     # Generate embedding for semantic search
     summary_embedding = get_embedding(summary)
@@ -61,8 +59,8 @@ def create_handoff_record(
     
     return {
         "success": True,
-        "handoff_id": str(result[0]),
-        "created_at": result[1].isoformat(),
+        "handoff_id": str(result["id"]),
+        "created_at": result["created_at"].isoformat(),
         "project_id": project_id
     }
 
@@ -97,13 +95,13 @@ def list_active_handoffs(
     rows = cur.fetchall()
     return [
         {
-            "handoff_id": str(row[0]),
-            "session_id": str(row[1]) if row[1] else None,
-            "project_id": row[2],
-            "summary": row[3][:200] + "..." if len(row[3]) > 200 else row[3],
-            "next_task": row[4],
-            "linked_artifacts": row[5],
-            "created_at": row[6].isoformat()
+            "handoff_id": str(row["id"]),
+            "session_id": str(row["session_id"]) if row["session_id"] else None,
+            "project_id": row["project_id"],
+            "summary": row["summary"][:200] + "..." if len(row["summary"]) > 200 else row["summary"],
+            "next_task": row["next_task"],
+            "linked_artifacts": row["linked_artifacts"],
+            "created_at": row["created_at"].isoformat()
         }
         for row in rows
     ]
@@ -144,16 +142,16 @@ def search_handoffs(
     rows = cur.fetchall()
     return [
         {
-            "handoff_id": str(row[0]),
-            "session_id": str(row[1]) if row[1] else None,
-            "project_id": row[2],
-            "summary": row[3],
-            "next_task": row[4],
-            "linked_artifacts": row[5],
-            "context": row[6],
-            "created_at": row[7].isoformat(),
-            "status": row[8],
-            "similarity": round(row[9], 4)
+            "handoff_id": str(row["id"]),
+            "session_id": str(row["session_id"]) if row["session_id"] else None,
+            "project_id": row["project_id"],
+            "summary": row["summary"],
+            "next_task": row["next_task"],
+            "linked_artifacts": row["linked_artifacts"],
+            "context": row["context"],
+            "created_at": row["created_at"].isoformat(),
+            "status": row["status"],
+            "similarity": round(row["similarity"], 4)
         }
         for row in rows
     ]
@@ -175,17 +173,17 @@ def get_handoff_by_id(conn, handoff_id: str) -> Optional[dict]:
         return None
     
     return {
-        "handoff_id": str(row[0]),
-        "session_id": str(row[1]) if row[1] else None,
-        "project_id": row[2],
-        "summary": row[3],
-        "next_task": row[4],
-        "linked_artifacts": row[5],
-        "linked_sessions": [str(s) for s in row[6]] if row[6] else [],
-        "context": row[7],
-        "created_at": row[8].isoformat(),
-        "status": row[9],
-        "processed_at": row[10].isoformat() if row[10] else None
+        "handoff_id": str(row["id"]),
+        "session_id": str(row["session_id"]) if row["session_id"] else None,
+        "project_id": row["project_id"],
+        "summary": row["summary"],
+        "next_task": row["next_task"],
+        "linked_artifacts": row["linked_artifacts"],
+        "linked_sessions": [str(s) for s in row["linked_sessions"]] if row["linked_sessions"] else [],
+        "context": row["context"],
+        "created_at": row["created_at"].isoformat(),
+        "status": row["status"],
+        "processed_at": row["processed_at"].isoformat() if row["processed_at"] else None
     }
 
 
@@ -206,7 +204,7 @@ def mark_handoff_processed(conn, handoff_id: str) -> dict:
     conn.commit()
     return {
         "success": True,
-        "handoff_id": str(result[0]),
-        "status": result[1],
-        "processed_at": result[2].isoformat()
+        "handoff_id": str(result["id"]),
+        "status": result["status"],
+        "processed_at": result["processed_at"].isoformat()
     }

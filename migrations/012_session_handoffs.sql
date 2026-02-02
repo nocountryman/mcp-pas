@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS session_handoffs (
     session_id UUID REFERENCES reasoning_sessions(id) ON DELETE SET NULL,
     project_id TEXT,
     summary TEXT NOT NULL,
-    summary_embedding vector(1536),
+    summary_embedding vector(768),
     next_task TEXT,
     context JSONB DEFAULT '{}',
     linked_artifacts TEXT[] DEFAULT '{}',
