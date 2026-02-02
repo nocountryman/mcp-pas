@@ -2,6 +2,12 @@
 Session Handoff Helpers - Phase 12
 
 Functions for creating, retrieving, and managing session handoffs.
+
+Modes:
+- new: Create new handoff, archive any existing active ones for same session
+- update: Update most recent active handoff for session (upsert)
+- list: List active handoffs
+- restore: Get handoff by ID, auto-mark processed if different session
 """
 
 from typing import Any, Optional
@@ -18,7 +24,7 @@ def create_handoff_record(
     linked_artifacts: Optional[list] = None,
     linked_sessions: Optional[list] = None
 ) -> dict[str, Any]:
-    """Create a new handoff record with embedded summary."""
+    """Create a new handoff record, archiving any existing active ones for this session."""
     from pas.utils import get_embedding
     
     # Validate session exists
@@ -31,12 +37,20 @@ def create_handoff_record(
     if not session:
         return {"success": False, "error": f"Session {session_id} not found"}
     
-    # project_id must be provided explicitly (reasoning_sessions doesn't store it)
+    # Archive any existing active handoffs for this session
+    cur.execute("""
+        UPDATE session_handoffs
+        SET status = 'archived'
+        WHERE session_id = %s AND status = 'active'
+        RETURNING id
+    """, (session_id,))
+    archived = cur.fetchall()
+    archived_count = len(archived)
     
     # Generate embedding for semantic search
     summary_embedding = get_embedding(summary)
     
-    # Insert handoff record
+    # Insert new handoff record
     cur.execute("""
         INSERT INTO session_handoffs 
         (session_id, project_id, summary, summary_embedding, next_task, 
@@ -61,14 +75,104 @@ def create_handoff_record(
         "success": True,
         "handoff_id": str(result["id"]),
         "created_at": result["created_at"].isoformat(),
-        "project_id": project_id
+        "project_id": project_id,
+        "archived_previous": archived_count
+    }
+
+
+def update_handoff_record(
+    conn,
+    session_id: str,
+    summary: Optional[str] = None,
+    project_id: Optional[str] = None,
+    next_task: Optional[str] = None,
+    context: Optional[dict] = None,
+    linked_artifacts: Optional[list] = None,
+    linked_sessions: Optional[list] = None
+) -> dict[str, Any]:
+    """Update the most recent active handoff for this session (upsert behavior)."""
+    from pas.utils import get_embedding
+    
+    cur = conn.cursor()
+    
+    # Find most recent active handoff for this session
+    cur.execute("""
+        SELECT id, summary, project_id, next_task, context, 
+               linked_artifacts, linked_sessions
+        FROM session_handoffs
+        WHERE session_id = %s AND status = 'active'
+        ORDER BY created_at DESC
+        LIMIT 1
+    """, (session_id,))
+    
+    existing = cur.fetchone()
+    
+    if not existing:
+        # No existing handoff - create new one (requires summary)
+        if not summary:
+            return {"success": False, "error": "No active handoff for this session. Use 'new' mode with summary."}
+        return create_handoff_record(
+            conn, session_id, summary, project_id, next_task, 
+            context, linked_artifacts, linked_sessions
+        )
+    
+    # Build update fields (only update what's provided)
+    updates = []
+    params = []
+    
+    if summary is not None:
+        updates.append("summary = %s")
+        params.append(summary)
+        updates.append("summary_embedding = %s")
+        params.append(get_embedding(summary))
+    
+    if project_id is not None:
+        updates.append("project_id = %s")
+        params.append(project_id)
+    
+    if next_task is not None:
+        updates.append("next_task = %s")
+        params.append(next_task)
+    
+    if context is not None:
+        updates.append("context = %s")
+        params.append(json.dumps(context))
+    
+    if linked_artifacts is not None:
+        updates.append("linked_artifacts = %s")
+        params.append(linked_artifacts)
+    
+    if linked_sessions is not None:
+        updates.append("linked_sessions = %s")
+        params.append(linked_sessions)
+    
+    if not updates:
+        return {"success": False, "error": "No fields to update"}
+    
+    # Execute update
+    params.append(existing["id"])
+    cur.execute(f"""
+        UPDATE session_handoffs
+        SET {", ".join(updates)}
+        WHERE id = %s
+        RETURNING id, created_at
+    """, tuple(params))
+    
+    result = cur.fetchone()
+    conn.commit()
+    
+    return {
+        "success": True,
+        "handoff_id": str(result["id"]),
+        "updated_at": result["created_at"].isoformat(),
+        "mode": "updated"
     }
 
 
 def list_active_handoffs(
     conn,
     project_id: Optional[str] = None,
-    limit: int = 5
+    limit: int = 10
 ) -> list[dict]:
     """List active (unprocessed) handoffs, optionally filtered by project."""
     cur = conn.cursor()
@@ -184,6 +288,35 @@ def get_handoff_by_id(conn, handoff_id: str) -> Optional[dict]:
         "created_at": row["created_at"].isoformat(),
         "status": row["status"],
         "processed_at": row["processed_at"].isoformat() if row["processed_at"] else None
+    }
+
+
+def restore_handoff(
+    conn, 
+    handoff_id: str, 
+    current_session_id: Optional[str] = None
+) -> dict[str, Any]:
+    """
+    Restore a handoff. If current_session_id differs from handoff's session,
+    auto-mark as processed (consumed).
+    """
+    handoff = get_handoff_by_id(conn, handoff_id)
+    if not handoff:
+        return {"success": False, "error": f"Handoff {handoff_id} not found"}
+    
+    # Check if we should auto-mark as processed
+    auto_processed = False
+    if current_session_id and handoff["session_id"] != current_session_id:
+        if handoff["status"] == "active":
+            mark_handoff_processed(conn, handoff_id)
+            handoff["status"] = "processed"
+            auto_processed = True
+    
+    return {
+        "success": True,
+        "handoff": handoff,
+        "auto_processed": auto_processed,
+        "message": "Handoff restored and marked as processed" if auto_processed else "Handoff restored"
     }
 
 

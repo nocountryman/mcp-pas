@@ -5649,13 +5649,73 @@ async def create_handoff(
         )
         
         if result["success"]:
-            result["message"] = f"Handoff created. Use onboard_session(handoff_id='{result['handoff_id']}') to restore context."
+            msg = f"Handoff created. Use onboard_session(handoff_id='{result['handoff_id']}') to restore context."
+            if result.get("archived_previous", 0) > 0:
+                msg += f" Archived {result['archived_previous']} previous handoff(s)."
+            result["message"] = msg
         
         return result
     except json.JSONDecodeError as e:
         return {"success": False, "error": f"Invalid JSON in context parameter: {e}"}
     except Exception as e:
         logger.error(f"create_handoff failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        safe_close_connection(conn)
+
+
+@mcp.tool()
+async def update_handoff(
+    session_id: str,
+    summary: Optional[str] = None,
+    next_task: Optional[str] = None,
+    context: Optional[str | dict] = None,
+    linked_artifacts: Optional[str] = None
+) -> dict[str, Any]:
+    """
+    Update the most recent active handoff for a session (upsert).
+    
+    If no active handoff exists for this session, creates a new one
+    (requires summary in that case).
+    
+    Args:
+        session_id: PAS session to update handoff for
+        summary: New summary (required if creating new)
+        next_task: Update next task
+        context: Update context (JSON string or dict)
+        linked_artifacts: Update linked artifacts (comma-separated)
+        
+    Returns:
+        Updated or created handoff record
+    """
+    from pas.helpers.handoff import update_handoff_record
+    
+    conn = get_db_connection()
+    try:
+        # Parse context
+        if context is None:
+            context_dict = None
+        elif isinstance(context, dict):
+            context_dict = context
+        else:
+            context_dict = json.loads(context)
+        
+        artifacts_list = [a.strip() for a in linked_artifacts.split(",")] if linked_artifacts else None
+        
+        result = update_handoff_record(
+            conn,
+            session_id=session_id,
+            summary=summary,
+            next_task=next_task,
+            context=context_dict,
+            linked_artifacts=artifacts_list
+        )
+        
+        return result
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Invalid JSON in context parameter: {e}"}
+    except Exception as e:
+        logger.error(f"update_handoff failed: {e}")
         return {"success": False, "error": str(e)}
     finally:
         safe_close_connection(conn)
