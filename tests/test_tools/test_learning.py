@@ -110,3 +110,59 @@ class TestCalibration:
         row = cur.fetchone()
         exists = row["exists"] if isinstance(row, dict) else row[0]
         assert exists is True
+    
+    def test_confidence_decay_applied_when_overconfident(self):
+        """v56: Verify decay is applied when bias > threshold."""
+        from pas.helpers.calibration import compute_confidence_decay
+        
+        # Simulate overconfidence
+        adjusted, info = compute_confidence_decay(
+            stated_confidence=0.9,
+            overconfidence_bias=0.2
+        )
+        
+        assert info["applied"] is True
+        assert adjusted < 0.9
+        # decay = 0.9 * (1 - 0.2 * 0.5) = 0.9 * 0.9 = 0.81
+        assert abs(adjusted - 0.81) < 0.01
+
+    def test_decay_not_applied_below_threshold(self):
+        """v56: No decay when bias is acceptable."""
+        from pas.helpers.calibration import compute_confidence_decay
+        
+        adjusted, info = compute_confidence_decay(
+            stated_confidence=0.9,
+            overconfidence_bias=0.05
+        )
+        
+        assert info["applied"] is False
+        assert adjusted == 0.9
+
+    def test_domain_stratified_stats(self):
+        """v57: Verify domain filtering in calibration stats."""
+        from pas.helpers.calibration import compute_calibration_stats
+        
+        # Create mixed-domain records (need 20+ per domain for sufficient_for_decay)
+        records = []
+        for _ in range(20):
+            records.append({"predicted_confidence": 0.9, "actual_outcome": 0.5, "domain_id": "backend"})
+        for _ in range(20):
+            records.append({"predicted_confidence": 0.5, "actual_outcome": 0.8, "domain_id": "frontend"})
+        
+        backend_stats = compute_calibration_stats(records, domain="backend")
+        assert backend_stats["sample_count"] == 20
+        assert backend_stats["overconfidence_bias"] > 0  # Backend is overconfident
+        assert backend_stats["domain"] == "backend"
+        
+        frontend_stats = compute_calibration_stats(records, domain="frontend")
+        assert frontend_stats["overconfidence_bias"] < 0  # Frontend is underconfident
+
+    def test_compute_calibration_stats_domain_param(self):
+        """v57: Verify new domain parameter in compute_calibration_stats."""
+        from pas.helpers.calibration import compute_calibration_stats
+        
+        records = [{"predicted_confidence": 0.8, "actual_outcome": 0.6}] * 12
+        
+        stats = compute_calibration_stats(records, domain=None)
+        assert stats["sufficient_samples"] is True
+        assert stats["domain"] is None

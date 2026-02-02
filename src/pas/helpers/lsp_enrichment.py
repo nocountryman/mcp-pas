@@ -6,10 +6,97 @@ Part of v52 Phase 2: LSP enrichment for PAS workflow.
 """
 
 import logging
+import re
 from typing import Optional, Any
 from pathlib import Path
 
 logger = logging.getLogger("pas-server")
+
+
+def scope_to_file_paths(declared_scope: str, project_root: Optional[str] = None) -> list[str]:
+    """
+    Parse declared_scope string into a list of file paths.
+    
+    Handles common scope formats:
+    - "file.py, other.py" (comma-separated)
+    - "module/file.py" (relative paths)
+    - "CODE: file.py, DATA: schema.sql" (layer prefixes)
+    - "file.py::function" (symbol suffixes)
+    
+    Args:
+        declared_scope: Comma-separated scope string from hypothesis
+        project_root: Optional project root to resolve relative paths
+        
+    Returns:
+        List of normalized file paths
+    """
+    if not declared_scope:
+        return []
+    
+    file_paths = []
+    
+    # Split by comma
+    parts = [p.strip() for p in declared_scope.split(",")]
+    
+    for part in parts:
+        if not part:
+            continue
+            
+        # Remove layer prefixes like "CODE:", "DATA:", "UI:"
+        part = re.sub(r"^[A-Z]+:\s*", "", part)
+        
+        # Remove symbol suffixes like "::FunctionName"
+        if "::" in part:
+            part = part.split("::")[0]
+        
+        # Skip non-file entries (e.g., "migration", "tests")
+        if "." not in part and "/" not in part:
+            continue
+        
+        # Resolve path
+        path = Path(part)
+        if project_root and not path.is_absolute():
+            path = Path(project_root) / path
+        
+        # Only add if it looks like a file
+        if path.suffix or "/" in part:
+            file_paths.append(str(path))
+    
+    return file_paths
+
+
+async def get_lsp_impact_from_scope(
+    declared_scope: str,
+    project_root: Optional[str] = None,
+    lsp_pool: Any = None,
+) -> dict:
+    """
+    Convenience wrapper: parse scope and get LSP impact in one call.
+    
+    Args:
+        declared_scope: Comma-separated scope string from hypothesis
+        project_root: Optional project root for path resolution
+        lsp_pool: LspPool instance (or None for graceful fallback)
+        
+    Returns:
+        LSP impact dict (see get_lsp_impact)
+    """
+    file_paths = scope_to_file_paths(declared_scope, project_root)
+    
+    if not file_paths:
+        return {
+            "symbols_by_file": {},
+            "affected_files": {},
+            "callers_outside_scope": [],
+            "lsp_available": False,
+            "error": "No file paths found in scope",
+            "scope_parsed": declared_scope,
+        }
+    
+    impact = await get_lsp_impact(file_paths, lsp_pool)
+    impact["scope_parsed"] = declared_scope
+    impact["file_paths_extracted"] = file_paths
+    return impact
 
 
 async def get_lsp_impact(

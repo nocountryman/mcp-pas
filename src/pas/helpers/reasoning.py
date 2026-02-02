@@ -210,14 +210,18 @@ def apply_heuristic_penalties(
     Returns:
         Tuple of (adjusted_score, list_of_penalties_applied)
     """
+    from pas.helpers.calibration import compute_critique_depth_penalty, MAX_HEURISTIC_PENALTY
+    
     original_score = float(node["posterior_score"])
     adjusted_score = original_score
     penalties: list[str] = []
+    total_penalty = 0.0
     
     # Unchallenged penalty: if likelihood is suspiciously round
     likelihood = float(node["likelihood"])
     if str(likelihood).endswith(('0', '5')) and likelihood in [0.8, 0.85, 0.9, 0.95, 0.88, 0.92]:
-        adjusted_score -= HEURISTIC_PENALTIES["unchallenged"]
+        penalty = HEURISTIC_PENALTIES["unchallenged"]
+        total_penalty += penalty
         penalties.append("unchallenged_penalty")
     
     # Depth bonus (deeper = more refined)
@@ -233,15 +237,34 @@ def apply_heuristic_penalties(
     parent_path = ".".join(node_path.split(".")[:-1]) if "." in node_path else ""
     sibling_count = sibling_counts.get(parent_path, 1)
     if sibling_count < 2:
-        adjusted_score -= HEURISTIC_PENALTIES["shallow_alternatives"]
+        penalty = HEURISTIC_PENALTIES["shallow_alternatives"]
+        total_penalty += penalty
         penalties.append("shallow_alternatives_penalty")
     
     # v13b: Monoculture penalty - if all siblings match same law, penalize
     if parent_path in law_diversity:
         unique_laws, total_siblings = law_diversity[parent_path]
         if total_siblings >= 2 and unique_laws == 1:
-            adjusted_score -= HEURISTIC_PENALTIES["monoculture"]
+            penalty = HEURISTIC_PENALTIES["monoculture"]
+            total_penalty += penalty
             penalties.append("monoculture_penalty")
+    
+    # v53: Critique depth penalty - penalize shallow critique trees
+    try:
+        conn = get_db_connection()
+        node_id = str(node.get("id", ""))
+        if node_id:
+            depth_result = compute_critique_depth_penalty(conn, node_id)
+            if depth_result["penalty"] > 0:
+                total_penalty += depth_result["penalty"]
+                penalties.append(f"critique_depth_penalty_{depth_result['depth']}")
+        safe_close_connection(conn)
+    except Exception as e:
+        logger.debug(f"v53 critique depth check failed: {e}")
+    
+    # v53: Apply capped total penalty
+    capped_penalty = min(total_penalty, MAX_HEURISTIC_PENALTY)
+    adjusted_score -= capped_penalty
     
     # Ensure score stays in valid range
     adjusted_score = max(0.1, min(1.0, adjusted_score))

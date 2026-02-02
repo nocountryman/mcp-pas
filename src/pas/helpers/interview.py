@@ -705,6 +705,11 @@ def process_answer_side_effects(
             interview["early_termination_reason"] = "diminishing_returns"
             logger.info("v23: Early termination suggested - no trait evidence in last 3 answers")
     
+    # -------------------------------------------------------------------------
+    # v76: Answer history accumulation for context-aware generation
+    # -------------------------------------------------------------------------
+    accumulate_answer_history(interview, question, answer, hidden_value)
+    
     return dimension_covered, injected
 
 
@@ -984,3 +989,440 @@ def prioritize_questions(
     
     # v16d.2: Prepend historical questions (highest priority)
     return historical_questions + questions
+
+
+# =============================================================================
+# Phase 7b: Confirmation Loop Questions
+# =============================================================================
+
+def generate_confirmation_questions(
+    session_context: dict,
+    hypotheses: Optional[list[dict]] = None,
+    logger=None
+) -> list[dict]:
+    """
+    v73: Generate confirmation questions based on triggers.
+    
+    Implements Phase 7b: Confirmation Loop.
+    Generates targeted questions when any of these triggers fire:
+    1. Hedging detected in psychological extraction → clarify intent
+    2. Low confidence hypothesis (< 0.7) → confirm approach
+    3. High scope complexity (> 3 files) → verify blast radius
+    
+    Args:
+        session_context: Full session context dict
+        hypotheses: Optional list of hypothesis dicts from expansion
+        logger: Optional logger instance
+        
+    Returns:
+        List of confirmation question dicts with source="confirmation_loop"
+    """
+    if logger is None:
+        import logging
+        logger = logging.getLogger(__name__)
+    
+    confirmation_questions = []
+    question_count = 0
+    
+    # -------------------------------------------------------------------------
+    # Trigger 1: Hedging Detected
+    # -------------------------------------------------------------------------
+    psych_extraction = session_context.get("psychological_extraction", {})
+    if psych_extraction.get("hedging_detected"):
+        hedging_markers = psych_extraction.get("hedging_markers", [])
+        markers_text = ", ".join(hedging_markers[:3]) if hedging_markers else "hedging language"
+        
+        question_count += 1
+        confirmation_questions.append({
+            "id": f"confirm_hedging_{question_count}",
+            "question_text": f"Your request contained {markers_text}. To clarify your intent:",
+            "question_type": "single_choice",
+            "choices": [
+                {
+                    "label": "A",
+                    "text": "Yes, I'm uncertain - please explore multiple approaches",
+                    "description": "Explore alternatives",
+                    "hidden_value": "EXPLORE_ALTERNATIVES",
+                    "pros": "More thorough analysis",
+                    "cons": "Takes longer"
+                },
+                {
+                    "label": "B",
+                    "text": "I'm somewhat sure - proceed but ask before major decisions",
+                    "description": "Proceed with checkpoints",
+                    "hidden_value": "PROCEED_CHECKPOINT",
+                    "pros": "Balanced approach",
+                    "cons": "May interrupt flow"
+                },
+                {
+                    "label": "C",
+                    "text": "I'm confident - the hedging was just speech pattern",
+                    "description": "Proceed directly",
+                    "hidden_value": "PROCEED_DIRECT",
+                    "pros": "Faster execution",
+                    "cons": "May miss nuances"
+                }
+            ],
+            "priority": 1,
+            "depth": 1,
+            "depends_on": [],
+            "follow_up_rules": [
+                {"when_answer": "A", "inject": {"id": "followup_alternatives", "question_text": "What alternatives should I prioritize?", "question_type": "open", "choices": [], "priority": 2, "depth": 2, "depends_on": [], "follow_up_rules": []}}
+            ],
+            "answered": False,
+            "answer": None,
+            "source": "confirmation_loop",
+            "trigger": "hedging_detected"
+        })
+        logger.info(f"v73: Added confirmation question for hedging: {hedging_markers}")
+    
+    # -------------------------------------------------------------------------
+    # Trigger 2: Low Confidence Hypothesis
+    # -------------------------------------------------------------------------
+    if hypotheses:
+        low_confidence = [h for h in hypotheses if h.get("confidence", 1.0) < 0.7]
+        if low_confidence:
+            hyp_text = low_confidence[0].get("text", "this approach")[:80]
+            confidence = low_confidence[0].get("confidence", 0.5)
+            
+            question_count += 1
+            confirmation_questions.append({
+                "id": f"confirm_confidence_{question_count}",
+                "question_text": f"I'm only {confidence*100:.0f}% confident about: '{hyp_text}...' Should I:",
+                "question_type": "single_choice",
+                "choices": [
+                    {
+                        "label": "A",
+                        "text": "Research more before proceeding",
+                        "description": "Deepen analysis",
+                        "hidden_value": "DEEPEN_RESEARCH",
+                        "pros": "Higher confidence",
+                        "cons": "More time"
+                    },
+                    {
+                        "label": "B",
+                        "text": "Proceed cautiously with this approach",
+                        "description": "Accept risk",
+                        "hidden_value": "ACCEPT_RISK",
+                        "pros": "Faster progress",
+                        "cons": "Higher failure risk"
+                    },
+                    {
+                        "label": "C",
+                        "text": "Try a different approach entirely",
+                        "description": "Alternative path",
+                        "hidden_value": "ALTERNATIVE_PATH"
+                    }
+                ],
+                "priority": 2,
+                "depth": 1,
+                "depends_on": [],
+                "follow_up_rules": [],
+                "answered": False,
+                "answer": None,
+                "source": "confirmation_loop",
+                "trigger": "low_confidence"
+            })
+            logger.info(f"v73: Added confirmation question for low confidence ({confidence})")
+    
+    # -------------------------------------------------------------------------
+    # Trigger 3: High Scope Complexity
+    # -------------------------------------------------------------------------
+    if hypotheses:
+        high_scope = []
+        for hyp in hypotheses:
+            scope = hyp.get("scope", "")
+            if isinstance(scope, str):
+                file_count = len([f for f in scope.split(",") if f.strip()])
+            elif isinstance(scope, list):
+                file_count = len(scope)
+            else:
+                file_count = 0
+            
+            if file_count > 3:
+                high_scope.append((hyp, file_count))
+        
+        if high_scope:
+            hyp, file_count = high_scope[0]
+            question_count += 1
+            confirmation_questions.append({
+                "id": f"confirm_scope_{question_count}",
+                "question_text": f"This change affects {file_count} files. Are you comfortable with this blast radius?",
+                "question_type": "single_choice",
+                "choices": [
+                    {
+                        "label": "A",
+                        "text": "Yes, proceed with the full change",
+                        "description": "Accept scope",
+                        "hidden_value": "ACCEPT_SCOPE"
+                    },
+                    {
+                        "label": "B",
+                        "text": "No, can you split this into smaller phases?",
+                        "description": "Request phasing",
+                        "hidden_value": "REQUEST_PHASING"
+                    },
+                    {
+                        "label": "C",
+                        "text": "Show me exactly which files before proceeding",
+                        "description": "Request details",
+                        "hidden_value": "REQUEST_DETAILS"
+                    }
+                ],
+                "priority": 2,
+                "depth": 1,
+                "depends_on": [],
+                "follow_up_rules": [],
+                "answered": False,
+                "answer": None,
+                "source": "confirmation_loop",
+                "trigger": "high_scope"
+            })
+            logger.info(f"v73: Added confirmation question for high scope ({file_count} files)")
+    
+    # -------------------------------------------------------------------------
+    # Trigger 4: Concern Areas Detected
+    # -------------------------------------------------------------------------
+    concern_areas = psych_extraction.get("concern_areas", [])
+    if concern_areas:
+        concerns_text = ", ".join(concern_areas[:3])
+        question_count += 1
+        confirmation_questions.append({
+            "id": f"confirm_concerns_{question_count}",
+            "question_text": f"I detected concerns about: {concerns_text}. Should I prioritize addressing these?",
+            "question_type": "single_choice",
+            "choices": [
+                {
+                    "label": "A",
+                    "text": "Yes, these are critical - address before proceeding",
+                    "description": "Prioritize concerns",
+                    "hidden_value": "PRIORITIZE_CONCERNS"
+                },
+                {
+                    "label": "B",
+                    "text": "Note them, but proceed with main task first",
+                    "description": "Note for later",
+                    "hidden_value": "NOTE_CONCERNS"
+                },
+                {
+                    "label": "C",
+                    "text": "Those aren't actually concerns - ignore them",
+                    "description": "Dismiss concerns",
+                    "hidden_value": "DISMISS_CONCERNS"
+                }
+            ],
+            "priority": 1,
+            "depth": 1,
+            "depends_on": [],
+            "follow_up_rules": [],
+            "answered": False,
+            "answer": None,
+            "source": "confirmation_loop",
+            "trigger": "concern_areas"
+        })
+        logger.info(f"v73: Added confirmation question for concerns: {concern_areas}")
+    
+    return confirmation_questions
+
+
+# =============================================================================
+# v76: Constraint Discovery Interview Functions
+# =============================================================================
+
+def constraint_mapper(
+    session_id: str,
+    interview_answers: list[dict],
+    detected_traits: list[dict],
+    cur
+) -> list[dict]:
+    """
+    Convert interview answers to structured project_constraints.
+    
+    Uses dimension_questions.constraint_mapping JSONB to determine:
+    - constraint_key: e.g., 'no_mvp', 'terminal_env_activation'
+    - constraint_value: derived from answer
+    - enforcement_level: 'block' or 'warn' based on hidden_value patterns
+    - priority: 'must_have' or 'nice_to_have' from Gain-Loss framing
+    
+    Args:
+        session_id: The reasoning session UUID
+        interview_answers: List of answer dicts with dimension_id, answer_label, hidden_value
+        detected_traits: List of trait dicts with trait name and confidence
+        cur: Database cursor (RealDictCursor)
+        
+    Returns:
+        List of constraint dicts ready for project_constraints table
+    """
+    constraints = []
+    
+    for answer in interview_answers:
+        # v82: Query by question_id to get correct constraint_mapping
+        # Bug fix: dimension_id returns wrong question when multiple share same dimension
+        question_id = answer.get("question_id")
+        dim_id = answer.get("dimension_id")
+        
+        if question_id:
+            # Preferred: query by exact question_id
+            cur.execute("""
+                SELECT constraint_mapping 
+                FROM interview_questions 
+                WHERE id = %s AND constraint_mapping IS NOT NULL
+            """, (question_id,))
+        elif dim_id:
+            # Fallback: query by dimension_id (legacy, may return wrong mapping)
+            cur.execute("""
+                SELECT constraint_mapping 
+                FROM interview_questions 
+                WHERE dimension_id = %s AND constraint_mapping IS NOT NULL
+                LIMIT 1
+            """, (dim_id,))
+        else:
+            continue
+        
+        row = cur.fetchone()
+        if not row or not row["constraint_mapping"]:
+            continue
+            
+        mapping = row["constraint_mapping"]
+        answer_label = answer.get("answer_label")
+        
+        # Get mapping for this answer
+        answer_mappings = mapping.get("answer_mappings", {})
+        if answer_label not in answer_mappings:
+            continue
+            
+        for constraint in answer_mappings[answer_label]:
+            # Determine enforcement from hidden_value patterns or mapping override
+            if "enforcement" in constraint:
+                enforcement = constraint["enforcement"]
+            else:
+                hidden_val = answer.get("hidden_value", "").upper()
+                enforcement = "block" if any(
+                    p in hidden_val for p in ["SAFETY", "EXPLICIT", "STRICT"]
+                ) else "warn"
+            
+            # Determine priority from detected traits (Gain-Loss framing)
+            # RISK_AVERSE trait suggests loss framing → must_have
+            priority = "must_have" if any(
+                t.get("trait") == "RISK_AVERSE" for t in detected_traits
+            ) else "nice_to_have"
+            
+            constraints.append({
+                "key": constraint["key"],
+                "value": constraint["value"],
+                "type": constraint.get("type", "philosophy"),
+                "enforcement": enforcement,
+                "priority": priority,
+                "source_dimension": dim_id,
+                "source_answer": answer_label,
+                "source_session": session_id
+            })
+    
+    return constraints
+
+
+def build_constraint_question_prompt(
+    goal: str,
+    answer_history: list[dict],
+    detected_traits: list[dict],
+    uncovered_categories: set[str]
+) -> dict:
+    """
+    v76: Context-aware question generation for constraint discovery.
+    
+    Includes previous Q/A pairs and detected traits in LLM prompt,
+    enabling questions that reference previous answers.
+    
+    Args:
+        goal: The project goal or session goal
+        answer_history: List of previous Q/A pairs
+        detected_traits: List of detected user traits
+        uncovered_categories: Set of constraint categories not yet addressed
+        
+    Returns:
+        Dict with prompt, system, and max_questions for LLM generation
+    """
+    history_text = ""
+    if answer_history:
+        history_text = "\n\n## Previous Answers:\n"
+        for item in answer_history[-5:]:  # Last 5 only
+            q_text = item.get('question', '')[:50]
+            a_text = item.get('answer', '')
+            history_text += f"- Q: {q_text}... A: {a_text}\n"
+    
+    traits_text = ""
+    if detected_traits:
+        trait_names = [t.get('trait', '') for t in detected_traits if t.get('trait')]
+        if trait_names:
+            traits_text = f"\n\nDetected user traits: {', '.join(trait_names)}"
+    
+    uncovered_text = ""
+    if uncovered_categories:
+        uncovered_text = f"\n\nConstraint categories NOT yet covered: {', '.join(uncovered_categories)}"
+    
+    prompt = f"""You are conducting a project constraint discovery interview.
+    
+Project goal: {goal}
+{history_text}
+{traits_text}
+{uncovered_text}
+
+Generate 1-2 clarifying questions about project CONSTRAINTS in these categories:
+- philosophy: coding standards, MVP approach, quality gates
+- environment: venv setup, terminal commands, env vars
+- quality: testing requirements, complexity limits, documentation
+
+TECHNIQUES:
+1. CONSEQUENCE FRAMING: Frame choices as outcomes, not features
+   BAD: "Do you want tests?" 
+   GOOD: "When a bug ships to production, what's the worst outcome?"
+
+2. TRADE-OFF BUNDLES: Force priority decisions
+   BAD: "Is quality important?" (everyone says yes)
+   GOOD: "Which trade-off can you live with: faster shipping OR fewer bugs?"
+
+3. GAIN/LOSS DETECTION: Note if user frames as avoiding (loss) vs achieving (gain)
+   Loss framing ("prevent errors") → higher enforcement priority
+   Gain framing ("faster iteration") → lower enforcement priority
+
+Return JSON array with questions in format:
+[{{"id": "q_constraint_1", "question_text": "...", "choices": [{{"label": "A", "description": "...", "hidden_value": "TRAIT_KEYWORD"}}]}}]
+
+Hidden values should be all-caps trait keywords like: SAFETY_FOCUSED, SPEED_FOCUSED, EXPLICIT_CONTROL, etc.
+"""
+    return {
+        "prompt": prompt, 
+        "system": "Return only valid JSON array. No markdown, no explanation.", 
+        "max_questions": 2
+    }
+
+
+def accumulate_answer_history(
+    interview: dict,
+    question: dict,
+    answer: str,
+    hidden_value: Optional[str]
+) -> None:
+    """
+    v76: Accumulate answer history for context-aware question generation.
+    
+    Called after each answer is submitted to build up context
+    that can be passed to build_constraint_question_prompt.
+    
+    Args:
+        interview: Interview context dict (mutated in place)
+        question: The answered question dict
+        answer: The answer label (e.g., "A", "B", "C")
+        hidden_value: Extracted hidden value (may be None)
+    """
+    from datetime import datetime
+    
+    answer_history = interview.get("answer_history", [])
+    answer_history.append({
+        "question": question.get("question_text", "")[:100],
+        "answer": answer,
+        "hidden_value": hidden_value,
+        "timestamp": datetime.now().isoformat()
+    })
+    # Keep last 10 to avoid unbounded growth
+    interview["answer_history"] = answer_history[-10:]

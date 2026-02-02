@@ -25,3 +25,12 @@ parallel_critique:
   enabled: true
   critique_ratio: 0.7      # Critique hypotheses >= winner * ratio
   max_candidates: 3        # Limit to avoid latency explosion
+
+# v56-v60: Calibration Decay
+calibration:
+  decay_rate: 0.5                    # How aggressively to reduce confidence (0-1)
+  bias_threshold: 0.1                # Only apply decay if bias exceeds this
+  min_samples_for_decay: 20          # Warmup period before applying decay
+  min_samples_for_stats: 10          # Samples needed for basic stats
+  enable_domain_stratification: true # Use per-domain calibration when available
+  fallback_to_global: true           # Use global stats if domain has insufficient samples

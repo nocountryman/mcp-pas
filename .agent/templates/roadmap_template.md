@@ -1,15 +1,26 @@
-# Roadmap Template (REQUIRED for Multi-Phase Work)
+# Roadmap Template
 
-> Use this template when work spans multiple phases or components.
-> Each phase becomes its own implementation plan via separate PAS session.
+<!--
+=== AGENT CONTEXT ===
+Role: Strategic Planning Agent
+Project: [Fill from PAS session project_id]
+Mode: implementation (multi-phase)
+-->
+
+> **🎯 Your Role**: Create a self-sufficient roadmap that a new agent session can execute without conversation context.
+> 
+> **📋 Active Constraints** (verify via `start_reasoning_session`):
+> - 🚫 `quality_gate_threshold`: 0.9 (BLOCKING)
+> - ⚠️ `roadmap_vs_plan_distinction`: true
+> - ⚠️ Each phase needs separate PAS session
 
 ---
 
-## REQUIRED SECTIONS
-
-### 1. Problem Statement & Reasoning
-```markdown
 ## Problem Statement
+
+> [!TIP] **Self-Sufficiency Check**
+> A new agent must understand this roadmap without conversation history.
+> Include: Why this matters, what success looks like, key constraints.
 
 **What problem does this solve?**
 [Describe the pain point or gap]
@@ -17,122 +28,139 @@
 **Why is this important?**
 [Business/technical justification]
 
-**PAS Session Evidence:**
-- Session ID: `<uuid>`
-- Decision Quality: HIGH/MEDIUM/LOW
-- Final Score: ≥0.9 (REQUIRED)
-- Gap: ≥0.08 (REQUIRED)
-```
+**PAS Session Evidence**:
+- **Session ID**: `[uuid]`
+- **Decision Quality**: HIGH/MEDIUM/LOW
+- **Final Score**: [≥0.9 required]
+- **Gap**: [≥0.08 required]
 
-### 2. Architectural Overview
-```markdown
+---
+
 ## Architecture
 
-### System Context Diagram
-[Mermaid diagram showing how this fits in the system]
+> [!IMPORTANT] **Diagram Required**
+> At least one mermaid diagram mandatory.
+> Prefer: System context → Component → Data flow
 
-### Component Diagram  
-[Mermaid diagram showing internal components]
+### System Context Diagram
+
+```mermaid
+graph TB
+    subgraph External
+        User[User/Agent]
+    end
+    subgraph System
+        A[Component A]
+        B[Component B]
+    end
+    User --> A
+    A --> B
+```
 
 ### Data Flow
-[Mermaid sequence or flowchart]
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant A as Component A
+    participant B as Component B
+    User->>A: Request
+    A->>B: Process
+    B-->>User: Response
 ```
 
-### 3. Phase Breakdown
-```markdown
+---
+
 ## Phases
 
+> [!IMPORTANT] **Per-Phase Requirements**
+> Each phase MUST have:
+> - Its own PAS reasoning session (score ≥0.9)
+> - Separate implementation_plan.md
+> - Independent verification checklist
+
 ### Phase 1: [Name]
-- **Scope**: [What's included]
-- **Dependencies**: [What must exist first]
-- **LSP Impact**: [Run find_references on key symbols, list affected files]
-- **PAS Session Required**: YES (link to implementation_plan.md)
-- **Estimated Effort**: [low/medium/high]
+
+**Scope**: [What's included]
+**Dependencies**: [What must exist first]
+**PAS Session Required**: YES → [link to plan]
+**Estimated Effort**: low/medium/high
+
+#### Dual Recommendation
+
+| Balanced | Aspirational |
+|----------|--------------|
+| [Chosen approach] | [Higher-value alternative] |
+| Effort: [1-3] | Effort: [1-3] |
+| Benefit: [1-3] | Benefit: [1-3] |
+| ✅ Recommended | Consider if constraints relax |
+
+#### Success Criteria
+- [ ] [Verifiable criterion 1]
+- [ ] [Verifiable criterion 2]
+
+---
 
 ### Phase 2: [Name]
-[...]
-```
 
-### 4. Cross-Phase Decisions
-```markdown
-## Design Decisions
+**Scope**: [What's included]
+**Dependencies**: Phase 1 completion
+**PAS Session Required**: YES → [link to plan]
+**Estimated Effort**: low/medium/high
 
-| Decision | Options Considered | Chosen | Rationale (from PAS) |
+#### Success Criteria
+- [ ] [Verifiable criterion 1]
+
+---
+
+## Cross-Phase Decisions
+
+> [!TIP] **Decision Traceability**
+> Link each decision to PAS reasoning node for auditability.
+
+| Decision | Options Considered | Chosen | Rationale (PAS node) |
 |----------|-------------------|--------|---------------------|
-| [What] | [A, B, C] | [B] | [Why - link to PAS critique] |
-```
+| [What] | A, B, C | B | [node_id: why] |
 
-### 5. Success Criteria
-```markdown
+---
+
 ## Success Criteria
 
-- [ ] Criterion 1 (verifiable)
-- [ ] Criterion 2 (verifiable)
-```
+> [!IMPORTANT] **Verifiable Outcomes**
+> "It works" is not a criterion. Use measurable outcomes.
 
-### 6. Project Structure
-```markdown
-## Project Structure
+- [ ] [Overall success criterion 1]
+- [ ] [Overall success criterion 2]
 
-> **For NEW projects**: Use language best practices
-> - Python: `src/` layout with `pyproject.toml`
-> - Node/TS: `src/` with `package.json`
->
-> **For EXISTING projects**: 
-> - If maintaining current layout → align with it
-> - If restructuring → document BOTH current AND target structure
->   (Treat restructuring as a separate PAS session)
+---
 
-[Target structure tree if creating new files or restructuring]
-```
-
-### 7. Environment Context
-```markdown
 ## Environment
 
-> **Specify venv** for pip/python commands. Bare `pip`/`python` = system interpreter.
+> [!WARNING] **Terminal Commands**
+> All commands require venv activation.
 
-| Project Venv | Command Pattern |
-|--------------|-----------------|
-| `[FILL: /path/to/.venv/]` | `[VENV]/bin/pip`, `[VENV]/bin/python` |
-```
-
-### 8. Code Quality Standards (Python)
-```markdown
-## Code Quality Standards
-
-> All new/modified code MUST meet these thresholds.
-
-| Metric | Target | Max Allowed |
-|--------|--------|-------------|
-| Cyclomatic Complexity | ≤10 | 15 (with justification) |
-| Function Length | ≤50 lines | 80 lines |
-| File Length | ≤500 lines | 800 lines |
-
-**Principles**: SRP (single responsibility), DRY (don't repeat), KISS (keep simple)
-
-**Verification**: `radon cc [file.py] -s -a`
-```
+| Item | Value |
+|------|-------|
+| **Venv** | `.venv312/bin/activate` |
+| **Activation** | `source .venv312/bin/activate && set -a && source .env && set +a` |
 
 ---
 
-## ENFORCEMENT RULES
+## Pre-Submission Checklist
 
-1. **Quality Gate**: Overall roadmap PAS session MUST score ≥0.9
-2. **Per-Phase Plans**: Each phase gets separate PAS session + implementation_plan
-3. **Self-Sufficient**: New LLM session must understand roadmap without conversation context
-4. **Diagrams Required**: At least one mermaid diagram for architecture
-5. **Decisions Linked**: Major decisions must reference PAS reasoning
-
----
-
-## PRE-SUBMISSION CHECKLIST
-
-> ✅ Complete ALL items before presenting this roadmap.
+> **⚠️ Known Issues to Watch For**:
+> - Multi-phase scope creep (each phase should be independently verifiable)
+> - Missing phase dependencies (check order carefully)
+> - Vague success criteria (must be measurable)
 
 - [ ] PAS session score ≥ 0.9
 - [ ] At least one mermaid diagram included
 - [ ] Each phase has clear scope and dependencies
 - [ ] Success criteria are verifiable (not vague)
 - [ ] Design decisions link to PAS reasoning
-- [ ] Roadmap is self-sufficient (understandable without conversation context)
+- [ ] Roadmap is self-sufficient (no conversation context needed)
+
+---
+
+> **📋 Constraint Reminder**: Each phase becomes a separate PAS session.
+> Do not mix multiple phases into a single implementation plan.

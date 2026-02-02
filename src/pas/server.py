@@ -8,11 +8,12 @@ backed by PostgreSQL with pgvector for semantic search.
 """
 
 import os
+import asyncio
 import json
 import re
 import uuid
 import logging
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -91,6 +92,8 @@ from pas.helpers.interview import (
     load_dimension_questions,
     build_goal_question_prompt,
     prioritize_questions,
+    # v73: Phase 7b Confirmation Loop
+    generate_confirmation_questions,
 )
 
 from pas.helpers.critique import (
@@ -190,6 +193,7 @@ from pas.helpers.self_awareness import (
 # Phase 1 Refactor: Finalize session helpers
 from pas.helpers.finalize import (
     check_sequential_gate,
+    check_critique_gate,
     compute_quality_gate,
     build_score_improvement_suggestions,
     apply_unverified_prefix,
@@ -212,6 +216,8 @@ from pas.helpers.finalize import (
     fetch_candidates,
     # v51: ROI analysis
     build_roi_analysis,
+    # v82: Dual recommendation (constraint-aware)
+    compute_dual_recommendation,
 )
 
 # Phase 2 Refactor: Store expansion helpers
@@ -225,6 +231,7 @@ from pas.helpers.expansion import (
     query_scope_failures,
     run_preflight_checks,
     surface_scope_failures,
+    fetch_calibration_context,  # v60: Calibration decay
 )
 
 # Phase 3 Refactor: Prepare expansion helpers
@@ -237,6 +244,9 @@ from pas.helpers.expansion import (
     search_related_modules,
     fetch_project_grounding,
     fetch_historical_patterns,
+    # v73: Phase 7a Psychological Pre-Processing
+    perform_psychological_preprocessing,
+    cache_psychological_extraction,
 )
 
 # Phase 4 Refactor: Record outcome helpers
@@ -263,8 +273,34 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pas-server")
 
 # =============================================================================
+# Phase 8: Unified Reasoning Modes Configuration
+# =============================================================================
+
+MODE_CONFIG = {
+    "implementation": {
+        "finalize_label": "recommendation",
+        "outcomes": ["success", "partial", "failure"],
+        "expansion_suffix": "Generate implementation hypotheses with concrete code changes.",
+        "enforce_quality_gate": True,
+    },
+    "research": {
+        "finalize_label": "synthesis",
+        "outcomes": ["success", "partial", "failure", "knowledge_gained"],
+        "expansion_suffix": "Generate exploratory hypotheses for design options and tradeoffs.",
+        "enforce_quality_gate": False,  # Show warnings, don't block
+    },
+    "constraint_discovery": {
+        "finalize_label": "constraints",
+        "outcomes": ["success", "partial", "failure"],
+        "expansion_suffix": "Discover project constraints through interview.",
+        "enforce_quality_gate": False,  # Interview-driven, not hypothesis-driven
+    },
+}
+
+# =============================================================================
 # v36: Configuration Management
 # =============================================================================
+
 
 import yaml
 from pathlib import Path
@@ -286,6 +322,14 @@ def load_config() -> dict:
         "session": {
             "max_depth": 10,
             "default_top_n": 3,
+        },
+        "calibration": {  # v56-v60: Calibration decay
+            "decay_rate": 0.5,
+            "bias_threshold": 0.1,
+            "min_samples_for_decay": 20,
+            "min_samples_for_stats": 10,
+            "enable_domain_stratification": True,
+            "fallback_to_global": True,
         }
     }
     
@@ -523,6 +567,20 @@ CRITIC_PERSONAS = [
         "name": "Domain Expert",
         "instruction": "Does this align with established patterns and scientific principles? Check against known laws and best practices.",
         "focus_areas": ["pattern adherence", "principle alignment", "industry standards"]
+    },
+    # v59: Security Analyst (domain-conditional activation)
+    {
+        "name": "Security Analyst",
+        "instruction": "What can be exploited? Check for injection (SQL, command, XSS), auth bypass, data leaks, privilege escalation, insecure defaults, sensitive data exposure.",
+        "focus_areas": ["injection", "authentication", "authorization", "data protection", "input validation"],
+        "domain_triggers": ["auth", "api", "password", "token", "session", "permission", "database", "query", "input", "user", "login", "credential", "secret", "key"]
+    },
+    # v59: Meta-Critic (always-on self-questioning)
+    {
+        "name": "Meta-Critic",
+        "instruction": "Am I asking the right questions? Is the problem framed correctly? What assumptions are being made? What's NOT being considered? Is this solving symptoms or root cause?",
+        "focus_areas": ["problem framing", "hidden assumptions", "root cause", "scope completeness"],
+        "always_active": True
     }
 ]
 
@@ -660,7 +718,11 @@ async def sample_agent(
 async def start_reasoning_session(
     user_goal: str,
     raw_input: Optional[str] = None,
-    skip_raw_input_check: bool = False
+    skip_raw_input_check: bool = False,
+    session_mode: str = "implementation",
+    unconstrained: bool = False,
+    project_id: Optional[str] = None,
+    project_path: Optional[str] = None
 ) -> dict[str, Any]:
     """
     Start a new reasoning session for the given goal.
@@ -672,6 +734,10 @@ async def start_reasoning_session(
         user_goal: The high-level goal or question to reason about
         raw_input: v44 - Verbatim user prompt (auto-logged with log_type='verbatim')
         skip_raw_input_check: v44 - Bypass raw_input enforcement for LLM-initiated sessions
+        session_mode: Phase 8 - 'implementation' (code changes) or 'research' (exploration)
+        unconstrained: Phase 8 - If True in research mode, skip project constraint surfacing
+        project_id: v76 - Project identifier (required for constraint_discovery mode)
+        project_path: v76 - Project path (required for constraint_discovery GEMINI.md export)
         
     Returns:
         Dictionary with session_id and status
@@ -680,6 +746,13 @@ async def start_reasoning_session(
         return {
             "success": False,
             "error": "User goal cannot be empty"
+        }
+    
+    # Phase 8: Validate session_mode
+    if session_mode not in MODE_CONFIG:
+        return {
+            "success": False,
+            "error": f"Invalid session_mode. Must be one of: {list(MODE_CONFIG.keys())}"
         }
     
     # v44: Hard enforcement of raw_input for user-initiated sessions
@@ -708,14 +781,21 @@ async def start_reasoning_session(
         except Exception as e:
             logger.warning(f"Failed to generate goal embedding: {e}")
         
-        # Insert the new session
+        # v76: Build initial context with project info for constraint_discovery
+        initial_context = {"source": "mcp_tool"}
+        if project_id:
+            initial_context["project_id"] = project_id
+        if project_path:
+            initial_context["project_path"] = project_path
+        
+        # Insert the new session (Phase 8: with session_mode and unconstrained)
         cur.execute(
             """
-            INSERT INTO reasoning_sessions (id, goal, goal_embedding, state, context)
-            VALUES (%s, %s, %s, 'active', %s)
-            RETURNING id, goal, state, created_at
+            INSERT INTO reasoning_sessions (id, goal, goal_embedding, state, session_mode, unconstrained, context)
+            VALUES (%s, %s, %s, 'active', %s, %s, %s)
+            RETURNING id, goal, state, session_mode, unconstrained, created_at
             """,
-            (session_id, user_goal.strip(), goal_embedding, json.dumps({"source": "mcp_tool"}))
+            (session_id, user_goal.strip(), goal_embedding, session_mode, unconstrained, json.dumps(initial_context))
         )
         
         row = cur.fetchone()
@@ -797,6 +877,36 @@ async def start_reasoning_session(
         if persistent_traits:
             response["persistent_traits"] = persistent_traits
             response["message"] += f" Loaded {len(persistent_traits)} persistent trait(s) from history."
+        
+        # v79: Surface project constraints at session start when project_id provided
+        if project_id and not unconstrained:
+            try:
+                cur.execute("""
+                    SELECT constraint_type, constraint_key, constraint_data, enforcement_level
+                    FROM project_constraints pc
+                    JOIN project_registry pr ON pc.project_id = pr.id
+                    WHERE pr.project_id = %s AND pc.valid_to IS NULL
+                    ORDER BY 
+                        CASE enforcement_level WHEN 'block' THEN 1 WHEN 'warn' THEN 2 ELSE 3 END,
+                        constraint_type
+                """, (project_id,))
+                
+                constraints = []
+                for row in cur.fetchall():
+                    icon = "🚫" if row["enforcement_level"] == "block" else "⚠️"
+                    constraints.append({
+                        "icon": icon,
+                        "type": row["constraint_type"],
+                        "key": row["constraint_key"],
+                        "enforcement": row["enforcement_level"]
+                    })
+                
+                if constraints:
+                    response["project_constraints"] = constraints
+                    response["constraint_summary"] = f"{len(constraints)} active constraints ({sum(1 for c in constraints if c['enforcement'] == 'block')} blocking)"
+                    logger.info(f"v79: Surfaced {len(constraints)} constraints for project {project_id}")
+            except Exception as e:
+                logger.warning(f"v79: Failed to surface constraints: {e}")
         
         # v44: Auto-log raw_input with log_type='verbatim' if provided
         if raw_input:
@@ -1237,6 +1347,60 @@ async def store_prompt_analysis(
 
 
 @mcp.tool()
+async def store_psychological_extraction(
+    session_id: str,
+    extraction_json: str
+) -> dict[str, Any]:
+    """
+    v73: Cache psychological extraction in session context.
+    
+    Called after agent processes the psychological_extraction_prompt
+    from prepare_expansion. Caches the result so subsequent expansions
+    can use the psychological context.
+    
+    Args:
+        session_id: The reasoning session UUID
+        extraction_json: JSON string with hedging_detected, enthusiasm_level, etc.
+        
+    Returns:
+        Confirmation with cached fields
+    """
+    try:
+        extraction = json.loads(extraction_json)
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        success = cache_psychological_extraction(cur, conn, session_id, extraction)
+        
+        safe_close_connection(conn)
+        
+        if success:
+            return {
+                "success": True,
+                "session_id": session_id,
+                "cached_fields": list(extraction.keys()),
+                "hedging_detected": extraction.get("hedging_detected", False),
+                "inferred_priority": extraction.get("inferred_priority", "unknown"),
+                "message": "Psychological extraction cached in session context"
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Failed to cache extraction"
+            }
+            
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Invalid JSON: {e}"}
+    except Exception as e:
+        logger.error(f"store_psychological_extraction failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
 async def prepare_expansion(
     session_id: str,
     parent_node_id: str | None = None,
@@ -1257,6 +1421,8 @@ async def prepare_expansion(
         Context dict with parent_content, goal, relevant_laws for hypothesis generation
     """
 
+    # v2026-02-02: Debug - add source check to response
+    
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -1285,6 +1451,14 @@ async def prepare_expansion(
         # =====================================================================
         past_failure_warnings = surface_past_failures(_search_relevant_failures, parent_content)
         
+        # =====================================================================
+        # v73: Phase 7a - Psychological Pre-Processing (root expansion only)
+        # =====================================================================
+        is_root_expansion = parent_node_id is None
+        psych_extraction, psych_prompt = perform_psychological_preprocessing(
+            cur, conn, session_id, is_root_expansion, get_embedding
+        )
+        
         # Build initial response
         response = {
             "success": True,
@@ -1301,6 +1475,16 @@ async def prepare_expansion(
         # Add past failure warnings if any
         if past_failure_warnings:
             response["past_failure_warnings"] = past_failure_warnings
+        
+        # v73: Add psychological extraction data or prompt
+        if psych_extraction:
+            response["psychological_extraction"] = psych_extraction
+            response["instructions"] += "\n\n📊 PSYCHOLOGICAL CONTEXT: User shows " + \
+                ("hedging (reduce confidence)" if psych_extraction.get("hedging_detected") else "confidence") + \
+                f". Priority: {psych_extraction.get('inferred_priority', 'unknown')}."
+        elif psych_prompt:
+            response["psychological_extraction_prompt"] = psych_prompt
+            response["instructions"] += "\n\n⚠️ PSYCHOLOGICAL ANALYSIS RECOMMENDED: Process the extraction prompt to understand user intent before generating hypotheses."
         
         # =====================================================================
         # Helper 5: Extract symbol suggestions (v38c)
@@ -1362,6 +1546,70 @@ async def prepare_expansion(
         if historical_patterns:
             response["historical_patterns"] = historical_patterns
         
+        # =====================================================================
+        # v60: Surface calibration warning if overconfidence detected
+        # =====================================================================
+        calibration_ctx = fetch_calibration_context(cur, project_id)
+        if calibration_ctx["should_apply_decay"]:
+            stats = calibration_ctx["stats"]
+            response["calibration_warning"] = {
+                "message": f"Overconfidence bias detected (+{stats.get('overconfidence_bias', 0):.3f}). Stated confidences will be reduced by decay factor.",
+                "bias": stats.get("overconfidence_bias"),
+                "decay_will_apply": True,
+                "domain": calibration_ctx["domain"],
+                "samples": stats.get("sample_count")
+            }
+        
+        # =====================================================================
+        # Phase 7d: Active Law Application - Law Analysis Prompts
+        # =====================================================================
+        response["phase_7d_section_reached"] = True  # DEBUG BEFORE TRY
+        try:
+            from pas.helpers.expansion import build_law_analysis_prompt
+            
+            logger.debug(f"Phase 7d: laws count = {len(laws) if laws else 0}, has session = {session is not None}")
+            response["phase_7d_reached"] = True  # DEBUG: confirm this code block is reached
+            if laws:
+                # Build law-specific analysis prompts
+                law_analysis_prompts = [
+                    build_law_analysis_prompt(law, session["goal"])
+                    for law in laws[:3]  # Top 3 matched laws
+                ]
+                
+                # Store matched law IDs in session context for gating at store_expansion
+                matched_law_ids = [law["id"] for law in laws[:3]]
+                cur.execute("""
+                    UPDATE reasoning_sessions 
+                    SET context = COALESCE(context, '{}'::jsonb) || jsonb_build_object('matched_laws', %s::jsonb)
+                    WHERE id = %s
+                """, (json.dumps(matched_law_ids), session_id))
+                conn.commit()
+                
+                response["law_analysis_prompts"] = law_analysis_prompts
+                response["law_analysis_required"] = True
+                response["instructions"] += "\n\n🎯 LAW ANALYSIS REQUIRED: Before calling store_expansion, you MUST answer the questions in law_analysis_prompts to ensure laws actively inform your hypotheses."
+                
+                logger.info(f"Phase 7d: Generated {len(law_analysis_prompts)} law analysis prompt(s)")
+        except Exception as e:
+            logger.warning(f"Phase 7d: Law analysis prompt generation failed (non-fatal): {e}")
+            response["phase_7d_error"] = str(e)  # DEBUG: Add to response for visibility
+        
+        # =====================================================================
+        # Phase 7c: Surface Active Constraints
+        # =====================================================================
+        try:
+            from pas.helpers.constraint_validation import get_constraint_summary
+            if project_id:
+                constraint_summary = get_constraint_summary(project_id)
+                if constraint_summary["constraint_count"] > 0:
+                    response["active_constraints"] = constraint_summary["constraints"]
+                    response["instructions"] += f"\n\n{constraint_summary['constraint_prompt']}"
+                    if constraint_summary["blocking_count"] > 0:
+                        response["instructions"] += f"\n⚠️ {constraint_summary['blocking_count']} BLOCKING constraint(s) active - violations will be rejected."
+                    logger.info(f"Phase 7c: Surfaced {constraint_summary['constraint_count']} active constraint(s)")
+        except Exception as e:
+            logger.warning(f"Phase 7c: Constraint surfacing failed (non-fatal): {e}")
+        
         return response
 
 
@@ -1376,7 +1624,72 @@ async def prepare_expansion(
 
 
 @mcp.tool()
+async def store_law_analysis(
+    session_id: str,
+    law_analyses: str,  # JSON array: [{"law_id": 1, "answers": ["answer1", "answer2"]}]
+) -> dict[str, Any]:
+    """
+    Phase 7d: Store agent's law analysis answers. Required before store_expansion when laws matched.
+    
+    After calling prepare_expansion, if law_analysis_prompts is returned, you MUST:
+    1. Process each law's questions
+    2. Call this tool with your answers
+    3. THEN call store_expansion
+    
+    Args:
+        session_id: The reasoning session UUID
+        law_analyses: JSON array of analysis results per law
+        
+    Returns:
+        Confirmation with next step
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Parse the analyses
+        try:
+            analyses = json.loads(law_analyses)
+        except json.JSONDecodeError as e:
+            return {"success": False, "error": f"Invalid JSON for law_analyses: {e}"}
+        
+        if not analyses:
+            return {"success": False, "error": "law_analyses cannot be empty"}
+        
+        # Store in session context
+        cur.execute("""
+            UPDATE reasoning_sessions 
+            SET context = COALESCE(context, '{}'::jsonb) || jsonb_build_object('law_analyses', %s::jsonb)
+            WHERE id = %s
+            RETURNING id
+        """, (json.dumps(analyses), session_id))
+        
+        if cur.rowcount == 0:
+            return {"success": False, "error": f"Session {session_id} not found"}
+        
+        conn.commit()
+        
+        logger.info(f"Phase 7d: Stored {len(analyses)} law analysis/analyses for session {session_id}")
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "analyses_stored": len(analyses),
+            "message": "Law analyses stored. You may now call store_expansion.",
+            "next_step": "Call store_expansion with your hypotheses"
+        }
+        
+    except Exception as e:
+        logger.error(f"store_law_analysis failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if 'conn' in locals():
+            safe_close_connection(conn)
+
+
+@mcp.tool()
 async def store_expansion(
+
     session_id: str,
     parent_node_id: str | None,
     # Hypothesis 1 (required)
@@ -1405,7 +1718,9 @@ async def store_expansion(
     source_text: Optional[str] = None,
     user_id: Optional[str] = None,
     # v41: Preflight enforcement
-    skip_preflight: bool = False
+    skip_preflight: bool = False,
+    # Phase 7c: Constraint validation
+    project_id: Optional[str] = None
 ) -> dict[str, Any]:
     """
     Store generated hypotheses with Bayesian scoring.
@@ -1457,12 +1772,85 @@ async def store_expansion(
         if session_error:
             return session_error
         
+        # =====================================================================
+        # Phase 7d: Law Analysis Gate
+        # =====================================================================
+        cur.execute("""
+            SELECT 
+                context->'matched_laws' as matched_laws,
+                context->'law_analyses' as law_analyses
+            FROM reasoning_sessions WHERE id = %s
+        """, (session_id,))
+        ctx_row = cur.fetchone()
+        
+        if ctx_row:
+            matched_laws = ctx_row["matched_laws"] if ctx_row["matched_laws"] else []
+            law_analyses = ctx_row["law_analyses"] if ctx_row["law_analyses"] else []
+            
+            if matched_laws and not law_analyses:
+                # Laws were matched but no analysis provided - return soft warning
+                return {
+                    "success": False,
+                    "error": "law_analysis_required",
+                    "message": f"{len(matched_laws)} law(s) matched but no analysis provided",
+                    "matched_law_ids": matched_laws[:5],
+                    "required_action": "Call store_law_analysis with your law analysis answers first",
+                    "suggestion": "Review law_analysis_prompts from prepare_expansion and answer each law's questions"
+                }
+        
+        # =====================================================================
+        # Phase 7c: Constraint Validation
+        # =====================================================================
+
+        constraint_validation = {"checked": False, "violations": [], "warnings": []}
+        if project_id:
+            try:
+                from pas.helpers.constraint_validation import validate_hypothesis
+                all_violations = []
+                all_warnings = []
+                
+                for hyp in hypotheses:
+                    h_text = hyp.get("hypothesis", "")
+                    if h_text:
+                        validation = validate_hypothesis(h_text, project_id)
+                        all_violations.extend(validation.get("violations", []))
+                        all_warnings.extend(validation.get("warnings", []))
+                
+                constraint_validation = {
+                    "checked": True,
+                    "violations": all_violations,
+                    "warnings": all_warnings,
+                    "blocked": len(all_violations) > 0
+                }
+                
+                # Reject if any blocking violations
+                if constraint_validation["blocked"]:
+                    logger.warning(f"Phase 7c: Hypothesis rejected - constraint violation: {all_violations[0]}")
+                    return {
+                        "success": False,
+                        "error": "Hypothesis violates blocking constraint",
+                        "constraint_validation": constraint_validation,
+                        "suggestion": "Rephrase hypotheses to avoid: " + ", ".join(
+                            v.get("pattern_matched", "unknown") for v in all_violations
+                        )
+                    }
+                
+                if all_warnings:
+                    logger.info(f"Phase 7c: {len(all_warnings)} constraint warning(s) for hypotheses")
+            except Exception as e:
+                logger.warning(f"Phase 7c: Constraint validation failed (non-fatal): {e}")
+        
         # Determine parent path - Phase 2 Refactor
         parent_path, parent_node_id, parent_error = resolve_parent_path(
             cur, session_id, parent_node_id, get_embedding
         )
         if parent_error:
             return parent_error
+        
+        # v60: Fetch calibration context for decay application (once per call)
+        from pas.helpers.calibration import compute_confidence_decay
+        calibration_ctx = fetch_calibration_context(cur, project_id=project_id)
+        decay_applied_info = None
         
         created_nodes = []
         for i, hyp in enumerate(hypotheses[:3]):
@@ -1474,6 +1862,15 @@ async def store_expansion(
             if not hypothesis_text:
                 continue
             
+            # v60: Apply calibration decay if overconfidence detected
+            if calibration_ctx["should_apply_decay"]:
+                llm_confidence, decay_info = compute_confidence_decay(
+                    llm_confidence,
+                    calibration_ctx["stats"].get("overconfidence_bias", 0)
+                )
+                if decay_info.get("applied"):
+                    decay_applied_info = decay_info  # Track for response
+            
             # Generate embedding and find similar law - Phase 2 Refactor
             hyp_emb = get_embedding(hypothesis_text)
             prior, supporting_law, law_name = match_laws_and_compute_prior(
@@ -1482,7 +1879,7 @@ async def store_expansion(
             
             likelihood = llm_confidence
             
-            # v51: Build metadata with ROI if provided
+            # v60: Build metadata with ROI if provided
             roi_data = hyp.get("roi")
             metadata_json = json.dumps({"roi": roi_data}) if roi_data else None
             
@@ -1556,7 +1953,9 @@ async def store_expansion(
             "scope_warnings": scope_warnings if scope_warnings else None,  # v21: Historical failure warnings
             "scope_failure_warnings": scope_failure_warnings if scope_failure_warnings else None,  # v42b: Scope-based surfacing
             "preflight_warnings": preflight_warnings if preflight_warnings else None,  # v41: Preflight enforcement
-            "preflight_bypassed": preflight_bypassed if preflight_bypassed else None  # v41: Track bypasses
+            "preflight_bypassed": preflight_bypassed if preflight_bypassed else None,  # v41: Track bypasses
+            "decay_applied": decay_applied_info,  # v60: Calibration decay info
+            "constraint_validation": constraint_validation if constraint_validation.get("checked") else None  # Phase 7c
         }
         
     except Exception as e:
@@ -1901,6 +2300,14 @@ async def store_sequential_analysis(
                     SET metadata = COALESCE(metadata, '{}'::jsonb) || '{"sequential_analyzed": "true"}'::jsonb
                     WHERE id = %s
                 """, (node_id,))
+        
+        # v54: Mark session-level flag for negative space enforcement
+        cur.execute("""
+            UPDATE reasoning_sessions 
+            SET context = COALESCE(context, '{}'::jsonb) || '{"sequential_analysis_called": true}'::jsonb
+            WHERE id = %s
+        """, (session_id,))
+        
         conn.commit()
         safe_close_connection(conn)
         
@@ -2052,7 +2459,7 @@ def archive_interview_to_history(cur, session_id: str, goal: str, interview: dic
     for position, q in enumerate(answered_questions, 1):
         try:
             # Get embedding for semantic clustering
-            embedding = get_embedding(q.get("question_text", ""))
+            embedding = get_embedding(q.get("text") or q.get("question_text", ""))
             
             # Determine if follow-up was triggered
             follow_up_triggered = False
@@ -2081,7 +2488,7 @@ def archive_interview_to_history(cur, session_id: str, goal: str, interview: dic
                 (
                     session_id,
                     q.get("id", f"q_{position}"),
-                    q.get("question_text", ""),
+                    q.get("text") or q.get("question_text", ""),
                     embedding,
                     q.get("category", "general"),
                     answer_given,
@@ -2118,14 +2525,15 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Get session
-        cur.execute("SELECT goal, context FROM reasoning_sessions WHERE id = %s", (session_id,))
+        # Get session with session_mode
+        cur.execute("SELECT goal, context, session_mode FROM reasoning_sessions WHERE id = %s", (session_id,))
         session = cur.fetchone()
         if not session:
             return {"success": False, "error": f"Session {session_id} not found"}
         
         goal = session["goal"]
         context = session["context"] or {}
+        session_mode = session.get("session_mode", "implementation")
         interview = get_interview_context(context)
         
         # Check if interview already has questions
@@ -2139,23 +2547,66 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
                 "message": "Interview already has pending questions. Use get_next_question to continue."
             }
         
-        # v16d.2: Query historical failures
-        historical_questions = query_historical_failures(cur, conn, session_id, logger)
+        # v16d.2: Query historical failures (skip for constraint_discovery - those questions are for LLM agents)
+        historical_questions = []
+        if session_mode != "constraint_discovery":
+            historical_questions = query_historical_failures(cur, conn, session_id, logger)
         
-        # v19: Domain detection + dimension questions
-        detected_domains = detect_domains(cur, session_id, logger)
+        # v76: Check for constraint_discovery mode - prioritize project_constraints dimension
         domain_questions = []
-        if detected_domains:
+        detected_domains = []
+        
+        if session_mode == "constraint_discovery":
+            # Load questions from project_constraints dimension specifically
+            cur.execute("""
+                SELECT q.id, q.question_template, q.question_type, q.choices, q.constraint_mapping,
+                       d.id as dimension_id, d.dimension_name
+                FROM interview_questions q
+                JOIN interview_dimensions d ON q.dimension_id = d.id
+                WHERE d.dimension_name = 'project_constraints'
+                ORDER BY q.created_at
+            """)
+            constraint_rows = cur.fetchall()
+            for row in constraint_rows:
+                domain_questions.append({
+                    "id": str(row["id"]),
+                    "text": row["question_template"],
+                    "type": row["question_type"],
+                    "choices": row["choices"] or [],
+                    "constraint_mapping": row["constraint_mapping"],
+                    "dimension_id": str(row["dimension_id"]),
+                    "dimension_name": row["dimension_name"]
+                })
+            logger.info(f"v76: Loaded {len(domain_questions)} constraint discovery questions")
+            detected_domains = [{"id": None, "name": "constraint_setup"}]
             context["detected_domains"] = detected_domains
-            domain_ids = [d["id"] for d in detected_domains]
-            domain_questions, dimension_coverage = load_dimension_questions(cur, domain_ids, context, logger)
-            context["dimension_coverage"] = dimension_coverage
+        else:
+            # v19: Domain detection + dimension questions (normal flow)
+            detected_domains = detect_domains(cur, session_id, logger)
+            if detected_domains:
+                context["detected_domains"] = detected_domains
+                domain_ids = [d["id"] for d in detected_domains]
+                domain_questions, dimension_coverage = load_dimension_questions(cur, domain_ids, context, logger)
+                context["dimension_coverage"] = dimension_coverage
         
         # v21: LLM question prompt (agent processes later via store_gaps_questions)
         # build_goal_question_prompt(goal) - available but not awaited here
         
         # Prioritize and combine questions
         questions = prioritize_questions(domain_questions, [], historical_questions, goal)
+        
+        # =====================================================================
+        # v73: Phase 7b - Confirmation Loop Questions
+        # =====================================================================
+        confirmation_questions = generate_confirmation_questions(
+            session_context=context,
+            hypotheses=None,  # No hypotheses at identify_gaps stage
+            logger=logger
+        )
+        if confirmation_questions:
+            # Prepend confirmation questions (highest priority)
+            questions = confirmation_questions + questions
+            logger.info(f"v73: Added {len(confirmation_questions)} confirmation questions")
         
         # Update interview context
         interview["pending_questions"] = questions
@@ -2247,7 +2698,7 @@ async def get_next_question(session_id: str) -> dict[str, Any]:
                     "progress": f"Question {answered_count + 1} of ~{total_questions}",
                     "question": {
                         "id": q["id"],
-                        "text": q["question_text"],
+                        "text": q.get("text") or q.get("question_text", ""),
                         "type": q.get("question_type", "single_choice"),
                         "choices": q.get("choices", [])  # v37 FIX: Defensive access
                     }
@@ -2362,13 +2813,14 @@ async def check_interview_complete(session_id: str) -> dict[str, Any]:
         conn = get_db_connection()
         cur = conn.cursor()
         
-        cur.execute("SELECT goal, context FROM reasoning_sessions WHERE id = %s", (session_id,))
+        cur.execute("SELECT goal, context, session_mode FROM reasoning_sessions WHERE id = %s", (session_id,))
         session = cur.fetchone()
         if not session:
             return {"success": False, "error": "Session not found"}
         
         goal = session["goal"]
         context = session["context"] or {}
+        session_mode = session.get("session_mode", "implementation")
         interview = get_interview_context(context)
         pending = interview.get("pending_questions", [])
         
@@ -2395,6 +2847,95 @@ async def check_interview_complete(session_id: str) -> dict[str, Any]:
                 latent_traits, hidden_value_counts, archive_interview_to_history
             )
         
+        # -------------------------------------------------------------------------
+        # v76: Constraint Discovery - Map answers to project_constraints
+        # -------------------------------------------------------------------------
+        constraints_created = 0
+        if is_complete and session_mode == "constraint_discovery":
+            from pas.helpers.interview import constraint_mapper
+            
+            # Gather interview answers from answer_history
+            # v82: Include question_id for accurate constraint_mapping lookup
+            interview_answers = []
+            for q in answered:
+                if q.get("dimension_id"):
+                    interview_answers.append({
+                        "dimension_id": q["dimension_id"],
+                        "question_id": q.get("id"),  # v82: pass question_id for exact lookup
+                        "answer_label": q.get("answer"),
+                        "hidden_value": q.get("selected_hidden_value", "")
+                    })
+            
+            constraints = constraint_mapper(
+                session_id,
+                interview_answers,
+                latent_traits,
+                cur
+            )
+            
+            # Get project UUID from project_id string
+            project_id_str = context.get("project_id", "default")
+            cur.execute("SELECT id FROM project_registry WHERE project_id = %s", (project_id_str,))
+            project_row = cur.fetchone()
+            if not project_row:
+                logger.warning(f"v76: Project not found: {project_id_str}, skipping constraint storage")
+            else:
+                project_uuid = project_row["id"]
+                
+                # Store constraints with correct column names
+                for c in constraints:
+                    constraint_data = json.dumps({
+                        "value": c["value"],
+                        "priority": c.get("priority"),
+                        "source_dimension": c.get("source_dimension"),
+                        "source_answer": c.get("source_answer"),
+                        "source_session": c.get("source_session")
+                    })
+                    
+                    # Expire existing constraint with same key (temporal versioning)
+                    cur.execute("""
+                        UPDATE project_constraints 
+                        SET valid_to = NOW()
+                        WHERE project_id = %s AND constraint_key = %s AND valid_to IS NULL
+                    """, (project_uuid, c["key"]))
+                    
+                    # Insert new version
+                    cur.execute("""
+                        INSERT INTO project_constraints 
+                            (project_id, constraint_type, constraint_key, constraint_data, enforcement_level, source)
+                        VALUES (%s, %s, %s, %s, %s, 'inferred')
+                    """, (
+                        project_uuid, 
+                        c["type"], 
+                        c["key"], 
+                        constraint_data,
+                        c["enforcement"]
+                    ))
+                
+                constraints_created = len(constraints)
+                conn.commit()
+                logger.info(f"v76: Created {constraints_created} constraints from interview")
+            
+            # v76: Auto-export to GEMINI.md if project_path available
+            gemini_exported = False
+            project_path = context.get("project_path")
+            if project_path and constraints_created > 0:
+                try:
+                    from pas.helpers.gemini_sync import export_constraints_to_markdown, write_gemini_export
+                    
+                    export_result = export_constraints_to_markdown(project_id_str)
+                    if export_result.get("success"):
+                        write_result = write_gemini_export(
+                            project_path=project_path,
+                            content=export_result["export_content"],
+                            mode="append"
+                        )
+                        gemini_exported = write_result.get("success", False)
+                        if gemini_exported:
+                            logger.info(f"v76: Auto-exported {constraints_created} constraints to GEMINI.md")
+                except Exception as e:
+                    logger.warning(f"v76: Failed to auto-export to GEMINI.md: {e}")
+        
         return {
             "success": True,
             "session_id": session_id,
@@ -2405,6 +2946,8 @@ async def check_interview_complete(session_id: str) -> dict[str, Any]:
             "latent_traits": latent_traits if latent_traits else None,
             "hidden_value_counts": hidden_value_counts if hidden_value_counts else None,
             "archived_for_learning": interview.get("archived", False),
+            "constraints_created": constraints_created if constraints_created > 0 else None,
+            "gemini_exported": gemini_exported if constraints_created > 0 else None,
             "message": "Ready for prepare_expansion" if is_complete else f"{len(unanswered)} questions remaining"
         }
         
@@ -2579,7 +3122,10 @@ async def finalize_session(
     # v33: Quality gate enforcement (opt-out, not opt-in)
     skip_quality_gate: bool = False,
     # v37: Sequential analysis enforcement (opt-out, not opt-in)
-    skip_sequential_analysis: bool = False
+    skip_sequential_analysis: bool = False,
+    # v82: Critique gate enforcement (Phase 4 hardening)
+    skip_critique_check: bool = False,
+    critique_bypass_reason: Optional[str] = None
 ) -> dict[str, Any]:
     """
     Finalize a reasoning session by auto-critiquing top hypotheses.
@@ -2690,6 +3236,44 @@ async def finalize_session(
         implementation_checklist = build_implementation_checklist(winning_scope)
         
         # =====================================================================
+        # Phase 3: LSP Impact Analysis - Gather blast radius for winning scope
+        # =====================================================================
+        lsp_impact_result = None
+        if winning_scope:
+            try:
+                from pas.helpers.lsp_enrichment import get_lsp_impact_from_scope
+                from pas.lsp.lsp_pool import LspPool
+                
+                # Get project root from session context if available
+                project_root = None
+                if session.get("context"):
+                    ctx = session["context"]
+                    if isinstance(ctx, dict):
+                        project_root = ctx.get("project_root") or ctx.get("project_path")
+                
+                # Try to get LSP pool for the project
+                lsp_pool = None
+                if project_root:
+                    try:
+                        lsp_pool = await LspPool.get(str(project_root))
+                    except Exception as e:
+                        logger.debug(f"LSP pool unavailable: {e}")
+                
+                lsp_impact_result = await get_lsp_impact_from_scope(
+                    declared_scope=winning_scope,
+                    project_root=project_root,
+                    lsp_pool=lsp_pool,
+                )
+            except Exception as e:
+                logger.warning(f"Phase 3: LSP impact gathering failed: {e}")
+                lsp_impact_result = {
+                    "lsp_available": False,
+                    "error": str(e),
+                    "scope_parsed": winning_scope,
+                }
+        
+
+        # =====================================================================
         # v32b: Warning Persistence & v26: Tag Suggestions - Phase 1 Refactor
         # =====================================================================
         warnings_surfaced, suggested_tags, implementation_checklist = surface_warnings_and_tags(
@@ -2745,6 +3329,47 @@ async def finalize_session(
             min_score_threshold, min_gap_threshold,
             skip_quality_gate
         )
+        
+        # v82: Phase 4 Hardening - Critique gate enforcement
+        critique_gate = check_critique_gate(
+            cur, recommendation["node_id"], skip_critique_check
+        )
+        
+        # Log bypass if escape hatch used
+        if skip_critique_check:
+            cur.execute("""
+                INSERT INTO tool_calls (session_id, tool_name, call_args)
+                VALUES (%s, 'critique_check_bypass', %s)
+            """, (session_id, json.dumps({
+                "reason": critique_bypass_reason or "No reason provided",
+                "bypass_by": "user_request"
+            })))
+            conn.commit()
+        
+        # Add critique_gate to quality_gate dict
+        quality_gate["critique_gate"] = critique_gate
+        
+        # Block if critique_gate failed (unless skipped)
+        if not critique_gate["passed"] and not skip_critique_check:
+            quality_gate["passed"] = False
+            if "blockers" not in quality_gate:
+                quality_gate["blockers"] = []
+            quality_gate["blockers"].append("uncritiqued_top_hypothesis")
+            quality_gate_enforced = False
+        
+        # Phase 8: Mode-aware quality gate behavior
+        session_mode = session.get("session_mode", "implementation")
+        unconstrained = session.get("unconstrained", False)
+        mode_config = MODE_CONFIG.get(session_mode, MODE_CONFIG["implementation"])
+        
+        # Research mode: softer enforcement (show warnings, don't block)
+        if not mode_config["enforce_quality_gate"]:
+            quality_gate_enforced = False
+            # Add warning if score is below threshold (informational only)
+            quality_warning = None
+            if not quality_gate["passed"] and not unconstrained:
+                quality_warning = f"Score {winner_score:.2f} below threshold (informational - research mode)"
+            session["quality_warning"] = quality_warning  # Pass to return dict
         
         # v31e: Score Improvement Suggestions - Phase 1 Refactor: Use extracted helper
         score_improvement_suggestions = build_score_improvement_suggestions(
@@ -2813,8 +3438,17 @@ async def finalize_session(
                 quality_gate, session.get("goal", "")
             ) if quality_gate["passed"] else None,
             # v51: Effort-Benefit ROI analysis
-            "roi_analysis": build_roi_analysis(processed, recommendation)
+            "roi_analysis": build_roi_analysis(processed, recommendation),
+            # v82: Dual recommendation - show aspirational alternative when no_mvp preferred
+            "dual_recommendation": compute_dual_recommendation(processed, recommendation),
+            # Phase 3: LSP blast radius analysis for implementation plan
+            "lsp_impact": lsp_impact_result,
+            # Phase 8: Mode-aware session info
+            "session_mode": session_mode,
+            "mode_label": mode_config["finalize_label"],  # "recommendation" or "synthesis"
+            "quality_warning": session.get("quality_warning"),  # Informational for research mode
         }
+
 
 
         
@@ -4149,15 +4783,54 @@ async def infer_config_assumptions(
     """
     try:
         from pas.helpers.config_assumptions import parse_config_file, extract_assumptions, build_enrichment_prompt
+        from pathlib import Path
+        
+        # v61: Resolve config path relative to project root
+        resolved_path = None
+        project_root = None
+        
+        if not Path(config_path).is_absolute():
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT project_root FROM project_registry WHERE project_id = %s", (project_id,))
+            row = cur.fetchone()
+            conn.close()
+            
+            if row and row.get('project_root'):
+                project_root = Path(row['project_root'])
+                # Search common config locations
+                search_dirs = [
+                    project_root,
+                    project_root / 'config',
+                    project_root / 'src' / 'config',
+                ]
+                # Also check src/<pkg>/config/ pattern
+                src_dir = project_root / 'src'
+                if src_dir.exists():
+                    for child in src_dir.iterdir():
+                        if child.is_dir() and not child.name.startswith('.'):
+                            config_subdir = child / 'config'
+                            if config_subdir.exists():
+                                search_dirs.append(config_subdir)
+                
+                # Try to find the config file
+                for search_dir in search_dirs:
+                    candidate = search_dir / config_path
+                    if candidate.exists():
+                        resolved_path = candidate
+                        break
+        
+        # Use resolved path or original
+        final_path = str(resolved_path) if resolved_path else config_path
         
         # Parse config
-        config = parse_config_file(config_path)
+        config = parse_config_file(final_path)
         
         # Extract assumptions using heuristics
         assumptions = extract_assumptions(config)
         
         # Build enrichment prompt
-        enrichment_prompt = build_enrichment_prompt(assumptions, config_path)
+        enrichment_prompt = build_enrichment_prompt(assumptions, final_path)
         
         # Categorize assumptions
         by_type: dict[str, list] = {}
@@ -4167,12 +4840,12 @@ async def infer_config_assumptions(
                 by_type[t] = []
             by_type[t].append(a)
         
-        logger.info(f"v45f: Extracted {len(assumptions)} assumptions from {config_path}")
+        logger.info(f"v45f: Extracted {len(assumptions)} assumptions from {final_path}")
         
         return {
             "success": True,
             "project_id": project_id,
-            "config_path": config_path,
+            "config_path": final_path,
             "assumptions": assumptions,
             "by_type": by_type,
             "stats": {
@@ -4734,8 +5407,8 @@ async def record_outcome(
         Confirmation with stats about attributed nodes
     """
 
-    if outcome not in ('success', 'partial', 'failure'):
-        return {"success": False, "error": "outcome must be 'success', 'partial', or 'failure'"}
+    # Phase 8: Defer outcome validation until we know the session mode
+    # Valid outcomes vary by mode (e.g., research allows 'knowledge_gained')
     
     confidence = max(0.0, min(1.0, confidence))
     
@@ -4743,6 +5416,25 @@ async def record_outcome(
         conn = get_db_connection()
         conn.rollback()  # Defensive: ensure clean transaction state
         cur = conn.cursor()
+        
+        # Phase 8: Fetch session to get mode for outcome validation
+        cur.execute(
+            "SELECT session_mode FROM reasoning_sessions WHERE id = %s",
+            (session_id,)
+        )
+        session_row = cur.fetchone()
+        if not session_row:
+            return {"success": False, "error": "Session not found"}
+        
+        session_mode = session_row.get("session_mode", "implementation")
+        mode_config = MODE_CONFIG.get(session_mode, MODE_CONFIG["implementation"])
+        valid_outcomes = mode_config["outcomes"]
+        
+        if outcome not in valid_outcomes:
+            return {
+                "success": False, 
+                "error": f"Invalid outcome for {session_mode} mode. Valid: {valid_outcomes}"
+            }
         
         # Get the best path for this session
         cur.execute(
@@ -5579,20 +6271,222 @@ def _compute_file_hash(file_path: Path) -> str:
 # v39: _extract_symbols moved to codebase_helpers.py
 # =============================================================================
 
+
+# =============================================================================
+# Phase 7c: GEMINI.md Constraint Sync
+# =============================================================================
+
 @mcp.tool()
+async def sync_gemini_constraints(
+    project_id: str,
+    project_path: str,
+    direction: str = "detect_only"
+) -> dict[str, Any]:
+    """
+    Sync constraints between GEMINI.md and database.
+    
+    Uses hybrid LLM/embedding approach:
+    - Returns extraction_prompt for agent LLM to parse GEMINI.md
+    - Uses embedding similarity for drift detection
+    
+    Args:
+        project_id: Project identifier (e.g., 'mcp-pas')
+        project_path: Path to project root containing GEMINI.md
+        direction: Sync direction
+            - detect_only: Just detect drift, return extraction_prompt
+            - file_to_db: GEMINI.md overwrites DB (call after LLM extraction)
+            - db_to_file: DB overwrites GEMINI.md (not implemented)
+    
+    Returns:
+        Sync results with extraction_prompt if needed
+    """
+    try:
+        from pas.helpers.gemini_sync import (
+            sync_gemini_constraints as _sync_gemini_constraints
+        )
+        
+        result = await _sync_gemini_constraints(project_id, project_path, direction)
+        return result
+        
+    except Exception as e:
+        logger.error(f"sync_gemini_constraints failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def store_extracted_constraints(
+    project_id: str,
+    constraints_json: str
+) -> dict[str, Any]:
+    """
+    Store LLM-extracted constraints from GEMINI.md.
+    
+    Call this after processing the extraction_prompt from sync_gemini_constraints.
+    
+    Args:
+        project_id: Project identifier
+        constraints_json: JSON array of extracted constraints from LLM
+            Format: [{"type": "philosophy", "key": "no_mvp", "value": true, "enforcement": "block"}, ...]
+    
+    Returns:
+        Confirmation with stored count
+    """
+    try:
+        import json
+        from pas.helpers.gemini_sync import store_extracted_constraints as _store_constraints
+        
+        constraints = json.loads(constraints_json)
+        if not isinstance(constraints, list):
+            return {"success": False, "error": "constraints_json must be a JSON array"}
+        
+        result = _store_constraints(project_id, constraints)
+        return result
+        
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Invalid JSON: {e}"}
+    except Exception as e:
+        logger.error(f"store_extracted_constraints failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def detect_constraint_drift(
+    project_id: str,
+    constraints_json: str,
+    threshold: float = 0.15
+) -> dict[str, Any]:
+    """
+    Detect semantic drift between GEMINI.md and database constraints.
+    
+    Call after LLM extraction to check if values have changed semantically.
+    
+    Args:
+        project_id: Project identifier
+        constraints_json: JSON array of extracted constraints from GEMINI.md
+        threshold: Drift threshold (default 0.15 = 15% semantic change)
+    
+    Returns:
+        Drift detection results with resolution_prompt if drift detected
+    """
+    try:
+        import json
+        from pas.helpers.gemini_sync import detect_drift
+        
+        constraints = json.loads(constraints_json)
+        result = detect_drift(project_id, constraints, threshold)
+        return result
+        
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Invalid JSON: {e}"}
+    except Exception as e:
+        logger.error(f"detect_constraint_drift failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def write_gemini_export(
+    project_path: str,
+    content: str,
+    mode: Literal["append", "replace"] = "append"
+) -> dict[str, Any]:
+    """
+    Write exported constraints to GEMINI.md file.
+    
+    Use this after reviewing the export_content from sync_gemini_constraints(direction='db_to_file').
+    Supports idempotent section replacement - repeated calls update the same section.
+    
+    Args:
+        project_path: Absolute path to project root containing GEMINI.md
+        content: Exported markdown content from sync_gemini_constraints(direction='db_to_file')
+        mode: 'append' (add/replace section - recommended) or 'replace' (overwrite entire file)
+    
+    Returns:
+        Success status with file path and mode used
+    """
+    try:
+        from pas.helpers.gemini_sync import write_gemini_export as _write_gemini_export
+        
+        result = _write_gemini_export(project_path, content, mode)
+        return result
+        
+    except Exception as e:
+        logger.error(f"write_gemini_export failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def resolve_constraint_drift(
+    project_id: str,
+    project_path: str,
+    resolution: Literal["file_to_db", "db_to_file", "skip"],
+    drifted_keys: Optional[str] = None,
+    file_constraints_json: Optional[str] = None
+) -> dict[str, Any]:
+    """
+    Resolve conflicts between GEMINI.md and database constraints.
+    
+    Call after detect_constraint_drift returns drifts. This applies
+    the user's chosen resolution strategy.
+    
+    Args:
+        project_id: Project identifier
+        project_path: Absolute path to project root
+        resolution: How to resolve:
+            - file_to_db: GEMINI.md values overwrite DB (choice A)
+            - db_to_file: DB values overwrite GEMINI.md (choice B)
+            - skip: Leave unresolved for manual handling (choice C)
+        drifted_keys: Optional JSON array of specific keys to resolve
+        file_constraints_json: Required for file_to_db - JSON array of constraints from GEMINI.md
+        
+    Returns:
+        Resolution results with counts and paths affected
+    """
+    try:
+        from pas.helpers.gemini_sync import resolve_constraint_drift as _resolve
+        
+        # Parse optional JSON args
+        drifted = None
+        if drifted_keys:
+            drifted = json.loads(drifted_keys)
+            
+        file_constraints = None
+        if file_constraints_json:
+            file_constraints = json.loads(file_constraints_json)
+        
+        result = _resolve(
+            project_id=project_id,
+            project_path=project_path,
+            resolution=resolution,
+            drifted_keys=drifted,
+            file_constraints=file_constraints
+        )
+        return result
+        
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Invalid JSON: {e}"}
+    except Exception as e:
+        logger.error(f"resolve_constraint_drift failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+
 async def sync_project(
     project_path: str,
     project_id: Optional[str] = None,
     max_files: Optional[int] = None,
     max_file_size_kb: int = 100,
     include_references: bool = False,
-    include_call_hierarchy: bool = False
+    include_call_hierarchy: bool = False,
+    auto_understand: bool = True
 ) -> dict[str, Any]:
     """
     Index a project directory for codebase understanding.
     
     v51 Delta Sync: Uses mtime gating to skip unchanged files and
     purges orphan records for deleted files.
+    
+    v61: auto_understand populates system_map, schema_intent, config_assumptions.
     
     Args:
         project_path: Absolute path to project root
@@ -5601,6 +6495,7 @@ async def sync_project(
         max_file_size_kb: Skip files larger than this (default 100KB)
         include_references: If True, index symbol references via LSP (slower)
         include_call_hierarchy: If True, index call hierarchy via LSP (slower)
+        auto_understand: If True (default), populate deep understanding data
     
     Returns:
         Sync results with counts and any errors
@@ -5638,6 +6533,7 @@ async def sync_project(
             'errors': []
         }
         seen_paths: set[str] = set()  # v51: track for orphan detection
+        files_to_index_refs: list[dict] = []  # v68a: collect files for second-pass ref indexing
         
         # v52: Initialize LSP pool for symbol extraction
         lsp_pool = None
@@ -5763,18 +6659,58 @@ async def sync_project(
                     )
                     stats['symbols_extracted'] += 1
                 
-                # v68: Index references via LSP if requested
-                if include_references and lsp_pool and language == "python":
-                    # Clear old references for this file
-                    cur.execute(
-                        "DELETE FROM symbol_references WHERE source_file = %s AND project_id = %s",
-                        (rel_path, pid)
-                    )
+                # v68a: Collect files for second-pass reference indexing
+                if (include_references or include_call_hierarchy) and language == "python":
+                    files_to_index_refs.append({
+                        'file_path': str(file_path),
+                        'rel_path': rel_path,
+                        'symbols': symbols
+                    })
+                
+            except Exception as e:
+                stats['errors'].append(f"{rel_path}: {str(e)[:100]}")
+                if len(stats['errors']) > 10:
+                    break
+        
+        conn.commit()
+        
+        # v51: Purge orphan files (deleted from disk but still in DB)
+        orphan_paths = set(existing.keys()) - seen_paths
+        if orphan_paths:
+            cur.execute(
+                "DELETE FROM file_registry WHERE project_id = %s AND file_path = ANY(%s)",
+                (pid, list(orphan_paths))
+            )
+            stats['files_purged'] = len(orphan_paths)
+            conn.commit()
+        
+        # v68a: Second-pass reference/call hierarchy indexing (after LSP has analyzed project)
+        if files_to_index_refs and lsp_pool and (include_references or include_call_hierarchy):
+            logger.info(f"sync_project: Second pass - waiting 5s for LSP analysis to complete...")
+            await asyncio.sleep(5)  # Give basedpyright time to analyze the project
+            
+            for file_info in files_to_index_refs:
+                file_path_str = file_info['file_path']
+                rel_path = file_info['rel_path']
+                symbols = file_info['symbols']
+                
+                # Clear old references for this file
+                cur.execute(
+                    "DELETE FROM symbol_references WHERE source_file = %s AND project_id = %s",
+                    (rel_path, pid)
+                )
+                
+                # Index references
+                if include_references:
                     for sym in symbols:
                         try:
                             sym_line = sym.get('line_start', 1)
                             lsp_line = sym_line - 1  # LSP is 0-indexed
-                            refs = await lsp_pool.find_references(str(file_path), lsp_line, 0)
+                            # v68a: Column offset heuristic - cursor must be ON the symbol name
+                            # Python: 'def ' = 4 chars, 'class ' = 6 chars, 'async def ' = 10 chars
+                            sym_type = sym.get('type', '')
+                            col_offset = 4 if sym_type in ('function', 'method') else 6 if sym_type == 'class' else 0
+                            refs = await lsp_pool.find_references(file_path_str, lsp_line, col_offset)
                             for ref in refs:
                                 target_uri = ref.get('uri', '')
                                 if target_uri.startswith('file://'):
@@ -5796,14 +6732,15 @@ async def sync_project(
                         except Exception as ref_e:
                             logger.debug(f"Reference indexing failed for {sym['name']}: {ref_e}")
                 
-                # v68: Index call hierarchy via LSP if requested
-                if include_call_hierarchy and lsp_pool and language == "python":
+                # Index call hierarchy
+                if include_call_hierarchy:
                     for sym in symbols:
                         if sym.get('type') in ('function', 'method'):
                             try:
                                 sym_line = sym.get('line_start', 1)
                                 lsp_line = sym_line - 1
-                                calls = await lsp_pool.call_hierarchy(str(file_path), lsp_line, 0, 'incoming')
+                                # v68a: Column 4 offset for functions (after 'def ')
+                                calls = await lsp_pool.call_hierarchy(file_path_str, lsp_line, 4, 'incoming')
                                 for call in calls:
                                     caller_uri = call.get('uri', '')
                                     if caller_uri.startswith('file://'):
@@ -5826,23 +6763,9 @@ async def sync_project(
                                         stats['calls_indexed'] += 1
                             except Exception as call_e:
                                 logger.debug(f"Call hierarchy indexing failed for {sym['name']}: {call_e}")
-                
-            except Exception as e:
-                stats['errors'].append(f"{rel_path}: {str(e)[:100]}")
-                if len(stats['errors']) > 10:
-                    break
-        
-        conn.commit()
-        
-        # v51: Purge orphan files (deleted from disk but still in DB)
-        orphan_paths = set(existing.keys()) - seen_paths
-        if orphan_paths:
-            cur.execute(
-                "DELETE FROM file_registry WHERE project_id = %s AND file_path = ANY(%s)",
-                (pid, list(orphan_paths))
-            )
-            stats['files_purged'] = len(orphan_paths)
+            
             conn.commit()
+            logger.info(f"sync_project: Indexed {stats['references_indexed']} refs, {stats['calls_indexed']} calls")
         
         # v43/v51: Upsert project_registry with project_root
         try:
@@ -5863,11 +6786,26 @@ async def sync_project(
             logger.warning(f"v51: project_registry upsert failed: {reg_error}")
             stats['project_registered'] = False
         
+        # v61: Auto-populate project understanding
+        understanding_result = None
+        if auto_understand:
+            try:
+                from pas.helpers.codebase import populate_project_understanding
+                understanding_result = await populate_project_understanding(
+                    project_id=pid,
+                    project_path=str(path),
+                    conn=conn
+                )
+            except Exception as e:
+                logger.warning(f"sync_project: understanding population failed: {e}")
+        
         return {
             "success": True,
             "project_id": pid,
             "project_path": str(path),
             **stats,
+            "understanding_populated": understanding_result is not None and understanding_result.get('stored', False),
+            "understanding_errors": understanding_result.get('errors', []) if understanding_result else [],
             "message": f"Synced {stats['files_added']} new, {stats['files_updated']} updated files"
         }
         
@@ -6454,14 +7392,66 @@ async def validate_plan(
         from pas.helpers.finalize import build_critique_checklist
         checklist = build_critique_checklist(cur, session_id)
         
+        plan_lower = plan_text.lower()
+        
+        # =====================================================================
+        # v73 Phase 3: LSP scope validation (run before early returns)
+        # =====================================================================
+        scope_warnings = []
+        if lsp_impact and lsp_impact.get("lsp_available"):
+            callers_outside = lsp_impact.get("callers_outside_scope", [])
+            for caller in callers_outside:
+                # Check if caller file is mentioned in plan
+                from pathlib import Path
+                caller_name = Path(caller).name.lower()
+                if caller_name not in plan_lower:
+                    scope_warnings.append({
+                        "type": "scope_miss",
+                        "file": caller,
+                        "message": f"File '{caller_name}' uses symbols from scope but not in plan"
+                    })
+        
+        # Build LSP section check result
+        lsp_section_check = None
+        if lsp_impact:
+            lsp_section_check = {
+                "has_lsp_section": False,
+                "lsp_required": True,
+                "warning": None
+            }
+            
+            # Check for LSP Impact Analysis section (case-insensitive)
+            lsp_section_patterns = [
+                "lsp impact analysis",
+                "lsp impact",
+                "impact analysis",
+                "## lsp",
+                "### lsp"
+            ]
+            for pattern in lsp_section_patterns:
+                if pattern in plan_lower:
+                    lsp_section_check["has_lsp_section"] = True
+                    break
+            
+            # If LSP data provided but no section, add warning
+            if not lsp_section_check["has_lsp_section"]:
+                lsp_section_check["warning"] = "Plan should include 'LSP Impact Analysis' section when lsp_impact data is available"
+            
+            # If lsp_impact has external callers not addressed, mark as warning
+            if scope_warnings:
+                lsp_section_check["external_callers_not_addressed"] = len(scope_warnings)
+        
+        # Early return if no critiques - but still include LSP info
         if not checklist:
             return {
                 "valid": True,
                 "message": "No critiques to validate against",
-                "checklist_count": 0
+                "checklist_count": 0,
+                "scope_warnings": scope_warnings if scope_warnings else None,
+                "lsp_section_check": lsp_section_check
             }
         
-        plan_lower = plan_text.lower()
+        # plan_lower already computed above
         addressed = []
         missing = []
         
@@ -6485,23 +7475,11 @@ async def validate_plan(
         coverage = len(addressed) / len(checklist) if checklist else 1.0
         has_high_severity_missing = any(m["severity"] == "high" for m in missing)
         
-        # v52 Phase 3: LSP scope validation
-        scope_warnings = []
-        if lsp_impact and lsp_impact.get("lsp_available"):
-            callers_outside = lsp_impact.get("callers_outside_scope", [])
-            for caller in callers_outside:
-                # Check if caller file is mentioned in plan
-                from pathlib import Path
-                caller_name = Path(caller).name.lower()
-                if caller_name not in plan_lower:
-                    scope_warnings.append({
-                        "type": "scope_miss",
-                        "file": caller,
-                        "message": f"File '{caller_name}' uses symbols from scope but not in plan"
-                    })
+        # Determine overall validity
+        is_valid = len(missing) == 0 or not has_high_severity_missing
         
         return {
-            "valid": len(missing) == 0 or not has_high_severity_missing,
+            "valid": is_valid,
             "coverage": round(coverage, 2),
             "total_critiques": len(checklist),
             "addressed_count": len(addressed),
@@ -6509,6 +7487,7 @@ async def validate_plan(
             "missing_count": len(missing),
             "missing": missing,
             "scope_warnings": scope_warnings if scope_warnings else None,
+            "lsp_section_check": lsp_section_check if lsp_impact else None,
             "recommendation": "Address missing HIGH severity items before proceeding" if has_high_severity_missing else None
         }
         

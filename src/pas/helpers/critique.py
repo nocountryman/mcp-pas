@@ -14,6 +14,36 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# v59: Persona Activation Helper
+# =============================================================================
+
+def should_activate_persona(persona: dict, goal_text: str, scope: str = "") -> bool:
+    """
+    Check if a persona should be activated for this session.
+    
+    Args:
+        persona: Persona dict with optional domain_triggers or always_active
+        goal_text: The session goal text
+        scope: Optional scope text (file paths, etc.)
+        
+    Returns:
+        True if persona should be used
+    """
+    # Always-active personas
+    if persona.get("always_active"):
+        return True
+    
+    # Domain-conditional activation
+    domain_triggers = persona.get("domain_triggers")
+    if domain_triggers:
+        text = (goal_text + " " + scope).lower()
+        return any(trigger in text for trigger in domain_triggers)
+    
+    # Default personas (no special conditions) are always active
+    return True
+
+
+# =============================================================================
 # Node & Law Fetching
 # =============================================================================
 
@@ -57,6 +87,36 @@ def fetch_node_with_laws(cur, node_id: str) -> tuple[Optional[dict], list[dict]]
             })
     
     return node, laws_text
+
+
+# =============================================================================
+# v73: Active Law Application Helper
+# =============================================================================
+
+def build_law_application_block(law: dict) -> str:
+    """
+    Build a formatted law application block for LLM prompts.
+    
+    Implements Phase 7d: Active Law Application.
+    Instead of just listing law names, injects full definition
+    with self-apply instructions for the LLM.
+    
+    Args:
+        law: Dict with 'law_name' and 'definition' keys
+        
+    Returns:
+        Formatted block for LLM prompt injection
+    """
+    law_name = law.get('law_name', 'Unknown')
+    definition = law.get('definition', '')
+    
+    return f"""**MATCHED LAW**: {law_name}
+**DEFINITION**: {definition}
+
+TASK: Before proceeding, analyze the current context against this law:
+- What markers or patterns should you look for?
+- How should this influence your analysis?
+"""
 
 
 # =============================================================================
@@ -108,14 +168,20 @@ Focus on OMISSIONS, not flaws in what IS proposed."""
         system = "You are a gap analyst. Find what's MISSING, not what's wrong. Return only valid JSON."
         expected_format = "JSON object with gaps/blind_spots/boundary_issues"
     else:
-        # Standard critique mode
-        law_names = ', '.join(l.get('law_name', '') for l in laws_text) if laws_text else 'None'
+        # Standard critique mode - v73: Active Law Application
+        if laws_text:
+            law_blocks = '\n\n'.join(build_law_application_block(l) for l in laws_text)
+        else:
+            law_blocks = 'No laws matched'
+        
         prompt = f"""Critique this hypothesis:
 {node_content}
 
 Session Goal: {session_goal}
 
-Consider these scientific laws: {law_names}
+## Scientific Laws to Apply
+
+{law_blocks}
 
 Return ONLY a valid JSON object:
 {{

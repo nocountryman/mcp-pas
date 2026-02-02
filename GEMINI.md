@@ -504,3 +504,41 @@ When activation isn't needed:
 
 > **Platform Constraint**: This is a fundamental limitation of Antigravity's subprocess isolation. No IDE setting can change this.
 
+## PAS-Exported Constraints
+
+> Auto-generated from database. Last synced: 2026-02-02T00:31:17.284385
+
+### Philosophy Constraints
+
+| Key | Value | Enforcement |
+|-----|-------|-------------|
+| `allow_mvp` | `{'value': True, 'priority': 'nice_to_have', 'source_answer': 'A', 'source_session': '7154bf8e-30cc-4120-bea3-47e4e5ca5ccf', 'source_dimension': '197927c5-c9b9-4b6f-bd1e-e8ee92ee0a41'}` | warn |
+| `balanced_quality` | `{'value': True, 'priority': 'nice_to_have', 'source_answer': 'C', 'source_session': '7154bf8e-30cc-4120-bea3-47e4e5ca5ccf', 'source_dimension': '197927c5-c9b9-4b6f-bd1e-e8ee92ee0a41'}` | warn |
+| `codebase_research_required` | `True` | warn |
+| `code_quality` | `production_grade` | warn |
+| `dual_plan` | `True` | warn |
+| `log_failures_immediately` | `True` | warn |
+| `no_mvp` | `{'value': True, 'priority': 'nice_to_have', 'source_answer': 'B', 'source_session': '7154bf8e-30cc-4120-bea3-47e4e5ca5ccf', 'source_dimension': '197927c5-c9b9-4b6f-bd1e-e8ee92ee0a41'}` | warn |
+| `pas_before_changes` | `True` | warn |
+| `post_synthesis_critique_required` | `True` | warn |
+| `preflight_enforcement` | `True` | warn |
+| `quality_gate_required` | `True` | block |
+| `quality_gate_threshold` | `0.9` | block |
+| `roadmap_vs_plan_distinction` | `True` | warn |
+| `sequential_analysis_required` | `True` | warn |
+| `symbol_lookups_required` | `True` | warn |
+| `warning_acknowledgment_required` | `True` | warn |
+
+### Environment Constraints
+
+| Key | Value | Enforcement |
+|-----|-------|-------------|
+| `terminal_env_activation` | `source .venv312/bin/activate && set -a && source .env && set +a` | block |
+
+### Quality Constraints
+
+| Key | Value | Enforcement |
+|-----|-------|-------------|
+| `definition_of_done` | `{'value': 'full_dod'}` | warn |
+| `import_verification_required` | `True` | warn |
+| `verify_before_completing` | `True` | warn |

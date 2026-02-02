@@ -32,6 +32,12 @@ description: Enforce PAS-driven implementation planning for non-trivial changes
 9. finalize_session(session_id="...")
    → HARD BLOCK: score < 0.9 = DO NOT PROCEED
    → If quality_gate.passed = false, deepen or expand more hypotheses
+   
+9a. **v59: Review Dual Recommendation**
+   → If response includes `aspirational` different from `balanced`:
+      → Document both in plan's "Alternatives Considered" table
+      → If user said "effort doesn't matter", prefer aspirational
+   → Include pros/cons for each option
 
 ## 🔍 LSP Impact Analysis (v52 Phase 1)
 9b. Before creating plan, gather LSP data:
@@ -45,6 +51,14 @@ description: Enforce PAS-driven implementation planning for non-trivial changes
    → Request user review via notify_user(PathsToReview=[...], BlockedOnUser=True)
    → DO NOT write code until user approves or auto-proceeds
    → The plan is YOUR structured checklist - without it you skip verification steps
+
+10a. **v73 Phase 3: Validate Plan Before Implementation**
+   → Call `validate_plan(session_id, plan_text, lsp_impact=<lsp_data_if_available>)`
+   → Check response for:
+      - `lsp_section_check.has_lsp_section` = true if lsp_impact was provided
+      - `missing` list is empty (or only LOW severity)
+      - `scope_warnings` addressed or documented
+   → If validation fails, update plan before proceeding
 
 11. AFTER user approval: Execute code changes following plan
 12. record_outcome(session_id="...", outcome="...")
@@ -81,6 +95,20 @@ After synthesize_hypotheses() creates hybrid node:
 
 ---
 
+## Workflow: Research Mode
+
+```
+1. start_reasoning_session(session_mode="research", user_goal="Research: ...")
+2. Explore using query_codebase, search_web, view_file
+3. Document findings in research_plan_template.md
+4. If research leads to implementation:
+   → Create new implementation session (session_mode="implementation")
+   → Link research findings in implementation plan
+5. record_outcome(session_id="...", outcome="success|partial")
+```
+
+---
+
 ## Quality Gate Enforcement
 
 | Metric | Threshold | Action if Below |
@@ -93,10 +121,19 @@ After synthesize_hypotheses() creates hybrid node:
 
 ---
 
-## Templates
+## Templates (v82 Enhanced)
 
-- **Single-phase**: `.agent/templates/implementation_plan_template.md`
-- **Multi-phase**: `.agent/templates/roadmap_template.md`
+| Template | When to Use | Key Features |
+|----------|-------------|---------------|
+| [implementation_plan_template.md](file:///.agent/templates/implementation_plan_template.md) | Single-phase work | Nudges, dual-plan section, constraint footer |
+| [roadmap_template.md](file:///.agent/templates/roadmap_template.md) | Multi-phase work | Per-phase guidance, mermaid examples |
+| [research_plan_template.md](file:///.agent/templates/research_plan_template.md) | Research mode sessions | Findings-based structure, source attribution |
+
+### Template Features
+- **Agent Context Header**: Role, constraints, mode reminder
+- **Section Nudges**: `> [!IMPORTANT]` checks after each section
+- **Dual Recommendation**: Balanced vs Aspirational table
+- **Constraint Footer**: Known issues and active constraints
 
 ---
 

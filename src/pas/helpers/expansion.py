@@ -12,6 +12,86 @@ from typing import Any, Optional
 
 logger = logging.getLogger("pas_server")
 
+# v73: Import for Active Law Application
+from pas.helpers.critique import build_law_application_block
+
+
+# =============================================================================
+# Phase 7d: Active Law Application - Question Templates
+# =============================================================================
+
+# Law-specific question templates that enforce active law application
+# Format: {law_name: [list of questions the agent must answer]}
+LAW_QUESTION_TEMPLATES = {
+    "Gain-Loss Framing Analysis": [
+        "List any LOSS-framing phrases in the goal (e.g., 'prevent', 'avoid', 'stop')",
+        "List any GAIN-framing phrases in the goal (e.g., 'improve', 'enable', 'save')",
+        "Based on loss aversion principle, which phrases indicate HIGHEST priority?"
+    ],
+    "Illocutionary Force Detection": [
+        "Identify DIRECTIVE statements in the goal ('I want', 'must', 'should')",
+        "Identify EXPRESSIVE statements in the goal ('I hate', 'frustrated', 'love')",
+        "What do these speech acts reveal about user priorities?"
+    ],
+    "Certainty Weighing (Allais)": [
+        "What outcomes are described as CERTAIN vs PROBABLE?",
+        "How should certainty bias affect hypothesis confidence?"
+    ],
+    "Anchoring Effect": [
+        "What numerical values or estimates are mentioned first?",
+        "How might these anchors bias subsequent reasoning?"
+    ],
+    "Polarity Analysis": [
+        "What explicit LIKES (positive mentions) appear in the goal?",
+        "What explicit DISLIKES (negative mentions) appear in the goal?",
+        "How do these polarities inform hypothesis prioritization?"
+    ],
+    "Temporal Discounting": [
+        "Are there references to immediate vs delayed outcomes?",
+        "How should time preferences affect hypothesis urgency?"
+    ],
+}
+
+
+def build_law_analysis_prompt(law: dict, user_goal: str) -> dict:
+    """
+    Phase 7d: Generate law-specific analysis prompt with questions.
+    
+    Instead of just displaying the law, returns structured questions
+    derived from the law's principles that the agent MUST answer.
+    
+    Args:
+        law: Dict with 'id', 'law_name', 'definition' keys
+        user_goal: The user's goal text for context
+        
+    Returns:
+        Dict with law_id, law_name, questions, required flag
+    """
+    law_id = law.get("id")
+    law_name = law.get("law_name", "Unknown")
+    definition = law.get("definition", "")
+    
+    # Get law-specific questions or generate generic ones
+    questions = LAW_QUESTION_TEMPLATES.get(law_name)
+    
+    if not questions:
+        # Generic fallback questions for unmapped laws
+        questions = [
+            f"What patterns from '{law_name}' are visible in the goal?",
+            f"Based on the law definition, what aspects should be prioritized?",
+            f"How should '{law_name}' influence your hypothesis?"
+        ]
+    
+    return {
+        "law_id": law_id,
+        "law_name": law_name,
+        "definition": definition,
+        "questions": questions,
+        "required": True,
+        "instruction": f"Answer these questions BEFORE generating hypotheses. Your answers will inform better hypothesis quality."
+    }
+
+
 
 def build_hypotheses_list(
     h1_text: str,
@@ -232,6 +312,91 @@ def log_conversation_source(
         return None
 
 
+def fetch_calibration_context(
+    cur,
+    project_id: Optional[str]
+) -> dict:
+    """
+    Fetch calibration context for decay application.
+    
+    v60: Returns stats and potential decay info for domain-stratified calibration.
+    
+    Args:
+        cur: Database cursor
+        project_id: Optional project ID for domain lookup
+        
+    Returns:
+        Dict with stats, domain, should_apply_decay
+    """
+    from pas.helpers.calibration import compute_calibration_stats, MIN_SAMPLES_FOR_DECAY, BIAS_THRESHOLD_FOR_DECAY
+    
+    # Get domain from project if available
+    domain = None
+    records = []
+    
+    if project_id:
+        try:
+            cur.execute("SAVEPOINT calibration_domain_lookup")
+            cur.execute(
+                "SELECT meta->>'detected_domain' as domain FROM project_registry WHERE project_id = %s",
+                (project_id,)
+            )
+            row = cur.fetchone()
+            if row and row.get("domain"):
+                domain = row["domain"]
+            cur.execute("RELEASE SAVEPOINT calibration_domain_lookup")
+        except Exception:
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT calibration_domain_lookup")
+            except Exception:
+                pass  # Savepoint may not exist
+    
+    # Fetch recent calibration records
+    try:
+        cur.execute("SAVEPOINT calibration_records_lookup")
+        cur.execute(
+            """
+            SELECT predicted_confidence, actual_outcome
+            FROM calibration_records
+            ORDER BY recorded_at DESC
+            LIMIT 100
+            """
+        )
+        records = [
+            {"predicted_confidence": r["predicted_confidence"], 
+             "actual_outcome": r["actual_outcome"]} 
+            for r in cur.fetchall()
+        ]
+        cur.execute("RELEASE SAVEPOINT calibration_records_lookup")
+    except Exception:
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT calibration_records_lookup")
+        except Exception:
+            pass  # If rollback fails, continue with empty records
+    
+    # Compute stats (try domain-specific first, fall back to global)
+    stats = compute_calibration_stats(records, domain=domain)
+    fallback_used = False
+    
+    if domain and not stats.get("sufficient_for_decay", False):
+        # v57: Fall back to global if domain has insufficient samples
+        stats = compute_calibration_stats(records, domain=None)
+        fallback_used = True
+    
+    bias = stats.get("overconfidence_bias") or 0.0
+    should_apply = (
+        stats.get("sufficient_for_decay", False) and 
+        bias > BIAS_THRESHOLD_FOR_DECAY
+    )
+    
+    return {
+        "stats": stats,
+        "domain": domain,
+        "fallback_to_global": fallback_used,
+        "should_apply_decay": should_apply
+    }
+
+
 def compute_workflow_nudges(
     created_nodes: list[dict],
     is_revision: bool,
@@ -248,6 +413,8 @@ def compute_workflow_nudges(
     Returns:
         Dict with next_step, confidence_nudge, revision_info, revision_nudge
     """
+    from pas.helpers.calibration import check_confidence_nudge
+    
     result = {
         "next_step": None,
         "confidence_nudge": None,
@@ -261,10 +428,25 @@ def compute_workflow_nudges(
     top_node = max(created_nodes, key=lambda n: n.get("posterior_score") or 0)
     result["next_step"] = f"Challenge your top hypothesis. Call prepare_critique(node_id='{top_node['node_id']}')"
     
-    # Confidence nudge
+    # Confidence nudge - v55: check for high confidence + low evidence
+    nudge_warnings = []
+    for node in created_nodes:
+        confidence = node.get("likelihood", 0.5)
+        supporting_law = node.get("supporting_law")
+        supporting_count = 1 if supporting_law else 0  # Count of supporting laws
+        
+        # v55: Use calibration helper for high-confidence low-evidence detection
+        nudge = check_confidence_nudge(supporting_count, confidence)
+        if nudge:
+            nudge_warnings.append(nudge["message"])
+    
+    # Low confidence warning (existing)
     avg_confidence = sum(n.get("likelihood", 0.5) for n in created_nodes) / len(created_nodes)
     if avg_confidence < 0.65:
         result["confidence_nudge"] = f"Low confidence detected (avg: {avg_confidence:.2f}). Consider: (1) expand deeper on uncertain hypothesis, (2) add alternative perspectives, (3) gather more context before deciding."
+    elif nudge_warnings:
+        # v55: High confidence + low evidence warning
+        result["confidence_nudge"] = nudge_warnings[0]  # Return first warning
     
     # Revision tracking
     if is_revision:
@@ -483,10 +665,175 @@ def surface_scope_failures(
 
 
 # =============================================================================
+# Phase 7a: Psychological Pre-Processing Helper
+# =============================================================================
+
+def perform_psychological_preprocessing(
+    cur,
+    conn,
+    session_id: str,
+    is_root_expansion: bool,
+    get_embedding_fn
+) -> tuple[Optional[dict], Optional[str]]:
+    """
+    v73: Auto-run psychological analysis at root expansion.
+    
+    Implements Phase 7a: Psychological Pre-Processing.
+    When expanding from root, checks if psychological_extraction exists
+    in session context. If not, returns a prompt for extraction.
+    
+    Args:
+        cur: Database cursor
+        conn: Database connection
+        session_id: Session ID
+        is_root_expansion: True if parent_node_id is None
+        get_embedding_fn: Embedding function
+        
+    Returns:
+        Tuple of (extraction_data if cached, extraction_prompt if needed)
+    """
+    if not is_root_expansion:
+        return None, None
+    
+    try:
+        # Check if already cached in session context
+        cur.execute(
+            "SELECT context FROM reasoning_sessions WHERE id = %s",
+            (session_id,)
+        )
+        row = cur.fetchone()
+        session_context = row["context"] if row and row["context"] else {}
+        
+        if "psychological_extraction" in session_context:
+            logger.debug(f"v73: Returning cached psychological_extraction for {session_id}")
+            return session_context["psychological_extraction"], None
+        
+        # Get verbatim text from conversation_log
+        cur.execute(
+            """
+            SELECT raw_text FROM conversation_log
+            WHERE session_id = %s AND log_type = 'verbatim'
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (session_id,)
+        )
+        verbatim_row = cur.fetchone()
+        
+        if not verbatim_row or not verbatim_row["raw_text"]:
+            logger.debug(f"v73: No verbatim log found for session {session_id}")
+            return None, None
+        
+        verbatim_text = verbatim_row["raw_text"]
+        
+        # Search for psychology-related laws
+        query = "requirement elicitation psychology hedging speech act user intent"
+        query_embedding = get_embedding_fn(query)
+        
+        cur.execute(
+            """
+            SELECT id, law_name, definition
+            FROM scientific_laws
+            WHERE embedding IS NOT NULL
+            ORDER BY embedding <=> %s::vector
+            LIMIT 5
+            """,
+            (query_embedding,)
+        )
+        
+        laws = [{"id": r["id"], "law_name": r["law_name"], "definition": r["definition"]}
+                for r in cur.fetchall()]
+        
+        laws_text = "\n".join([
+            f"- **{l['law_name']}** (id: {l['id']}): {l['definition']}"
+            for l in laws
+        ])
+        
+        # Build extraction prompt
+        extraction_prompt = f"""## Psychological Pre-Processing (Phase 7a)
+
+### User's Original Request
+```
+{verbatim_text}
+```
+
+### Available Psychological Laws
+{laws_text}
+
+### Instructions
+Analyze the user's request for:
+1. **Hedging markers** - "might", "maybe", "could", "perhaps" → indicate uncertainty
+2. **Enthusiasm signals** - exclamation marks, superlatives → high priority
+3. **Concern patterns** - repetition of constraints, risk words → blockers
+4. **Hidden intent** - what they REALLY want vs what they said
+
+### Output Format
+Return ONLY valid JSON:
+```json
+{{
+  "hedging_detected": true/false,
+  "hedging_markers": ["might", "probably"],
+  "enthusiasm_level": 0.0-1.0,
+  "concern_areas": ["security", "performance"],
+  "inferred_priority": "must-have" | "should-have" | "nice-to-have",
+  "hidden_intent": "What they actually want",
+  "confidence_adjustment": 0.0 to -0.2 (negative if hedging detected)
+}}
+```"""
+        
+        logger.info(f"v73: Generated psychological extraction prompt for session {session_id}")
+        return None, extraction_prompt
+        
+    except Exception as e:
+        logger.warning(f"v73: Psychological preprocessing failed (non-fatal): {e}")
+        return None, None
+
+
+def cache_psychological_extraction(
+    cur,
+    conn,
+    session_id: str,
+    extraction_data: dict
+) -> bool:
+    """
+    Cache psychological extraction data in session context.
+    
+    Args:
+        cur: Database cursor
+        conn: Database connection
+        session_id: Session ID
+        extraction_data: Parsed extraction JSON
+        
+    Returns:
+        True if cached successfully
+    """
+    try:
+        cur.execute(
+            """
+            UPDATE reasoning_sessions 
+            SET context = COALESCE(context, '{}'::jsonb) || 
+                jsonb_build_object('psychological_extraction', %s::jsonb)
+            WHERE id = %s
+            """,
+            (json.dumps(extraction_data), session_id)
+        )
+        conn.commit()
+        logger.info(f"v73: Cached psychological_extraction for session {session_id}")
+        return True
+    except Exception as e:
+        logger.warning(f"v73: Failed to cache psychological extraction: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
+# =============================================================================
 # Phase 3: prepare_expansion helper functions
 # =============================================================================
 
 def validate_session_and_get_parent(
+
     cur,
     session_id: str,
     parent_node_id: Optional[str]
@@ -571,8 +918,12 @@ def fetch_and_boost_laws(
         (embedding, embedding)
     )
     
+    # v73: Add application_prompt for Active Law Application
     laws = [{"id": r["id"], "law_name": r["law_name"], "definition": r["definition"],
-             "weight": float(r["scientific_weight"]), "similarity": round(float(r["similarity"]), 4)}
+             "weight": float(r["scientific_weight"]), "similarity": round(float(r["similarity"]), 4),
+             "application_prompt": build_law_application_block(
+                 {"law_name": r["law_name"], "definition": r["definition"]}
+             )}
             for r in cur.fetchall()]
     
     # v22: Get session context for traits

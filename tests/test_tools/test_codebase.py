@@ -282,9 +282,10 @@ class TestProjectPurpose:
         """Verify config assumption extraction."""
         from pas.server import infer_config_assumptions
         
+        # v61: Use relative path - tool will resolve from project root
         result = await infer_config_assumptions(
-            project_id="mcp-pas",
-            config_path="/home/nocoma/Documents/MCP/PAS/config.yaml"
+            project_id="pas",  # Must match synced project
+            config_path="config.yaml"  # Will search common subdirs including src/pas/config/
         )
         
         assert result.get("success") is True

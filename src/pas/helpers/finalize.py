@@ -112,6 +112,59 @@ def build_roi_analysis(
 
 
 # =============================================================================
+# v59: Dual Recommendation Helper
+# =============================================================================
+
+def compute_dual_recommendation(
+    processed: list[dict],
+    balanced_winner: dict
+) -> dict:
+    """
+    Return balanced and aspirational recommendations.
+    
+    v59: Always-on dual recommendation system.
+    - Balanced: Best effort/benefit ratio (current winner)
+    - Aspirational: Highest value regardless of effort
+    
+    Args:
+        processed: List of all processed candidates
+        balanced_winner: The current winner (best adjusted score)
+        
+    Returns:
+        Dict with balanced, aspirational, and aspirational_note
+    """
+    if not processed:
+        return {"balanced": balanced_winner, "aspirational": None}
+    
+    # Find aspirational: highest benefit (or posterior_score as proxy)
+    def get_benefit_score(candidate: dict) -> float:
+        # Check for explicit ROI benefit
+        metadata = candidate.get("metadata") or {}
+        roi = metadata.get("roi") if isinstance(metadata, dict) else None
+        if roi and isinstance(roi, dict) and roi.get("benefit"):
+            return float(roi["benefit"])
+        # Fall back to posterior_score as proxy for value
+        return candidate.get("posterior_score", 0.0)
+    
+    aspirational = max(processed, key=get_benefit_score)
+    
+    # Only include aspirational if different from balanced
+    if aspirational.get("node_id") == balanced_winner.get("node_id"):
+        return {"balanced": balanced_winner, "aspirational": None}
+    
+    return {
+        "balanced": balanced_winner,
+        "aspirational": {
+            "node_id": aspirational.get("node_id"),
+            "content": aspirational.get("content", "")[:200],
+            "score": round(aspirational.get("adjusted_score", aspirational.get("posterior_score", 0)), 4),
+            "benefit_score": round(get_benefit_score(aspirational), 2)
+        },
+        "aspirational_note": "If effort is not a constraint, consider this higher-value option"
+    }
+
+
+# =============================================================================
 # v52: Critique Enforcement Helpers
 # =============================================================================
 
@@ -238,6 +291,56 @@ def check_sequential_gate(
         }
     
     return None
+
+
+def check_critique_gate(
+    cur,
+    top_node_id: str,
+    skip_critique_check: bool = False
+) -> dict:
+    """
+    v82: Check if top hypothesis has been critiqued.
+    
+    Part of Phase 4 Enforcement Hardening. Returns gate status dict
+    with suggested_action if critique is missing.
+    
+    Args:
+        cur: Database cursor
+        top_node_id: Node ID of the top hypothesis
+        skip_critique_check: If True, bypass check (escape hatch)
+        
+    Returns:
+        Critique gate status dict
+    """
+    if skip_critique_check:
+        return {
+            "checked": True,
+            "passed": True,
+            "bypassed": True,
+            "top_node_id": top_node_id,
+            "critique_count": 0,
+            "suggested_action": None
+        }
+    
+    cur.execute("""
+        SELECT COUNT(*) as critique_count
+        FROM thought_nodes
+        WHERE node_id = %s
+        AND counterargument IS NOT NULL
+    """, (top_node_id,))
+    result = cur.fetchone()
+    critique_count = result['critique_count'] if result else 0
+    
+    passed = critique_count > 0
+    
+    return {
+        "checked": True,
+        "passed": passed,
+        "bypassed": False,
+        "top_node_id": top_node_id,
+        "critique_count": critique_count,
+        "suggested_action": None if passed else f"Call prepare_critique(node_id='{top_node_id}')"
+    }
 
 
 def compute_quality_gate(
@@ -1005,7 +1108,7 @@ def fetch_session(cur, session_id: str) -> Optional[dict]:
         Session dict or None
     """
     cur.execute(
-        "SELECT goal, context FROM reasoning_sessions WHERE id = %s",
+        "SELECT goal, context, session_mode, unconstrained FROM reasoning_sessions WHERE id = %s",
         (session_id,)
     )
     return cur.fetchone()

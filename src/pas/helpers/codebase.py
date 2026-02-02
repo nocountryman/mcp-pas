@@ -702,3 +702,184 @@ async def sync_file_incremental(
         logger.error(f"sync_file_incremental error: {e}")
         return {"success": False, "error": str(e)}
 
+
+# =============================================================================
+# v61: Deep Project Understanding
+# =============================================================================
+
+async def populate_project_understanding(
+    project_id: str,
+    project_path: str,
+    conn: Any
+) -> dict[str, Any]:
+    """
+    Populate deep understanding data for a project.
+    
+    Calls system_map, schema_intent, and config_assumptions extraction
+    and stores results in project_registry.meta JSONB field.
+    
+    Args:
+        project_id: Project identifier
+        project_path: Absolute path to project root
+        conn: Database connection
+        
+    Returns:
+        Dict with results from each extraction
+    """
+    import json
+    from datetime import datetime
+    from pas.helpers.self_awareness import get_schema_info
+    from pas.helpers.schema_intent import extract_schema_entities, build_enrichment_prompt
+    from pas.helpers.config_assumptions import (
+        parse_config_file, extract_assumptions, 
+        build_enrichment_prompt as build_config_prompt
+    )
+    
+    results = {
+        'system_map': None,
+        'schema_intent': None,
+        'config_assumptions': None,
+        'errors': []
+    }
+    
+    cur = conn.cursor()
+    
+    # 1. System Map (from symbol references in DB)
+    try:
+        # Check if symbol_references table has data for this project
+        cur.execute("""
+            SELECT COUNT(*) as cnt FROM symbol_references WHERE project_id = %s
+        """, (project_id,))
+        ref_count = cur.fetchone()['cnt']
+        
+        if ref_count > 0:
+            # Aggregate cross-file references into module dependencies
+            cur.execute("""
+                SELECT 
+                    COALESCE(NULLIF(regexp_replace(source_file, '/[^/]+$', ''), ''), 'root') as source_module,
+                    COALESCE(NULLIF(regexp_replace(target_file, '/[^/]+$', ''), ''), 'root') as target_module,
+                    COUNT(*) as weight
+                FROM symbol_references
+                WHERE project_id = %s
+                GROUP BY source_module, target_module
+                HAVING COALESCE(NULLIF(regexp_replace(source_file, '/[^/]+$', ''), ''), 'root') != 
+                       COALESCE(NULLIF(regexp_replace(target_file, '/[^/]+$', ''), ''), 'root')
+            """, (project_id,))
+            
+            edges = []
+            nodes = set()
+            for row in cur.fetchall():
+                src, tgt, weight = row['source_module'], row['target_module'], row['weight']
+                edges.append({'source': src, 'target': tgt, 'weight': weight})
+                nodes.add(src)
+                nodes.add(tgt)
+            
+            results['system_map'] = {
+                'nodes': list(nodes),
+                'edges': edges,
+                'stats': {'module_count': len(nodes), 'edge_count': len(edges)}
+            }
+        else:
+            # Fallback: derive from file_registry directories
+            cur.execute("""
+                SELECT DISTINCT COALESCE(NULLIF(regexp_replace(file_path, '/[^/]+$', ''), ''), 'root') as module
+                FROM file_registry WHERE project_id = %s
+            """, (project_id,))
+            modules = [row['module'] for row in cur.fetchall()]
+            results['system_map'] = {
+                'nodes': modules,
+                'edges': [],
+                'stats': {'module_count': len(modules), 'edge_count': 0, 'note': 'No symbol references indexed'}
+            }
+            
+    except Exception as e:
+        logger.warning(f"populate_project_understanding: system_map failed: {e}")
+        results['errors'].append(f"system_map: {str(e)}")
+    
+    # 2. Schema Intent (from information_schema)
+    try:
+        schema_info = get_schema_info(conn)
+        if schema_info.get('tables'):
+            entities = extract_schema_entities(
+                schema_info['tables'],
+                schema_info.get('relationships', [])
+            )
+            entities['enrichment_prompt'] = build_enrichment_prompt(
+                entities['entities'],
+                entities['relationships']
+            )
+            results['schema_intent'] = entities
+    except Exception as e:
+        logger.warning(f"populate_project_understanding: schema_intent failed: {e}")
+        results['errors'].append(f"schema_intent: {str(e)}")
+    
+    # 3. Config Assumptions (from config.yaml if exists)
+    try:
+        # v61 fix: Search common config locations, not just project root
+        config_candidates = ['config.yaml', 'config.yml', 'config.json']
+        search_dirs = [
+            Path(project_path),  # Project root
+            Path(project_path) / 'config',  # config/
+            Path(project_path) / 'src' / 'config',  # src/config/
+        ]
+        # Also check src/<pkg>/config/ pattern
+        src_dir = Path(project_path) / 'src'
+        if src_dir.exists():
+            for child in src_dir.iterdir():
+                if child.is_dir() and not child.name.startswith('.'):
+                    config_subdir = child / 'config'
+                    if config_subdir.exists():
+                        search_dirs.append(config_subdir)
+        
+        config_path = None
+        for search_dir in search_dirs:
+            for candidate in config_candidates:
+                candidate_path = search_dir / candidate
+                if candidate_path.exists():
+                    config_path = candidate_path
+                    break
+            if config_path:
+                break
+        
+        if config_path:
+            config_data = parse_config_file(str(config_path))
+            assumptions = extract_assumptions(config_data)
+            results['config_assumptions'] = {
+                'config_file': str(config_path.relative_to(project_path)),
+                'assumptions': assumptions,
+                'enrichment_prompt': build_config_prompt(assumptions, str(config_path))
+            }
+        else:
+            results['config_assumptions'] = {
+                'config_file': None,
+                'assumptions': [],
+                'note': 'No config.yaml/yml/json found in project root or common subdirs'
+            }
+    except Exception as e:
+        logger.warning(f"populate_project_understanding: config_assumptions failed: {e}")
+        results['errors'].append(f"config_assumptions: {str(e)}")
+    
+    # Store in project_registry (existing columns: detected_entities, config_assumptions)
+    try:
+        # Note: system_map is computed live by get_system_map() from symbol_references
+        # Only need to store schema_intent and config_assumptions
+        cur.execute("""
+            UPDATE project_registry 
+            SET detected_entities = %s,
+                config_assumptions = %s,
+                updated_at = NOW()
+            WHERE project_id = %s
+        """, (
+            json.dumps(results['schema_intent']) if results['schema_intent'] else None,
+            json.dumps(results['config_assumptions']) if results['config_assumptions'] else None,
+            project_id
+        ))
+        conn.commit()
+        results['stored'] = True
+    except Exception as e:
+        logger.warning(f"populate_project_understanding: storage failed: {e}")
+        results['errors'].append(f"storage: {str(e)}")
+        results['stored'] = False
+    
+    return results
+

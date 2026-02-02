@@ -18,7 +18,32 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 def get_db_connection():
-    """Create a new database connection."""
+    """Create a new database connection.
+    
+    Supports two connection modes:
+    1. DATABASE_URL (preferred): postgresql://user:pass@host:port/dbname
+    2. Individual PAS_DB_* env vars (legacy)
+    """
+    database_url = os.getenv("DATABASE_URL")
+    
+    if database_url:
+        # Parse DATABASE_URL
+        import re
+        match = re.match(
+            r'postgresql://(?P<user>[^:]+):(?P<password>[^@]+)@(?P<host>[^:]+):(?P<port>\d+)/(?P<dbname>.+)',
+            database_url
+        )
+        if match:
+            return psycopg2.connect(
+                dbname=match.group("dbname"),
+                user=match.group("user"),
+                password=match.group("password"),
+                host=match.group("host"),
+                port=match.group("port"),
+                cursor_factory=RealDictCursor
+            )
+    
+    # Fallback to individual env vars
     return psycopg2.connect(
         dbname=os.getenv("PAS_DB_NAME", "pas"),
         user=os.getenv("PAS_DB_USER", "postgres"),
@@ -53,7 +78,7 @@ def safe_close_connection(conn):
 
 # Lazy-loaded embedding model (singleton)
 _embedding_model = None
-_EMBEDDING_MODEL_NAME = "all-mpnet-base-v2"  # 768-dim, higher quality
+_EMBEDDING_MODEL_NAME = "intfloat/e5-base-v2"  # 768-dim, best quality+speed balance
 
 # Set to True to load model at startup (avoids MCP timeout with GPU)
 # Disabled by default - ROCm causing crashes, using lazy load for now

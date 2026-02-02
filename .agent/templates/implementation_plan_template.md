@@ -1,215 +1,205 @@
-# Implementation Plan Template (REQUIRED for Single-Phase Work)
+# Implementation Plan Template
 
-> Use this template for single-phase, actionable implementation.
-> MUST be generated via complete PAS workflow with score ≥0.9.
+<!--
+=== AGENT CONTEXT ===
+Role: Implementation Planning Agent
+Project: [Fill from PAS session project_id]
+Mode: implementation
+-->
+
+> **🎯 Your Role**: Create an actionable plan that another agent can execute without conversation context.
+> 
+> **📋 Active Constraints** (verify via `start_reasoning_session`):
+> - 🚫 `quality_gate_threshold`: 0.9 (BLOCKING)
+> - 🚫 `terminal_env_activation`: required (BLOCKING)  
+> - ⚠️ `verify_before_completing`: true
+> - ⚠️ `sequential_analysis_required`: true
 
 ---
 
-## REQUIRED SECTIONS
-
-### 1. PAS Session Evidence (MANDATORY)
-```markdown
 ## PAS Reasoning Summary
 
-**Session ID**: `<uuid>`
-**Goal**: [The user_goal passed to start_reasoning_session]
+> [!IMPORTANT] **Quality Gate Check**
+> - Score must be ≥0.9 (do NOT proceed if below)
+> - If hybrid/synthesized: MUST be critiqued before finalization
+> - Gap must be ≥0.08 between top candidates
+
+**Session ID**: `[uuid]`
+**Goal**: [user_goal from start_reasoning_session]
 
 ### Hypotheses Evaluated
-| ID | Content (truncated) | Score | Critiqued? |
-|----|---------------------|-------|-----------|
-| h1 | [...] | 0.XX | YES/NO |
-| h2 | [...] | 0.XX | YES/NO |
+
+| ID | Content | Score | Critiqued? |
+|----|---------|-------|------------|
+| h1 | [summary] | 0.XX | YES/NO |
+| h2 | [summary] | 0.XX | YES/NO |
+| h3 | [summary] | 0.XX | YES/NO |
 
 ### Winning Hypothesis
-**Node ID**: `<uuid>`
-**Final Score**: ≥0.9 (REQUIRED - do NOT proceed if below)
-**Decision Quality**: HIGH (REQUIRED)
-**Gap**: ≥0.08 (REQUIRED)
+
+**Node ID**: `[uuid]`
+**Final Score**: [must be ≥0.9]
+**Decision Quality**: HIGH/MEDIUM/LOW
+**Gap**: [must be ≥0.08]
 
 ### Key Critiques & How Addressed
-- Critique 1: [Issue] → [How addressed in plan]
-- Critique 2: [Issue] → [How addressed in plan]
 
-### Sequential Gap Analysis Results
-- Gaps identified: [list]
-- Addressed in plan: [yes/no for each]
-```
+| Critique | Severity | Resolution in Plan |
+|----------|----------|-------------------|
+| [Issue 1] | 0.X | [How addressed] |
+| [Issue 2] | 0.X | [How addressed] |
 
-### 2. Scope Declaration
-```markdown
+### Sequential Gap Analysis
+
+| Gap Identified | Layer | Addressed? |
+|----------------|-------|------------|
+| [Gap 1] | CODE_STRUCTURE | ✅/❌ |
+| [Gap 2] | DEPENDENCIES | ✅/❌ |
+
+### Dual Recommendation (v82)
+
+> [!TIP] **Why Two Options?**
+> PAS provides Balanced (best ROI) and Aspirational (highest value).
+> Document both so stakeholders can make informed tradeoffs.
+
+| Aspect | Balanced (Chosen) | Aspirational |
+|--------|-------------------|--------------|
+| **Approach** | [Description] | [Description] |
+| **Effort** | [1-3] | [1-3] |
+| **Benefit** | [1-3] | [1-3] |
+| **Why Not Chosen** | N/A | [Tradeoff reason] |
+| **When to Reconsider** | N/A | [Conditions] |
+
+---
+
 ## Scope
+
+> [!TIP] **Scope Verification**
+> - Run `find_references` for each modified symbol
+> - Check for circular import risks in new files
+> - Verify import paths with `grep_search` before creating helpers
 
 **Files Modified**:
 - `[layer] path/to/file.py` - [what changes]
 
 **Files Created**:
 - `[layer] path/to/new.py` - [purpose]
-> N/A if no new files created.
+
+> Mark "N/A" if no files created.
 
 **Files Deleted**:
 - `path/to/old.py` - [why]
-> N/A if no files deleted.
-```
 
-### 2b. LSP Impact Analysis
-```markdown
+> Mark "N/A" if no files deleted.
+
+---
+
 ## LSP Impact Analysis
 
-> Run `get_lsp_impact` on scope files, or manually call `find_references` for key symbols.
+> [!IMPORTANT] **Blast Radius Check**
+> Run `find_references` on key symbols to discover all affected files.
 
-**Symbols in scope** (from document_symbols):
+**Symbols in scope**:
+
 | File | Key Symbols |
 |------|-------------|
 | `path/to/file.py` | `func1`, `Class1` |
 
 **Affected files** (from find_references):
+
 | Symbol | Used By | Count |
 |--------|---------|-------|
 | `func1` | `other.py`, `test.py` | 5 |
 
-**Callers discovered**:
-- [List files not in original scope that reference scope symbols]
-> N/A if no new callers found.
+**Scope completeness**: [Are all callers included above?]
 
-**Scope completeness**: [Are all affected files included in scope above?]
-```
+---
 
-
-### 3. Detailed Changes
-```markdown
 ## Changes
+
+> [!IMPORTANT] **Code Quality Requirements**
+> - Show EXACT code, not descriptions
+> - Use diff format for modifications
+> - Include rationale linking to PAS critiques
+> - Cyclomatic complexity ≤15
 
 ### [Component/File Name]
 
 #### [Function/Section]
 
 **Before** (if modifying):
-```language
+```python
 [exact current code]
 ```
 
 **After**:
-```language
-[exact new code with diff markers if helpful]
+```python
+[exact new code]
 ```
 
-**Rationale**: [Why this change - link to PAS critique if relevant]
-```
+**Rationale**: [Link to PAS critique that drove this change]
 
-### 5. Verification Plan (adapt for your stack)
-```markdown
+---
+
 ## Verification
 
+> [!CAUTION] **No Empirical Evidence = Not Done**
+> - Terminal output for CLI/backend changes
+> - Screenshots for UI changes
+> - Test results for logic changes
+> - "Looks correct" is NOT verification
+
 ### Automated Tests
+
 ```bash
-# Python
-pytest tests/
+# Activate environment first (REQUIRED for PAS project)
+source .venv312/bin/activate && set -a && source .env && set +a
 
-# JavaScript
-npm test
-
-# Or your project's test command
-[exact command to run]
+# Run tests
+pytest tests/ -v
 ```
 
-Expected output: [what success looks like]
+**Expected output**: [What success looks like]
 
 ### Manual Verification
+
 1. [Step 1]
 2. [Step 2]
-```
 
-### 6. Project Structure (if creating/moving files)
-```markdown
-## Project Structure
+---
 
-> **For NEW projects**: Use best practices (Python: `src/` layout)
-> **For EXISTING projects**: Align with current layout, or document transition if restructuring
-
-[Target structure if applicable]
-```
-
-### 7. Environment Context (if pip/python commands)
-```markdown
 ## Environment
 
-> **IMPORTANT**: Specify the venv for ALL pip/python commands.
-> Bare `pip` or `python` may use system interpreter, not project venv.
+> [!WARNING] **Terminal Commands**
+> All `run_command` calls MUST include venv activation.
+> Bare `pip`/`python` uses system interpreter, NOT project venv.
 
 | Item | Value |
 |------|-------|
-| **Venv Path** | `[FILL: /path/to/.venv/]` |
-| **pip command** | `[VENV]/bin/pip install ...` |
-| **python command** | `[VENV]/bin/python -m ...` |
-```
-
-### 8. Code Quality Requirements (Python)
-```markdown
-## Code Quality
-
-> Apply these thresholds to new/modified code. Document exceptions.
-
-### Thresholds
-| Metric | Target | Warn | Fail |
-|--------|--------|------|------|
-| Cyclomatic Complexity | ≤10 | 11-15 | >15 |
-| Function Length | ≤50 lines | 51-80 | >80 |
-| File Length | ≤500 lines | 501-800 | >800 |
-
-### Principles
-- **SRP**: Each function does ONE thing
-- **DRY**: Extract repeated patterns (3+ occurrences)
-- **Naming**: snake_case for functions/variables, CamelCase for classes
-
-### Verification Command
-```bash
-# Run before committing
-radon cc [file.py] -s -a
-```
-
-### Exceptions
-> Document any justified exceptions (state machines, parsers, etc.):
-- [ ] [Function name]: [Reason for exception]
-```
-
-### 7. Workflow/Skills Updates (if applicable)
-```markdown
-## Workflow Updates
-
-### Affected Workflows
-- [ ] `/workflow-name` - [describe change needed]
-
-### Affected Skills  
-- [ ] `.agent/skills/skill-name/SKILL.md` - [describe change needed]
-
-### Slashcommand Updates
-- [ ] Add new: `/new-command`
-- [ ] Update: `/existing-command` - [why]
-
-> **N/A**: Mark as "N/A - no workflow/skill changes" if this section doesn't apply.
-```
+| **Venv Path** | `.venv312/bin/activate` |
+| **Activation** | `source .venv312/bin/activate && set -a && source .env && set +a` |
+| **pip** | `.venv312/bin/pip` |
+| **python** | `.venv312/bin/python` |
 
 ---
 
-## ENFORCEMENT RULES
+## Pre-Submission Checklist
 
-1. **Quality Gate HARD BLOCK**: Score <0.9 = DO NOT CREATE PLAN
-2. **Synthesized Hypotheses**: If hypotheses were synthesized, the hybrid MUST be critiqued
-3. **All Critiques Addressed**: Every major flaw from store_critique must have resolution
-4. **Exact Code**: Changes must show exact code, not descriptions
-5. **Runnable Verification**: Test commands must be copy-paste runnable
-6. **Workflow Updates**: If changes affect workflows/skills, document in Section 5
-
----
-
-## PRE-SUBMISSION CHECKLIST
-
-> ✅ Complete ALL items before finalizing this plan.
+> **⚠️ Known Issues to Watch For**:
+> - Import errors when creating helpers (verify with `grep_search`)
+> - SQL transaction aborts (use savepoints for multi-step)
+> - Scope boundary crossings (check `find_references`)
+> - HTML comments invisible in markdown (use visible alerts)
 
 - [ ] PAS session score ≥ 0.9
-- [ ] All major critiques from PAS addressed in plan
+- [ ] All major critiques addressed in plan
 - [ ] Synthesized hypotheses critiqued (if applicable)
-- [ ] N/A sections explicitly marked (not left blank)
-- [ ] Verification commands tested/runnable
-- [ ] Exact code shown (not descriptions)
 - [ ] Sequential gap analysis completed
+- [ ] Exact code shown (not descriptions)
+- [ ] Verification commands tested/runnable
+- [ ] N/A sections explicitly marked
+
+---
+
+> **📋 Constraint Reminder**: This project enforces `verify_before_completing`. 
+> Do not mark complete without empirical evidence.
