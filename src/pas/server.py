@@ -5593,6 +5593,202 @@ async def record_outcome(
 
 
 # =============================================================================
+# Phase 12: Session Handoff/Onboard System
+# =============================================================================
+
+
+@mcp.tool()
+async def create_handoff(
+    session_id: str,
+    summary: str,
+    next_task: Optional[str] = None,
+    context: Optional[str] = None,
+    linked_artifacts: Optional[str] = None,
+    linked_sessions: Optional[str] = None
+) -> dict[str, Any]:
+    """
+    Create a handoff record for session continuity.
+    
+    Call this at end of session to preserve context for future agents.
+    The summary is embedded for semantic search via onboard_session.
+    
+    Args:
+        session_id: PAS session being handed off
+        summary: Agent-generated summary of work done
+        next_task: Optional suggested next step
+        context: Optional JSON string with key context (decisions, blockers)
+        linked_artifacts: Optional comma-separated artifact paths
+        linked_sessions: Optional comma-separated related session IDs
+        
+    Returns:
+        Created handoff record with ID
+    """
+    from pas.helpers.handoff import create_handoff_record
+    
+    conn = get_db_connection()
+    try:
+        # Parse optional JSON/list parameters
+        context_dict = json.loads(context) if context else None
+        artifacts_list = [a.strip() for a in linked_artifacts.split(",")] if linked_artifacts else None
+        sessions_list = [s.strip() for s in linked_sessions.split(",")] if linked_sessions else None
+        
+        result = create_handoff_record(
+            conn,
+            session_id=session_id,
+            summary=summary,
+            next_task=next_task,
+            context=context_dict,
+            linked_artifacts=artifacts_list,
+            linked_sessions=sessions_list
+        )
+        
+        if result["success"]:
+            result["message"] = f"Handoff created. Use onboard_session(handoff_id='{result['handoff_id']}') to restore context."
+        
+        return result
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Invalid JSON in context parameter: {e}"}
+    except Exception as e:
+        logger.error(f"create_handoff failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        safe_close_connection(conn)
+
+
+@mcp.tool()
+async def onboard_session(
+    project_id: Optional[str] = None,
+    topic: Optional[str] = None,
+    handoff_id: Optional[str] = None,
+    limit: int = 5,
+    mark_processed: bool = False
+) -> dict[str, Any]:
+    """
+    Retrieve handoff context for session continuity.
+    
+    Call at start of session to restore context from previous work.
+    
+    Args:
+        project_id: Filter handoffs by project
+        topic: Semantic search query (e.g., "Phase 7 interview system")
+        handoff_id: Get specific handoff by ID
+        limit: Maximum results (default 5)
+        mark_processed: If True, mark retrieved handoff(s) as processed
+        
+    Returns:
+        Handoff context formatted for LLM consumption
+    """
+    from pas.helpers.handoff import (
+        list_active_handoffs,
+        search_handoffs,
+        get_handoff_by_id,
+        mark_handoff_processed
+    )
+    
+    conn = get_db_connection()
+    try:
+        # Mode 1: Get specific handoff by ID
+        if handoff_id:
+            handoff = get_handoff_by_id(conn, handoff_id)
+            if not handoff:
+                return {"success": False, "error": f"Handoff {handoff_id} not found"}
+            
+            if mark_processed:
+                mark_handoff_processed(conn, handoff_id)
+                handoff["status"] = "processed"
+            
+            return {
+                "success": True,
+                "mode": "specific",
+                "handoff": handoff,
+                "formatted_context": _format_handoff_context(handoff)
+            }
+        
+        # Mode 2: Semantic search by topic
+        if topic:
+            handoffs = search_handoffs(conn, topic, project_id, limit)
+            if not handoffs:
+                return {
+                    "success": True,
+                    "mode": "search",
+                    "query": topic,
+                    "handoffs": [],
+                    "message": "No matching handoffs found"
+                }
+            
+            if mark_processed and len(handoffs) == 1:
+                mark_handoff_processed(conn, handoffs[0]["handoff_id"])
+                handoffs[0]["status"] = "processed"
+            
+            return {
+                "success": True,
+                "mode": "search",
+                "query": topic,
+                "handoffs": handoffs,
+                "formatted_context": _format_handoff_list(handoffs)
+            }
+        
+        # Mode 3: List active handoffs
+        handoffs = list_active_handoffs(conn, project_id, limit)
+        return {
+            "success": True,
+            "mode": "list",
+            "project_id": project_id,
+            "handoffs": handoffs,
+            "active_count": len(handoffs),
+            "formatted_context": _format_handoff_list(handoffs) if handoffs else "No active handoffs"
+        }
+    except Exception as e:
+        logger.error(f"onboard_session failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        safe_close_connection(conn)
+
+
+def _format_handoff_context(handoff: dict) -> str:
+    """Format a single handoff for LLM consumption."""
+    lines = [
+        f"## 🔄 Handoff: {handoff['handoff_id'][:8]}",
+        f"**Session**: `{handoff['session_id']}`" if handoff['session_id'] else "",
+        f"**Project**: {handoff['project_id']}" if handoff['project_id'] else "",
+        f"**Status**: {handoff['status']}",
+        f"**Created**: {handoff['created_at']}",
+        "",
+        "### Summary",
+        handoff['summary'],
+    ]
+    
+    if handoff.get('next_task'):
+        lines.extend(["", "### Next Task", handoff['next_task']])
+    
+    if handoff.get('linked_artifacts'):
+        lines.extend(["", "### Linked Artifacts"])
+        for artifact in handoff['linked_artifacts']:
+            lines.append(f"- [{artifact}](file://{artifact})")
+    
+    if handoff.get('context'):
+        lines.extend(["", "### Context", "```json", json.dumps(handoff['context'], indent=2), "```"])
+    
+    return "\n".join([l for l in lines if l is not None])
+
+
+def _format_handoff_list(handoffs: list) -> str:
+    """Format multiple handoffs as a list."""
+    lines = ["## 🔄 Active Handoffs", ""]
+    
+    for i, h in enumerate(handoffs, 1):
+        summary = h.get('summary', 'No summary')
+        lines.extend([
+            f"### {i}. {h.get('next_task', 'Handoff')} ({h['handoff_id'][:8]})",
+            f"**Summary**: {summary[:150]}..." if len(summary) > 150 else f"**Summary**: {summary}",
+            f"**Created**: {h['created_at']}",
+            ""
+        ])
+    
+    return "\n".join(lines)
+
+
+# =============================================================================
 # v39: RLVR patterns moved to learning_helpers.py
 # - SUCCESS_PATTERNS, FAILURE_PATTERNS, FAILURE_REASON_PATTERNS
 # =============================================================================
