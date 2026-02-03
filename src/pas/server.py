@@ -8882,10 +8882,41 @@ async def find_references(
             logger.info(f"[LSP] No symbol_position found - will search DB")
             source_used = "db"
         
-        # v53: DB-first - no Jedi/LSIF fallback
-        # If LSP didn't find refs, return empty (project needs sync_project)
-
-        
+        # v53 revised Phase 11: DB fallback when LSP fails
+        # Query symbol_references table for relationships
+        if source_used == "db" and not references:
+            try:
+                cur.execute("""
+                    SELECT source_symbol, source_file, source_line, 
+                           target_symbol, target_file, target_line, relation_type
+                    FROM symbol_references
+                    WHERE project_id = %s 
+                    AND (target_symbol ILIKE %s OR source_symbol ILIKE %s)
+                    LIMIT 100
+                """, (project_id, f"%{symbol_name}%", f"%{symbol_name}%"))
+                db_refs = cur.fetchall()
+                
+                for ref in db_refs:
+                    # Normalize: show as callers of this symbol
+                    if symbol_name.lower() in ref["target_symbol"].lower():
+                        references.append({
+                            "file": ref["source_file"],
+                            "line": ref["source_line"] or 0,
+                            "symbol": ref["source_symbol"],
+                            "relation": ref["relation_type"]
+                        })
+                    else:
+                        references.append({
+                            "file": ref["target_file"],
+                            "line": ref["target_line"] or 0,
+                            "symbol": ref["target_symbol"],
+                            "relation": ref["relation_type"]
+                        })
+                
+                if references:
+                    logger.info(f"[DB] Found {len(references)} refs from symbol_references")
+            except Exception as e:
+                logger.warning(f"DB reference lookup failed: {e}")        
         # Deduplicate
         references = deduplicate_references(references, include_definitions)
         
