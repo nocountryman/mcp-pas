@@ -90,8 +90,18 @@ def get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
         logger.info(f"Loading embedding model: {_EMBEDDING_MODEL_NAME} (may take 15-30s on GPU, 2-5m on CPU)...")
-        from sentence_transformers import SentenceTransformer
-        _embedding_model = SentenceTransformer(_EMBEDDING_MODEL_NAME)
+        
+        # Disable tqdm progress bars to prevent stdout corruption (MCP protocol violation)
+        os.environ["TQDM_DISABLE"] = "1"
+        
+        # v2026-02-02: Redirect stdout/stderr to suppress "BertModel LOAD REPORT" and other noise
+        import sys
+        from contextlib import redirect_stdout, redirect_stderr
+        
+        with open(os.devnull, 'w') as fnull:
+            with redirect_stdout(fnull), redirect_stderr(fnull):
+                from sentence_transformers import SentenceTransformer
+                _embedding_model = SentenceTransformer(_EMBEDDING_MODEL_NAME)
         
         # Log device info
         try:

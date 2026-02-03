@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "pas-server": {
+      "command": "/home/nocoma/Documents/MCP/PAS/.venv312/bin/python",
+      "args": [
+        "-m",
+        "pas.server"
+      ],
+      "env": {
+        "PYTHONPATH": "/home/nocoma/Documents/MCP/PAS/src"
+      }
+    },
+    "mcp-validator": {
+      "command": "/home/nocoma/Documents/MCP/PAS/.venv312/bin/python",
+      "args": [
+        "/home/nocoma/Documents/MCP/PAS/tests/mcp_capability_validator.py"
+      ]
+    }
+  }
+}

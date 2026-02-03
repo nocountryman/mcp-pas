@@ -431,6 +431,1096 @@ mcp = FastMCP(
 
 
 # =============================================================================
+# Phase 18: MCP Primitives (Resources & Prompts) - PAS Slim Foundation
+# =============================================================================
+
+
+def _get_session_context(session_id: str) -> dict:
+    """Get session context for prompts."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, goal, session_mode, context, state
+            FROM reasoning_sessions
+            WHERE id = %s::uuid
+        """, (session_id,))
+        row = cur.fetchone()
+        if not row:
+            return {"error": f"Session {session_id} not found"}
+        
+        # Get constraints if project_id in context
+        constraints = []
+        ctx = row.get('context') or {}
+        project_id = ctx.get('project_id')
+        if project_id:
+            cur.execute("""
+                SELECT constraint_type, constraint_key, constraint_data, enforcement_level
+                FROM project_constraints
+                WHERE project_id = (SELECT id FROM project_registry WHERE project_id = %s LIMIT 1)
+            """, (project_id,))
+            constraints = [dict(r) for r in cur.fetchall()]
+        
+        # Get relevant laws
+        laws = []
+        goal_embedding = get_embedding(row['goal'])
+        cur.execute("""
+            SELECT law_name, definition, scientific_weight
+            FROM scientific_laws
+            ORDER BY embedding <=> %s::vector
+            LIMIT 3
+        """, (goal_embedding,))
+        laws = [dict(r) for r in cur.fetchall()]
+        
+        return {
+            "session_id": str(row['id']),
+            "goal": row['goal'],
+            "mode": row['session_mode'],
+            "status": row['state'],
+            "constraints": constraints,
+            "laws": laws,
+            "context": ctx
+        }
+    finally:
+        safe_close_connection(conn)
+
+
+def _get_critique_context(node_id: str) -> dict:
+    """Get hypothesis context for critique prompt."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT t.id, t.content, t.path, t.posterior_score, t.declared_scope,
+                   s.goal, s.id as session_id
+            FROM thought_nodes t
+            JOIN reasoning_sessions s ON t.session_id = s.id
+            WHERE t.id = %s::uuid
+        """, (node_id,))
+        row = cur.fetchone()
+        if not row:
+            return {"error": f"Node {node_id} not found"}
+        return {
+            "node_id": str(row['id']),
+            "content": row['content'],
+            "path": row['path'],
+            "score": float(row['posterior_score']) if row['posterior_score'] else 0.0,
+            "scope": row['declared_scope'],
+            "goal": row['goal'],
+            "session_id": str(row['session_id'])
+        }
+    finally:
+        safe_close_connection(conn)
+
+
+def _format_laws(laws: list) -> str:
+    """Format laws for prompt display."""
+    if not laws:
+        return "_No relevant laws matched._"
+    return "\n".join(
+        f"- **{law['law_name']}** (weight: {law.get('effective_weight', 0.5):.2f}): {law.get('definition', '')[:200]}"
+        for law in laws
+    )
+
+
+def _format_constraints(constraints: list) -> str:
+    """Format constraints for prompt display."""
+    if not constraints:
+        return "_No project constraints._"
+    return "\n".join(
+        f"- [{c.get('enforcement', 'warn').upper()}] {c.get('constraint_type', '')}.{c.get('constraint_key', '')}: {c.get('constraint_value', '')}"
+        for c in constraints
+    )
+
+
+# -----------------------------------------------------------------------------
+# RESOURCES: Ambient Context (passive, read-only)
+# -----------------------------------------------------------------------------
+
+
+@mcp.resource("pas://session/{session_id}")
+def get_session_resource(session_id: str) -> str:
+    """Get current session state as ambient context."""
+    ctx = _get_session_context(session_id)
+    if "error" in ctx:
+        return json.dumps(ctx)
+    
+    return json.dumps({
+        "session_id": ctx["session_id"],
+        "goal": ctx["goal"],
+        "mode": ctx["mode"],
+        "status": ctx["status"],
+        "laws": [l["law_name"] for l in ctx.get("laws", [])],
+        "constraint_count": len(ctx.get("constraints", []))
+    }, indent=2)
+
+
+@mcp.resource("pas://constraints/{project_id}")
+def get_constraints_resource(project_id: str) -> str:
+    """Get active project constraints as ambient context."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT constraint_type, constraint_key, constraint_data, enforcement_level
+            FROM project_constraints
+            WHERE project_id = (SELECT id FROM project_registry WHERE project_id = %s LIMIT 1)
+            ORDER BY enforcement_level DESC, constraint_type, constraint_key
+        """, (project_id,))
+        constraints = [dict(r) for r in cur.fetchall()]
+        
+        # Group by type
+        grouped = {}
+        for c in constraints:
+            ctype = c.get('constraint_type', 'other')
+            if ctype not in grouped:
+                grouped[ctype] = []
+            grouped[ctype].append({
+                "key": c.get('constraint_key'),
+                "value": c.get('constraint_data'),
+                "enforcement": c.get('enforcement_level')
+            })
+        
+        return json.dumps({
+            "project_id": project_id,
+            "constraint_count": len(constraints),
+            "by_type": grouped
+        }, indent=2)
+    finally:
+        safe_close_connection(conn)
+
+
+@mcp.resource("pas://calibration")
+def get_calibration_resource() -> str:
+    """Get calibration metrics for self-monitoring."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        # Get recent calibration stats
+        cur.execute("""
+            SELECT 
+                COUNT(*) as total_samples,
+                AVG((predicted_confidence - actual_outcome) ^ 2) as brier_score,
+                AVG(predicted_confidence - actual_outcome) as bias
+            FROM calibration_records
+            WHERE recorded_at > NOW() - INTERVAL '7 days'
+        """)
+        row = cur.fetchone()
+        
+        total = row['total_samples'] or 0
+        brier = float(row['brier_score']) if row['brier_score'] else None
+        bias = float(row['bias']) if row['bias'] else None
+        
+        # Determine calibration status
+        status = "insufficient_data"
+        if total >= 10:
+            if brier and brier < 0.1:
+                status = "well_calibrated"
+            elif brier and brier < 0.2:
+                status = "moderate"
+            else:
+                status = "needs_recalibration"
+        
+        return json.dumps({
+            "total_samples_7d": total,
+            "brier_score": round(brier, 4) if brier else None,
+            "bias": round(bias, 4) if bias else None,
+            "status": status,
+            "guidance": "Brier < 0.1 = excellent, 0.1-0.2 = good, > 0.2 = recalibrate"
+        }, indent=2)
+    finally:
+        safe_close_connection(conn)
+
+
+@mcp.resource("pas://health")
+def get_health_resource() -> str:
+    """Validate PAS primitives against current schema.
+    
+    Returns status of each primitive's DB queries.
+    Use this to detect schema mismatches before runtime errors.
+    """
+    conn = get_db_connection()
+    checks = []
+    
+    try:
+        cur = conn.cursor()
+        
+        # Check 1: reasoning_sessions columns
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'reasoning_sessions'
+        """)
+        session_cols = {r['column_name'] for r in cur.fetchall()}
+        required_session = {'id', 'goal', 'state', 'session_mode', 'context'}
+        missing_session = required_session - session_cols
+        checks.append({
+            "resource": "pas://session/{id}",
+            "table": "reasoning_sessions",
+            "status": "ok" if not missing_session else "error",
+            "missing_columns": list(missing_session) if missing_session else None
+        })
+        
+        # Check 2: project_constraints columns
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'project_constraints'
+        """)
+        constraint_cols = {r['column_name'] for r in cur.fetchall()}
+        required_constraints = {'constraint_type', 'constraint_key', 'constraint_data', 'enforcement_level'}
+        missing_constraints = required_constraints - constraint_cols
+        checks.append({
+            "resource": "pas://constraints/{id}",
+            "table": "project_constraints", 
+            "status": "ok" if not missing_constraints else "error",
+            "missing_columns": list(missing_constraints) if missing_constraints else None
+        })
+        
+        # Check 3: scientific_laws table exists
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'scientific_laws'
+            ) as exists
+        """)
+        row = cur.fetchone()
+        laws_exists = row['exists'] if row else False
+        checks.append({
+            "resource": "pas://session/{id} (laws)",
+            "table": "scientific_laws",
+            "status": "ok" if laws_exists else "error",
+            "error": None if laws_exists else "table does not exist"
+        })
+        
+        # Check 4: calibration_records columns
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'calibration_records'
+        """)
+        calibration_cols = {r['column_name'] for r in cur.fetchall()}
+        required_calibration = {'predicted_confidence', 'actual_outcome', 'recorded_at'}
+        missing_calibration = required_calibration - calibration_cols
+        checks.append({
+            "resource": "pas://calibration",
+            "table": "calibration_records",
+            "status": "ok" if not missing_calibration else "error",
+            "missing_columns": list(missing_calibration) if missing_calibration else None
+        })
+        
+        all_ok = all(c["status"] == "ok" for c in checks)
+        
+        return json.dumps({
+            "health": "healthy" if all_ok else "degraded",
+            "checks": checks,
+            "guidance": "Run before implementing DB queries to verify schema"
+        }, indent=2)
+    finally:
+        safe_close_connection(conn)
+
+
+@mcp.resource("pas://tree/{session_id}")
+def get_tree_resource(session_id: str) -> str:
+    """Get reasoning tree for a session with best path highlighted.
+    
+    Combines get_reasoning_tree + get_best_path into single resource.
+    Returns full tree structure with winner marked.
+    """
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        
+        # Get all nodes for session
+        cur.execute("""
+            SELECT id, path, content, prior_score, likelihood, 
+                   supporting_law_id, declared_scope, created_at,
+                   (prior_score * likelihood) as posterior_score
+            FROM thought_nodes
+            WHERE session_id = %s
+            ORDER BY path
+        """, (session_id,))
+        nodes = cur.fetchall()
+        
+        if not nodes:
+            return json.dumps({"error": "No nodes found for session", "session_id": session_id})
+        
+        # Find best path (highest posterior at max depth)
+        best_node = max(nodes, key=lambda n: (len(n['path'].split('.')), n['posterior_score']))
+        best_path = best_node['path']
+        
+        # Build tree structure
+        tree = []
+        for node in nodes:
+            is_on_best_path = best_path.startswith(node['path']) or node['path'] == best_path
+            tree.append({
+                "node_id": str(node['id']),
+                "path": node['path'],
+                "content": node['content'][:200] + "..." if len(node['content']) > 200 else node['content'],
+                "posterior_score": round(node['posterior_score'], 4),
+                "is_best_path": is_on_best_path,
+                "is_winner": node['path'] == best_path
+            })
+        
+        return json.dumps({
+            "session_id": session_id,
+            "node_count": len(nodes),
+            "best_path": best_path,
+            "winner": {
+                "node_id": str(best_node['id']),
+                "content": best_node['content'],
+                "score": round(best_node['posterior_score'], 4)
+            },
+            "tree": tree
+        }, indent=2, default=str)
+    finally:
+        safe_close_connection(conn)
+
+
+@mcp.resource("pas://laws")
+def get_laws_resource() -> str:
+    """Get all scientific laws with weights.
+    
+    Use query parameter for semantic search (not yet supported in resource URIs).
+    For search, use search_relevant_laws tool until MCP adds query param support.
+    """
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, law_name, definition, law_domain, scientific_weight
+            FROM scientific_laws
+            ORDER BY scientific_weight DESC
+        """)
+        laws = cur.fetchall()
+        
+        return json.dumps({
+            "count": len(laws),
+            "laws": [{
+                "id": l['id'],
+                "name": l['law_name'],
+                "definition": l['definition'][:150] + "..." if len(l['definition']) > 150 else l['definition'],
+                "domain": l['law_domain'],
+                "weight": round(float(l['scientific_weight']), 3)
+            } for l in laws]
+        }, indent=2)
+    finally:
+        safe_close_connection(conn)
+
+
+@mcp.resource("pas://interview/{session_id}")
+def get_interview_resource(session_id: str) -> str:
+    """Get interview status and next question for a session.
+    
+    Combines get_next_question + check_interview_complete.
+    Returns current question if interview in progress, or completion status.
+    """
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        
+        # Get session context with interview data
+        cur.execute("""
+            SELECT context FROM reasoning_sessions WHERE id = %s
+        """, (session_id,))
+        row = cur.fetchone()
+        
+        if not row:
+            return json.dumps({"error": "Session not found", "session_id": session_id})
+        
+        context = row['context'] or {}
+        interview = context.get('interview', {})
+        questions = interview.get('questions', [])
+        history = interview.get('history', [])
+        
+        if not questions:
+            return json.dumps({
+                "session_id": session_id,
+                "status": "no_interview",
+                "message": "No interview questions generated. Call identify_gaps first."
+            })
+        
+        # Find next unanswered question
+        answered_ids = {h.get('question_id') for h in history}
+        next_q = None
+        for q in questions:
+            if q.get('id') not in answered_ids:
+                next_q = q
+                break
+        
+        if next_q:
+            return json.dumps({
+                "session_id": session_id,
+                "status": "in_progress",
+                "progress": f"{len(answered_ids)}/{len(questions)}",
+                "next_question": next_q,
+                "action": f"submit_answer(session_id='{session_id}', question_id='{next_q['id']}', answer='A|B|C')"
+            }, indent=2)
+        else:
+            return json.dumps({
+                "session_id": session_id,
+                "status": "complete",
+                "questions_answered": len(history),
+                "summary": context.get('interview_summary', 'Interview complete')
+            }, indent=2)
+    finally:
+        safe_close_connection(conn)
+
+
+@mcp.resource("pas://governance/{project_id}")
+def get_governance_resource(project_id: str) -> str:
+    """Get full governance hierarchy for a project.
+    
+    Combines get_project_governance + get_phase_context.
+    Returns vision, roadmap phases, and their artifacts.
+    """
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        
+        # Get project info
+        cur.execute("""
+            SELECT project_id, project_path FROM project_registry WHERE project_id = %s
+        """, (project_id,))
+        project = cur.fetchone()
+        
+        # Get roadmap phases
+        cur.execute("""
+            SELECT id, phase_name, description, sequence, status, priority, tags
+            FROM roadmap_phases
+            WHERE project_id = %s
+            ORDER BY sequence
+        """, (project_id,))
+        phases = cur.fetchall()
+        
+        # Get recent artifacts
+        cur.execute("""
+            SELECT DISTINCT ON (name) name, artifact_type, version, tags, created_at
+            FROM artifacts
+            WHERE project_id = %s
+            ORDER BY name, version DESC
+            LIMIT 20
+        """, (project_id,))
+        artifacts = cur.fetchall()
+        
+        active_phases = [p for p in phases if p['status'] == 'active']
+        planned_phases = [p for p in phases if p['status'] == 'planned']
+        complete_phases = [p for p in phases if p['status'] == 'complete']
+        
+        return json.dumps({
+            "project_id": project_id,
+            "project_path": project['project_path'] if project else None,
+            "summary": {
+                "total_phases": len(phases),
+                "active": len(active_phases),
+                "planned": len(planned_phases),
+                "complete": len(complete_phases)
+            },
+            "active_phases": [{
+                "id": str(p['id']),
+                "name": p['phase_name'],
+                "description": p['description'],
+                "priority": p['priority']
+            } for p in active_phases],
+            "next_planned": [{
+                "id": str(p['id']),
+                "name": p['phase_name'],
+                "sequence": p['sequence']
+            } for p in planned_phases[:3]],
+            "recent_artifacts": [{
+                "name": a['name'],
+                "type": a['artifact_type'],
+                "version": a['version']
+            } for a in artifacts[:5]]
+        }, indent=2, default=str)
+    finally:
+        safe_close_connection(conn)
+
+
+@mcp.resource("pas://artifacts/{project_id}")
+def get_artifacts_resource(project_id: str) -> str:
+    """List all governance artifacts for a project.
+    
+    Combines list_artifact_versions + search_artifacts.
+    Returns latest version of each artifact with version history count.
+    """
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        
+        # Get all artifacts with version counts
+        cur.execute("""
+            SELECT name, artifact_type, 
+                   MAX(version) as latest_version,
+                   COUNT(*) as version_count,
+                   MAX(created_at) as last_updated
+            FROM artifacts
+            WHERE project_id = %s
+            GROUP BY name, artifact_type
+            ORDER BY MAX(created_at) DESC
+        """, (project_id,))
+        artifacts = cur.fetchall()
+        
+        return json.dumps({
+            "project_id": project_id,
+            "artifact_count": len(artifacts),
+            "artifacts": [{
+                "name": a['name'],
+                "type": a['artifact_type'],
+                "latest_version": a['latest_version'],
+                "versions": a['version_count'],
+                "last_updated": str(a['last_updated'])
+            } for a in artifacts]
+        }, indent=2, default=str)
+    finally:
+        safe_close_connection(conn)
+
+
+@mcp.resource("pas://understanding/{project_id}")
+def get_understanding_resource(project_id: str) -> str:
+    """Get unified project understanding.
+    
+    Combines query_project_understanding + get_system_map + get_purpose_chain.
+    Returns system map, schema intent, config assumptions, and purpose hierarchy.
+    """
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        
+        # Get project with understanding data
+        cur.execute("""
+            SELECT project_id, project_path, purpose_hierarchy, 
+                   detected_entities, config_assumptions
+            FROM project_registry WHERE project_id = %s
+        """, (project_id,))
+        project = cur.fetchone()
+        
+        if not project:
+            return json.dumps({"error": "Project not found", "project_id": project_id})
+        
+        purpose = project['purpose_hierarchy'] or {}
+        schema_intent = project['detected_entities'] or []
+        config_assumptions = project['config_assumptions'] or []
+        
+        return json.dumps({
+            "project_id": project_id,
+            "project_path": project['project_path'],
+            "purpose": {
+                "mission": purpose.get('mission') if isinstance(purpose, dict) else None,
+                "user_needs": purpose.get('user_needs', [])[:5] if isinstance(purpose, dict) else [],
+                "must_have_modules": purpose.get('must_have_modules', [])[:5] if isinstance(purpose, dict) else []
+            },
+            "schema_intent": {
+                "entity_count": len(schema_intent) if isinstance(schema_intent, list) else 0,
+                "entities": schema_intent[:5] if isinstance(schema_intent, list) else []
+            },
+            "config_assumptions": {
+                "count": len(config_assumptions) if isinstance(config_assumptions, list) else 0,
+                "assumptions": config_assumptions[:5] if isinstance(config_assumptions, list) else []
+            },
+            "has_understanding": bool(purpose)
+        }, indent=2, default=str)
+    finally:
+        safe_close_connection(conn)
+
+
+@mcp.resource("pas://drift/{project_id}")
+def get_drift_resource(project_id: str) -> str:
+    """Detect constraint drift between GEMINI.md and database.
+    
+    Returns drift status without requiring LLM extraction.
+    For full drift detection with resolution, use detect_constraint_drift tool.
+    """
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        
+        # Get project info first
+        cur.execute("""
+            SELECT id, project_path FROM project_registry WHERE project_id = %s
+        """, (project_id,))
+        project = cur.fetchone()
+        
+        if not project:
+            return json.dumps({"error": "Project not found", "project_id": project_id})
+        
+        project_uuid = project['id']
+        
+        # Get current constraints using project's UUID
+        cur.execute("""
+            SELECT constraint_type, constraint_key, constraint_data, 
+                   enforcement_level, COALESCE(updated_at, created_at) as last_modified
+            FROM project_constraints
+            WHERE project_id = %s AND valid_to IS NULL
+            ORDER BY constraint_type, constraint_key
+        """, (project_uuid,))
+        constraints = cur.fetchall()
+        
+        gemini_exists = False
+        gemini_mtime = None
+        if project['project_path']:
+            import os
+            gemini_path = os.path.join(project['project_path'], 'GEMINI.md')
+            if os.path.exists(gemini_path):
+                gemini_exists = True
+                gemini_mtime = os.path.getmtime(gemini_path)
+        
+        # Check for potential drift (simple heuristic: file newer than DB)
+        potential_drift = False
+        if gemini_exists and constraints:
+            latest_db = max(c['last_modified'] for c in constraints)
+            if gemini_mtime and gemini_mtime > latest_db.timestamp():
+                potential_drift = True
+        
+        return json.dumps({
+            "project_id": project_id,
+            "db_constraint_count": len(constraints),
+            "gemini_md_exists": gemini_exists,
+            "potential_drift": potential_drift,
+            "constraints_by_type": {
+                "philosophy": len([c for c in constraints if c['constraint_type'] == 'philosophy']),
+                "quality": len([c for c in constraints if c['constraint_type'] == 'quality']),
+                "environment": len([c for c in constraints if c['constraint_type'] == 'environment'])
+            },
+            "action": "Call detect_constraint_drift tool for full analysis" if potential_drift else None
+        }, indent=2, default=str)
+    finally:
+        safe_close_connection(conn)
+
+
+# -----------------------------------------------------------------------------
+
+# PARAMETRIC TOOLS (Wave 1 - Phase 19)
+# These consolidate multiple single-purpose tools into parametric versions
+# -----------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def infer_purpose(
+    project_id: str,
+    level: str,
+    path: str = "",
+    force_refresh: bool = False
+) -> dict[str, Any]:
+    """
+    Parametric purpose inference - consolidates 5 tools into one.
+    
+    Args:
+        project_id: Project identifier
+        level: One of 'file', 'module', 'project', 'schema', 'config'
+        path: Required for file/module/config levels (file path or directory)
+        force_refresh: If True, ignore cache and return inference prompt
+        
+    Returns:
+        Cached purpose or inference prompt for LLM processing
+        
+    Examples:
+        infer_purpose(project_id="mcp-pas", level="file", path="src/pas/server.py")
+        infer_purpose(project_id="mcp-pas", level="module", path="src/pas/helpers")
+        infer_purpose(project_id="mcp-pas", level="project")
+        infer_purpose(project_id="mcp-pas", level="schema")
+        infer_purpose(project_id="mcp-pas", level="config", path="config.yaml")
+    """
+    valid_levels = {'file', 'module', 'project', 'schema', 'config'}
+    if level not in valid_levels:
+        return {"error": f"Invalid level '{level}'. Must be one of: {valid_levels}"}
+    
+    # Delegate to existing implementations
+    if level == 'file':
+        if not path:
+            return {"error": "path is required for level='file'"}
+        return await infer_file_purpose(project_id, path, force_refresh)
+    
+    elif level == 'module':
+        if not path:
+            return {"error": "path is required for level='module'"}
+        return await infer_module_purpose(project_id, path)
+    
+    elif level == 'project':
+        return await infer_project_purpose(project_id, force_refresh)
+    
+    elif level == 'schema':
+        return await infer_schema_intent(project_id)
+    
+    elif level == 'config':
+        config_path = path if path else "config.yaml"
+        return await infer_config_assumptions(project_id, config_path)
+    
+    return {"error": "Unexpected level"}
+
+
+@mcp.tool()
+async def store_purpose(
+    project_id: str,
+    level: str,
+    purpose_data: str,
+    path: str = ""
+) -> dict[str, Any]:
+    """
+    Parametric purpose storage - consolidates 5 tools into one.
+    
+    Args:
+        project_id: Project identifier
+        level: One of 'file', 'module', 'project', 'schema', 'config'
+        purpose_data: JSON string with purpose data from LLM
+        path: Required for file/module levels
+        
+    Returns:
+        Confirmation with stored purpose summary
+        
+    Examples:
+        store_purpose(project_id="mcp-pas", level="file", path="src/pas/server.py", purpose_data='{"..."}')
+        store_purpose(project_id="mcp-pas", level="project", purpose_data='{"mission": "..."}')
+    """
+    valid_levels = {'file', 'module', 'project', 'schema', 'config'}
+    if level not in valid_levels:
+        return {"error": f"Invalid level '{level}'. Must be one of: {valid_levels}"}
+    
+    # Delegate to existing implementations
+    if level == 'file':
+        if not path:
+            return {"error": "path is required for level='file'"}
+        return await store_file_purpose(project_id, path, purpose_data)
+    
+    elif level == 'module':
+        if not path:
+            return {"error": "path is required for level='module'"}
+        return await store_module_purpose(project_id, path, purpose_data)
+    
+    elif level == 'project':
+        return await store_project_purpose(project_id, purpose_data)
+    
+    elif level == 'schema':
+        return await store_schema_intent(project_id, purpose_data)
+    
+    elif level == 'config':
+        return await store_config_assumptions(project_id, purpose_data)
+    
+    return {"error": "Unexpected level"}
+
+
+# -----------------------------------------------------------------------------
+
+# PROMPTS: Guided Reasoning (active, structured templates)
+# -----------------------------------------------------------------------------
+
+
+@mcp.prompt("pas_hypothesis")
+
+def hypothesis_prompt(session_id: str) -> str:
+    """Generate hypotheses with ACH Protocol (disconfirming evidence required)."""
+    ctx = _get_session_context(session_id)
+    if "error" in ctx:
+        return f"Error: {ctx['error']}"
+    
+    return f"""## Generate Hypotheses (ACH Protocol)
+
+**Goal**: {ctx.get('goal', 'Not specified')}
+
+**Matched Laws**:
+{_format_laws(ctx.get('laws', []))}
+
+**Active Constraints**:
+{_format_constraints(ctx.get('constraints', []))}
+
+---
+
+### ACH Protocol Requirements
+
+For EACH hypothesis, you MUST provide:
+1. `text` - The hypothesis statement
+2. `confidence` - Your confidence (0.0-1.0)
+3. `scope` - Affected files/modules
+4. `supporting_evidence` - Evidence FOR this hypothesis
+5. `disconfirming_evidence` - **≥2 pieces of evidence AGAINST** (REQUIRED)
+
+> ⚠️ **RULE**: You may NOT select a hypothesis until you have identified at least 2 disconfirming pieces of evidence. This prevents Nirvana Fallacy.
+
+---
+
+Return JSON:
+{{
+  "hypotheses": [
+    {{
+      "text": "...",
+      "confidence": 0.85,
+      "scope": "file.py",
+      "supporting_evidence": ["...", "..."],
+      "disconfirming_evidence": ["...", "..."]
+    }}
+  ]
+}}
+"""
+
+
+@mcp.prompt("pas_critique")
+def critique_prompt(session_id: str, node_id: str) -> str:
+    """Deep adversarial critique with 6 structured personas."""
+    ctx = _get_critique_context(node_id)
+    if "error" in ctx:
+        return f"Error: {ctx['error']}"
+    
+    return f"""## Deep Critique (Multi-Persona)
+
+**Hypothesis**: {ctx.get('content', '')}
+**Session Goal**: {ctx.get('goal', '')}
+
+---
+
+### PERSONA CRITIQUES (Apply Each)
+
+#### 1. Devil's Advocate (Logic)
+- What logical fallacies exist?
+- What assumptions are unsupported?
+- What's the strongest argument AGAINST this?
+
+#### 2. Pragmatic Engineer (Execution)
+- Will this work in production?
+- What's the maintenance burden?
+- What are the failure modes?
+
+#### 3. Security Analyst (Vulnerabilities)
+- Injection vectors (SQL, XSS, command)?
+- Auth/authz bypass possibilities?
+- Data exposure risks?
+
+#### 4. Performance Engineer (NFRs)
+- Latency impact?
+- Memory/CPU concerns?
+- N+1 query risks?
+
+#### 5. Reliability Engineer (Resilience)
+- What happens when it fails?
+- Retry/rollback strategy?
+- Graceful degradation?
+
+#### 6. Meta-Critic (Blind Spots)
+- What am I missing?
+- What's NOT being considered?
+- Is this solving symptoms or root cause?
+
+---
+
+### PREDICTIVE CHECK (Required)
+> "If I execute this hypothesis, what state change do I predict?"
+
+Expected outcome: [describe]
+Could this be "logically sound but physically unexecutable"? [yes/no + why]
+
+---
+
+Return JSON:
+{{
+  "persona_critiques": {{
+    "devils_advocate": {{"flaw": "...", "evidence": "..."}},
+    "pragmatic_engineer": {{"flaw": "...", "evidence": "..."}},
+    "security_analyst": {{"flaw": "...", "evidence": "..."}},
+    "performance_engineer": {{"flaw": "...", "evidence": "..."}},
+    "reliability_engineer": {{"flaw": "...", "evidence": "..."}},
+    "meta_critic": {{"blind_spot": "..."}}
+  }},
+  "predictive_check": {{
+    "expected_outcome": "...",
+    "physically_executable": true,
+    "execution_risk": "low|medium|high"
+  }},
+  "aggregated": {{
+    "counterargument": "...",
+    "severity": 0.5,
+    "major_flaws": [],
+    "minor_flaws": [],
+    "edge_cases": []
+  }}
+}}
+"""
+
+
+@mcp.prompt("pas_gaps")
+def gaps_prompt(session_id: str) -> str:
+    """Comprehensive 12-layer gap analysis with NFRs."""
+    ctx = _get_session_context(session_id)
+    if "error" in ctx:
+        return f"Error: {ctx['error']}"
+    
+    return f"""## Comprehensive Gap Analysis (12-Layer)
+
+**Goal**: {ctx.get('goal', 'Not specified')}
+**Mode**: {ctx.get('mode', 'implementation')}
+
+---
+
+### FUNCTIONAL LAYERS
+
+#### 1. CODE_STRUCTURE
+- Functions/classes to add, modify, delete?
+- Import dependencies resolved?
+
+#### 2. DEPENDENCIES
+- Packages/libraries assumed to exist?
+- Version constraints?
+
+#### 3. DATA_FLOW
+- What data moves where?
+- Transformations required?
+
+#### 4. INTERFACES
+- APIs/contracts affected?
+- Breaking changes?
+
+#### 5. WORKFLOWS
+- User flows impacted?
+- System integration points?
+
+---
+
+### NON-FUNCTIONAL REQUIREMENTS (NFRs)
+
+#### 6. SECURITY
+- Authentication/authorization gaps?
+- Input validation missing?
+- Secrets properly managed?
+
+#### 7. PERFORMANCE
+- Latency requirements met?
+- Scalability bottlenecks?
+- Caching strategy?
+
+#### 8. SCALABILITY
+- Horizontal scaling barriers?
+- Database connection limits?
+- Rate limiting needed?
+
+#### 9. RELIABILITY
+- Failure recovery plan?
+- Circuit breakers needed?
+- Timeout handling?
+
+---
+
+### OPERATIONAL LAYERS
+
+#### 10. ERROR_HANDLING
+- All failure modes covered?
+- User-friendly error messages?
+- Logging sufficient for debugging?
+
+#### 11. OBSERVABILITY
+- Metrics/alerts defined?
+- Log correlation IDs?
+- Distributed tracing?
+
+#### 12. REGULATORY
+- Privacy compliance (GDPR, etc.)?
+- Audit trail requirements?
+- Data retention policies?
+
+---
+
+Return JSON:
+{{
+  "functional_gaps": {{
+    "code_structure": [],
+    "dependencies": [],
+    "data_flow": [],
+    "interfaces": [],
+    "workflows": []
+  }},
+  "nfr_gaps": {{
+    "security": [],
+    "performance": [],
+    "scalability": [],
+    "reliability": []
+  }},
+  "operational_gaps": {{
+    "error_handling": [],
+    "observability": [],
+    "regulatory": []
+  }},
+  "critical_gaps": [],
+  "revisions_needed": []
+}}
+"""
+
+
+@mcp.prompt("pas_plan")
+def plan_prompt(session_id: str) -> str:
+    """Implementation plan with embedded critiques and verification."""
+    ctx = _get_session_context(session_id)
+    if "error" in ctx:
+        return f"Error: {ctx['error']}"
+    
+    # Get best path for context
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT content, posterior_score, declared_scope
+            FROM thought_nodes
+            WHERE session_id = %s::uuid
+            ORDER BY posterior_score DESC
+            LIMIT 1
+        """, (session_id,))
+        top = cur.fetchone()
+        recommendation = top['content'] if top else "No recommendation yet"
+        score = float(top['posterior_score']) if top and top['posterior_score'] else 0.0
+        scope = top['declared_scope'] if top else "Not declared"
+    finally:
+        safe_close_connection(conn)
+    
+    return f"""## Implementation Plan Template
+
+**Goal**: {ctx.get('goal', 'Not specified')}
+**Recommendation**: {recommendation[:500]}
+**Score**: {score:.3f}
+**Scope**: {scope}
+
+---
+
+### REQUIRED SECTIONS
+
+#### 1. PAS Reasoning Summary
+- Session ID: {ctx.get('session_id')}
+- Top hypothesis and score
+- Critiques addressed
+
+#### 2. Key Critiques & Mitigation
+| Critique | Severity | How Addressed |
+|----------|----------|---------------|
+| ... | ... | ... |
+
+#### 3. Scope Declaration
+| Action | File | Description |
+|--------|------|-------------|
+| MODIFY | ... | ... |
+| NEW | ... | ... |
+| DELETE | ... | ... |
+
+#### 4. Detailed Changes
+```python
+# Before:
+...
+
+# After:
+...
+```
+
+#### 5. Verification Plan
+```bash
+# Run these commands to verify:
+source .venv312/bin/activate && ...
+```
+
+#### 6. Pre-Submission Checklist
+- [ ] Quality gate passed (≥0.9)
+- [ ] Sequential analysis done
+- [ ] All critiques addressed
+- [ ] Tests added/updated
+- [ ] Documentation updated
+
+---
+
+Return the complete plan as markdown.
+"""
+
+
+# =============================================================================
 # v9b: Constitutional Principles for Critic
 # =============================================================================
 
@@ -844,13 +1934,14 @@ async def start_reasoning_session(
             initial_context["project_path"] = project_path
         
         # Insert the new session (Phase 8: with session_mode and unconstrained)
+        # v86: project_id now stored as dedicated column (not just in context JSONB)
         cur.execute(
             """
-            INSERT INTO reasoning_sessions (id, goal, goal_embedding, state, session_mode, unconstrained, context)
-            VALUES (%s, %s, %s, 'active', %s, %s, %s)
+            INSERT INTO reasoning_sessions (id, goal, goal_embedding, state, session_mode, unconstrained, context, project_id)
+            VALUES (%s, %s, %s, 'active', %s, %s, %s, %s)
             RETURNING id, goal, state, session_mode, unconstrained, created_at
             """,
-            (session_id, user_goal.strip(), goal_embedding, session_mode, unconstrained, json.dumps(initial_context))
+            (session_id, user_goal.strip(), goal_embedding, session_mode, unconstrained, json.dumps(initial_context), project_id)
         )
         
         row = cur.fetchone()
@@ -5599,12 +6690,14 @@ async def record_outcome(
 
 @mcp.tool()
 async def create_handoff(
-    session_id: str,
+    project_id: str,
     summary: str,
+    session_id: Optional[str] = None,
     next_task: Optional[str] = None,
     context: Optional[str | dict] = None,
     linked_artifacts: Optional[str] = None,
-    linked_sessions: Optional[str] = None
+    linked_sessions: Optional[str] = None,
+    user_initiated: bool = False
 ) -> dict[str, Any]:
     """
     Create a handoff record for session continuity.
@@ -5613,20 +6706,46 @@ async def create_handoff(
     The summary is embedded for semantic search via onboard_session.
     
     Args:
-        session_id: PAS session being handed off
+        project_id: Project identifier (required - enforces per-project singleton)
         summary: Agent-generated summary of work done
+        session_id: PAS session being handed off (optional - auto-detects if omitted)
         next_task: Optional suggested next step
         context: Optional JSON string with key context (decisions, blockers)
         linked_artifacts: Optional comma-separated artifact paths
         linked_sessions: Optional comma-separated related session IDs
+        user_initiated: Must be True - handoffs require explicit user request via /handoff
         
     Returns:
         Created handoff record with ID
     """
+    # v87: User-initiated gate - prevent autonomous agent handoffs
+    if not user_initiated:
+        return {
+            "success": False,
+            "error": "Handoffs must be user-initiated. Use /handoff workflow.",
+            "hint": "Only create handoffs when user explicitly requests via /handoff command. "
+                    "Do not call create_handoff autonomously mid-session."
+        }
+    
     from pas.helpers.handoff import create_handoff_record
     
     conn = get_db_connection()
     try:
+        cur = conn.cursor()
+        auto_detected_session = False
+        
+        # v86: Auto-detect session_id from most recent active session for project
+        if not session_id:
+            cur.execute("""
+                SELECT id FROM reasoning_sessions
+                WHERE project_id = %s AND state = 'active'
+                ORDER BY created_at DESC LIMIT 1
+            """, (project_id,))
+            row = cur.fetchone()
+            if row:
+                session_id = str(row["id"])
+                auto_detected_session = True
+        
         # Parse optional JSON/list parameters
         # Handle context as either JSON string or dict (MCP may pass either)
         if context is None:
@@ -5642,6 +6761,7 @@ async def create_handoff(
             conn,
             session_id=session_id,
             summary=summary,
+            project_id=project_id,
             next_task=next_task,
             context=context_dict,
             linked_artifacts=artifacts_list,
@@ -5649,10 +6769,16 @@ async def create_handoff(
         )
         
         if result["success"]:
-            msg = f"Handoff created. Use onboard_session(handoff_id='{result['handoff_id']}') to restore context."
+            msg = f"Handoff created for project '{project_id}'."
+            if auto_detected_session:
+                msg += f" Auto-linked to session {session_id[:8]}..."
+            elif session_id:
+                msg += f" Linked to session {session_id[:8]}..."
             if result.get("archived_previous", 0) > 0:
                 msg += f" Archived {result['archived_previous']} previous handoff(s)."
+            msg += f" Use onboard_session(project_id='{project_id}') to restore."
             result["message"] = msg
+            result["auto_detected_session"] = auto_detected_session
         
         return result
     except json.JSONDecodeError as e:
@@ -5748,7 +6874,8 @@ async def onboard_session(
         list_active_handoffs,
         search_handoffs,
         get_handoff_by_id,
-        mark_handoff_processed
+        mark_handoff_processed,
+        get_active_handoff_for_project
     )
     
     conn = get_db_connection()
@@ -5794,12 +6921,36 @@ async def onboard_session(
                 "formatted_context": _format_handoff_list(handoffs)
             }
         
-        # Mode 3: List active handoffs
-        handoffs = list_active_handoffs(conn, project_id, limit)
+        # Mode 3: Singleton mode - get THE active handoff for project
+        if project_id:
+            handoff = get_active_handoff_for_project(conn, project_id)
+            if not handoff:
+                return {
+                    "success": True,
+                    "mode": "singleton",
+                    "project_id": project_id,
+                    "handoff": None,
+                    "message": f"No active handoff for project '{project_id}'"
+                }
+            
+            if mark_processed:
+                mark_handoff_processed(conn, handoff["handoff_id"])
+                handoff["status"] = "processed"
+            
+            return {
+                "success": True,
+                "mode": "singleton",
+                "project_id": project_id,
+                "handoff": handoff,
+                "formatted_context": _format_handoff_context(handoff)
+            }
+        
+        # Mode 4: List all active handoffs (no filters)
+        handoffs = list_active_handoffs(conn, None, limit)
         return {
             "success": True,
             "mode": "list",
-            "project_id": project_id,
+            "project_id": None,
             "handoffs": handoffs,
             "active_count": len(handoffs),
             "formatted_context": _format_handoff_list(handoffs) if handoffs else "No active handoffs"
@@ -8034,6 +9185,211 @@ async def create_governance_phase(
         return {"success": False, "error": str(e)}
 
 
+# ============================================================================
+# v91: Phase Execution MCP Tools
+# ============================================================================
+
+@mcp.tool()
+async def activate_phase(phase_id: str) -> dict[str, Any]:
+    """
+    Start working on a phase.
+    
+    Changes status from 'planned' to 'active'.
+    Returns execution context with dependencies and success criteria.
+    
+    Args:
+        phase_id: Phase UUID
+        
+    Returns:
+        Phase context for execution including next_step guidance
+    """
+    from pas.helpers.governance import activate_phase as _activate_phase
+    try:
+        return _activate_phase(phase_id)
+    except Exception as e:
+        logger.error(f"activate_phase failed: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def complete_phase(
+    phase_id: str,
+    notes: str | None = None
+) -> dict[str, Any]:
+    """
+    Complete a phase after execution.
+    
+    Validates all success criteria are checked before completing.
+    
+    Args:
+        phase_id: Phase UUID
+        notes: Optional completion notes
+        
+    Returns:
+        Completion confirmation or validation errors
+    """
+    from pas.helpers.governance import complete_phase as _complete_phase
+    try:
+        return _complete_phase(phase_id, notes)
+    except Exception as e:
+        logger.error(f"complete_phase failed: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_phase_context(phase_id: str) -> dict[str, Any]:
+    """
+    Get full execution context for a phase.
+    
+    Returns everything needed to execute: goal, dependencies,
+    success criteria, and linked implementation plans.
+    
+    Args:
+        phase_id: Phase UUID
+        
+    Returns:
+        Complete phase execution context
+    """
+    from pas.helpers.governance import get_phase_context as _get_phase_context
+    try:
+        return _get_phase_context(phase_id)
+    except Exception as e:
+        logger.error(f"get_phase_context failed: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def export_roadmap_to_markdown(
+    project_id: str,
+    roadmap_id: str | None = None
+) -> dict[str, Any]:
+    """
+    Export roadmap from database to markdown format.
+    
+    If roadmap_id not provided, exports the active roadmap for the project.
+    
+    Args:
+        project_id: Project identifier
+        roadmap_id: Optional specific roadmap UUID
+        
+    Returns:
+        Markdown formatted roadmap document
+    """
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # Get roadmap
+                if roadmap_id:
+                    cur.execute("""
+                        SELECT * FROM roadmaps WHERE id = %s
+                    """, (roadmap_id,))
+                else:
+                    cur.execute("""
+                        SELECT * FROM roadmaps 
+                        WHERE project_id = %s AND status = 'active'
+                        ORDER BY created_at DESC LIMIT 1
+                    """, (project_id,))
+                
+                roadmap = cur.fetchone()
+                if not roadmap:
+                    return {"success": False, "error": f"No roadmap found for project {project_id}"}
+                
+                # Get vision
+                cur.execute("""
+                    SELECT mission, problem_statement, user_needs
+                    FROM project_vision WHERE project_id = %s
+                """, (project_id,))
+                vision = cur.fetchone()
+                
+                # Get phases
+                cur.execute("""
+                    SELECT rp.*, 
+                           array_agg(DISTINCT dep.depends_on_phase_id) 
+                               FILTER (WHERE dep.depends_on_phase_id IS NOT NULL) as dependencies
+                    FROM roadmap_phases rp
+                    LEFT JOIN phase_dependencies dep ON dep.phase_id = rp.id
+                    WHERE rp.roadmap_id = %s OR (rp.roadmap_id IS NULL AND rp.project_id = %s)
+                    GROUP BY rp.id
+                    ORDER BY rp.sequence
+                """, (roadmap['id'], project_id))
+                phases = cur.fetchall()
+                
+                # Build markdown
+                md = []
+                version_tag = roadmap['version_tag'] or ''
+                md.append(f"# {roadmap['title']} {version_tag}\n")
+                
+                if vision:
+                    if vision['problem_statement']:
+                        md.append("## Problem Statement\n")
+                        md.append(vision['problem_statement'] + "\n")
+                    if vision['mission']:
+                        md.append("## Mission\n")
+                        md.append(vision['mission'] + "\n")
+                
+                if roadmap['priority_taxonomy']:
+                    md.append("## Priority Taxonomy\n")
+                    for priority, definition in roadmap['priority_taxonomy'].items():
+                        md.append(f"- **{priority}**: {definition}\n")
+                
+                if roadmap['architecture_content']:
+                    md.append("## Architecture\n")
+                    md.append(roadmap['architecture_content'] + "\n")
+                
+                md.append("---\n\n## Phases\n")
+                
+                for phase in phases:
+                    status_emoji = {
+                        "planned": "📋", 
+                        "active": "🔄", 
+                        "complete": "✅", 
+                        "blocked": "🚫"
+                    }.get(phase['status'], "")
+                    md.append(f"\n### {phase['phase_name']} {status_emoji}\n")
+                    priority = phase.get('priority') or 'P2'
+                    md.append(f"**Priority**: {priority} | **Status**: {phase['status']}\n")
+                    
+                    if phase.get('goal'):
+                        md.append(f"\n**Goal**: {phase['goal']}\n")
+                    
+                    if phase.get('scope_content'):
+                        md.append(f"\n**Scope**:\n{phase['scope_content']}\n")
+                    
+                    if phase.get('dependencies'):
+                        deps = [str(d) for d in phase['dependencies'] if d]
+                        if deps:
+                            md.append(f"\n**Dependencies**: {', '.join(deps)}\n")
+                    
+                    # Get success criteria
+                    cur.execute("""
+                        SELECT criterion, done FROM phase_success_criteria
+                        WHERE phase_id = %s ORDER BY sequence
+                    """, (phase['id'],))
+                    criteria = cur.fetchall()
+                    
+                    if criteria:
+                        md.append("\n**Success Criteria**:\n")
+                        for c in criteria:
+                            check = "[x]" if c['done'] else "[ ]"
+                            md.append(f"- {check} {c['criterion']}\n")
+                    
+                    if phase.get('verification_notes'):
+                        md.append(f"\n**Verification**: {phase['verification_notes']}\n")
+                
+                return {
+                    "success": True,
+                    "project_id": project_id,
+                    "roadmap_id": str(roadmap['id']),
+                    "markdown": "\n".join(md)
+                }
+        finally:
+            safe_close_connection(conn)
+    except Exception as e:
+        logger.error(f"export_roadmap_to_markdown failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
 # =============================================================================
 # Entry Point
 # =============================================================================
@@ -8044,14 +9400,20 @@ def main():
     """Run the MCP server."""
     logger.info("Starting PAS (Scientific Reasoning) MCP Server...")
     
-    # Pre-warm embedding model for instant tool calls (avoids 10s cold start)
-    try:
-        logger.info("Pre-warming embedding model...")
-        from pas.utils import get_embedding_model
-        get_embedding_model()
-        logger.info("Embedding model ready")
-    except Exception as e:
-        logger.warning(f"Embedding pre-warm failed (will load on first use): {e}")
+    # Pre-warm embedding model only if enabled (avoids MCP connection timeout)
+    # Default to False for MCP usage unless explicitly enabled
+    preload = os.getenv("PAS_PRELOAD_MODEL", "false").lower() == "true"
+    
+    if preload:
+        try:
+            logger.info("Pre-warming embedding model...")
+            from pas.utils import get_embedding_model
+            get_embedding_model()
+            logger.info("Embedding model ready")
+        except Exception as e:
+            logger.warning(f"Embedding pre-warm failed (will load on first use): {e}")
+    else:
+        logger.info("Model pre-warming skipped (lazy loading enabled)")
     
     mcp.run()
 

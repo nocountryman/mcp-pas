@@ -504,7 +504,47 @@ When activation isn't needed:
 
 > **Platform Constraint**: This is a fundamental limitation of Antigravity's subprocess isolation. No IDE setting can change this.
 
-## PAS-Exported Constraints
+---
+
+## Rule 15: Handoffs Are User-Initiated Only 📤 (v87)
+
+**NEVER call `create_handoff` unless user explicitly invokes `/handoff`.**
+
+### The Problem (Feb 2, 2026)
+
+Agent called `create_handoff` mid-session to "capture context", which:
+- Archived the previous valid handoff
+- Summary described future work (wrong - should be past tense)
+- Not an actual session end
+
+### Enforcement
+
+The tool has a **hard gate**:
+```python
+if not user_initiated:
+    return {"error": "Handoffs must be user-initiated. Use /handoff workflow."}
+```
+
+### Correct Usage
+
+Only via `/handoff` workflow, which sets `user_initiated=True`:
+```python
+mcp_pas-server_create_handoff(
+    project_id="mcp-pas",
+    summary="<PAST TENSE: what was done>",
+    user_initiated=True  # Set by workflow, not agent
+)
+```
+
+### Why This Matters
+
+- Handoffs are for **session continuity to future agents**
+- Not mid-session bookmarks
+- Autonomous calls corrupt the handoff history
+
+> **v87 Change**: `create_handoff` now requires `user_initiated=True` (set by /handoff workflow).
+
+---
 
 > Auto-generated from database. Last synced: 2026-02-02T00:31:17.284385
 
@@ -539,6 +579,93 @@ When activation isn't needed:
 
 | Key | Value | Enforcement |
 |-----|-------|-------------|
+| `db_first_research` | `True` | warn |
 | `definition_of_done` | `{'value': 'full_dod'}` | warn |
 | `import_verification_required` | `True` | warn |
 | `verify_before_completing` | `True` | warn |
+
+---
+
+## Rule 16: DB-First Research Workflow 📊 (v92)
+
+**Research outputs MUST be stored in DB first, then exported to files.**
+
+### Correct Flow
+```
+Research → DB (scope_content / artifact) → Export to markdown if needed
+```
+
+### Incorrect Flow
+```
+Research → markdown file → copy to DB ❌
+```
+
+### Why This Matters
+- DB is the Single Source of Truth (SSOT)
+- Files can be corrupted or lost
+- DB has backup, audit trail, versioning
+- Export tools can regenerate files from DB
+
+### Enforcement
+- Phase `scope_content` stores research summary
+- `store_governance_artifact` stores full content
+- Export tools generate files from DB data
+
+---
+
+## Rule 17: Schema Verification Before DB Queries 🗄️ (v103)
+
+**Before writing ANY SQL query, verify table/column names via `information_schema` or `pas://health`.**
+
+### The Problem (Phase 18 Bug)
+
+Implemented primitives with assumed column names that didn't exist:
+- `user_goal` → actual: `goal`
+- `status` → actual: `state`
+- `constraint_value` → actual: `constraint_data`
+- `enforcement` → actual: `enforcement_level`
+- `effective_weight` → actual: `scientific_weight`
+- `psychology_laws` → actual: `scientific_laws`
+
+**Root cause**: Agent assumed schema from memory instead of querying.
+
+### Required Verification
+
+```python
+# BEFORE writing any SQL query, verify the schema:
+
+# Option 1: Read pas://health resource
+read_resource(ServerName="pas-server", Uri="pas://health")
+
+# Option 2: Use psql directly
+psql "$DATABASE_URL" -c "\d table_name"
+
+# Option 3: Query information_schema
+SELECT column_name FROM information_schema.columns 
+WHERE table_name = 'your_table';
+```
+
+### Checklist for DB Query Code
+
+Before writing code that queries a database:
+- [ ] List all tables being queried
+- [ ] For EACH table, verify columns via `\d table_name` or `information_schema`
+- [ ] Check column types match expected usage
+- [ ] Document verified schema in implementation plan
+
+### pas://health Resource
+
+Phase 18 includes a health check resource that validates all primitives:
+```
+pas://health → returns validation status for all DB queries
+```
+
+### Enforcement
+
+| Level | Mechanism |
+|-------|-----------|
+| **Soft** | This rule in GEMINI.md |
+| **Medium** | Preflight check: `missing_schema_check` warning |
+| **Hard** | `pas://health` resource for runtime validation |
+
+> **v103 Change**: Schema verification is now mandatory before writing DB query code.

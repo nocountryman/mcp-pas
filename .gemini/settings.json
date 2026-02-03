@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "pas-server": {
+      "command": "/home/nocoma/Documents/MCP/PAS/.venv312/bin/python",
+      "args": [
+        "-m",
+        "pas.server"
+      ],
+      "env": {
+        "PYTHONPATH": "/home/nocoma/Documents/MCP/PAS/src",
+        "DATABASE_URL": "postgresql://mcp_admin:12345@localhost:5432/mcp_pas",
+        "HSA_OVERRIDE_GFX_VERSION": "10.3.0",
+        "PAS_PRELOAD_MODEL": "false"
+      }
+    },
+    "mcp-validator": {
+      "command": "/home/nocoma/Documents/MCP/PAS/.venv312/bin/python",
+      "args": [
+        "/home/nocoma/Documents/MCP/PAS/tests/mcp_capability_validator.py"
+      ]
+    }
+  }
+}

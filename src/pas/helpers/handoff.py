@@ -37,13 +37,13 @@ def create_handoff_record(
     if not session:
         return {"success": False, "error": f"Session {session_id} not found"}
     
-    # Archive any existing active handoffs for this session
+    # Archive any existing active handoffs for this PROJECT (singleton per project)
     cur.execute("""
         UPDATE session_handoffs
         SET status = 'archived'
-        WHERE session_id = %s AND status = 'active'
+        WHERE project_id = %s AND status = 'active'
         RETURNING id
-    """, (session_id,))
+    """, (project_id,))
     archived = cur.fetchall()
     archived_count = len(archived)
     
@@ -259,6 +259,36 @@ def search_handoffs(
         }
         for row in rows
     ]
+
+
+def get_active_handoff_for_project(conn, project_id: str) -> Optional[dict]:
+    """Get THE active handoff for a project (singleton)."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, session_id, project_id, summary, next_task,
+               linked_artifacts, linked_sessions, context, created_at, 
+               status, processed_at
+        FROM session_handoffs
+        WHERE project_id = %s AND status = 'active'
+        ORDER BY created_at DESC
+        LIMIT 1
+    """, (project_id,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "handoff_id": str(row["id"]),
+        "session_id": str(row["session_id"]) if row["session_id"] else None,
+        "project_id": row["project_id"],
+        "summary": row["summary"],
+        "next_task": row["next_task"],
+        "linked_artifacts": row["linked_artifacts"],
+        "linked_sessions": [str(s) for s in row["linked_sessions"]] if row["linked_sessions"] else [],
+        "context": row["context"],
+        "created_at": row["created_at"].isoformat(),
+        "status": row["status"],
+        "processed_at": row["processed_at"].isoformat() if row["processed_at"] else None
+    }
 
 
 def get_handoff_by_id(conn, handoff_id: str) -> Optional[dict]:
