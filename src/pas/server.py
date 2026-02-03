@@ -6728,9 +6728,11 @@ async def record_outcome(
         )
         
         # Helper 2: Insert + attribute + v12b success counts
+        # v19: Set verified_implementation=True when terminal_output was provided
         record, stats = insert_and_attribute_outcome(
             cur, session_id, outcome, confidence, winning_path,
-            notes, failure_reason, scope_embedding, failure_reason_embedding
+            notes, failure_reason, scope_embedding, failure_reason_embedding,
+            verified_implementation=(terminal_output is not None)
         )
         
         # Helper 3: v12a - Log training data

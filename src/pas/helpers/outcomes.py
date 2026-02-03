@@ -73,7 +73,8 @@ def insert_and_attribute_outcome(
     notes: Optional[str],
     failure_reason: Optional[str],
     scope_embedding: Optional[list],
-    failure_reason_embedding: Optional[list]
+    failure_reason_embedding: Optional[list],
+    verified_implementation: bool = False  # v19: True when terminal_output provided
 ) -> tuple[dict, dict]:
     """
     Insert outcome record and compute attribution stats.
@@ -89,18 +90,19 @@ def insert_and_attribute_outcome(
         failure_reason: Optional failure reason
         scope_embedding: v15b scope embedding
         failure_reason_embedding: v27 failure reason embedding
+        verified_implementation: v19 - True if terminal_output was provided
         
     Returns:
         (record, stats) - inserted record and attribution statistics
     """
-    # Insert outcome record
+    # Insert outcome record with verified_implementation flag
     cur.execute(
         """
-        INSERT INTO outcome_records (session_id, outcome, confidence, winning_path, notes, failure_reason, scope_embedding, failure_reason_embedding)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO outcome_records (session_id, outcome, confidence, winning_path, notes, failure_reason, scope_embedding, failure_reason_embedding, verified_implementation)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id, created_at
         """,
-        (session_id, outcome, confidence, winning_path, notes, failure_reason, scope_embedding, failure_reason_embedding)
+        (session_id, outcome, confidence, winning_path, notes, failure_reason, scope_embedding, failure_reason_embedding, verified_implementation)
     )
     record = cur.fetchone()
     
