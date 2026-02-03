@@ -8532,6 +8532,84 @@ async def stop_auto_sync() -> dict[str, Any]:
         logger.error(f"stop_auto_sync failed: {e}")
         return {"success": False, "error": str(e)}
 
+
+@mcp.tool()
+async def enable_auto_sync(
+    project_id: str,
+    enabled: bool = True
+) -> dict[str, Any]:
+    """
+    Phase 11: Enable/disable automatic startup sync for a project.
+    
+    When enabled, the project will be:
+    1. Delta synced on server startup (catches offline changes)
+    2. Watched via inotify during runtime (real-time updates)
+    
+    Args:
+        project_id: Project identifier
+        enabled: True to enable, False to disable
+        
+    Returns:
+        Confirmation with project status
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Check if project exists
+        cur.execute(
+            "SELECT project_id, project_path, auto_sync FROM project_registry WHERE project_id = %s",
+            (project_id,)
+        )
+        project = cur.fetchone()
+        
+        if not project:
+            safe_close_connection(conn)
+            return {
+                "success": False, 
+                "error": f"Project '{project_id}' not found. Run sync_project first."
+            }
+        
+        if not project.get("project_path"):
+            safe_close_connection(conn)
+            return {
+                "success": False,
+                "error": f"Project '{project_id}' has no project_path. Re-sync with sync_project."
+            }
+        
+        # Update auto_sync flag
+        cur.execute(
+            "UPDATE project_registry SET auto_sync = %s WHERE project_id = %s",
+            (enabled, project_id)
+        )
+        conn.commit()
+        
+        # If enabling, also start the watcher now
+        if enabled:
+            try:
+                watch_result = await start_auto_sync(project["project_path"])
+                watcher_status = "started" if watch_result.get("success") else "failed"
+            except Exception as e:
+                watcher_status = f"failed: {e}"
+        else:
+            watcher_status = "not started (disabled)"
+        
+        return {
+            "success": True,
+            "project_id": project_id,
+            "auto_sync": enabled,
+            "watcher_status": watcher_status,
+            "message": f"Auto-sync {'enabled' if enabled else 'disabled'} for {project_id}. "
+                       f"Will {'sync and watch on' if enabled else 'skip on'} next server startup."
+        }
+        
+    except Exception as e:
+        logger.error(f"enable_auto_sync failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        safe_close_connection(conn)
+
 @mcp.tool()
 async def query_codebase(
     query: str,
@@ -9527,6 +9605,71 @@ async def export_roadmap_to_markdown(
 
 
 
+async def startup_auto_sync():
+    """
+    Phase 11: Startup hook for 100% data availability.
+    
+    Runs before MCP server starts. For each project with auto_sync=TRUE:
+    1. Delta sync (catches changes made while server was off)
+    2. Start inotify watcher (catches changes in real-time)
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Get all projects with auto_sync enabled
+        cur.execute("""
+            SELECT project_id, project_path 
+            FROM project_registry 
+            WHERE auto_sync = TRUE AND project_path IS NOT NULL
+        """)
+        projects = cur.fetchall()
+        
+        if not projects:
+            logger.info("Phase 11: No auto_sync projects configured")
+            return
+        
+        logger.info(f"Phase 11: Starting auto-sync for {len(projects)} project(s)")
+        
+        for project in projects:
+            project_id = project["project_id"]
+            project_path = project["project_path"]
+            
+            try:
+                # Step 1: Delta sync (catches changes while server was off)
+                logger.info(f"Phase 11: Delta sync for {project_id}...")
+                sync_result = await sync_project(project_path, project_id)
+                
+                if sync_result.get("success"):
+                    files_updated = sync_result.get("files_updated", 0)
+                    logger.info(f"Phase 11: {project_id} synced ({files_updated} files updated)")
+                else:
+                    logger.warning(f"Phase 11: {project_id} sync failed: {sync_result.get('error')}")
+                    continue
+                
+                # Step 2: Start inotify watcher (catches changes in real-time)
+                logger.info(f"Phase 11: Starting watcher for {project_id}...")
+                watch_result = await start_auto_sync(project_path)
+                
+                if watch_result.get("success"):
+                    dirs_watched = watch_result.get("directories_watched", 0)
+                    logger.info(f"Phase 11: {project_id} watcher started ({dirs_watched} dirs)")
+                else:
+                    logger.warning(f"Phase 11: {project_id} watcher failed: {watch_result.get('error')}")
+                    
+            except Exception as e:
+                logger.error(f"Phase 11: Failed to auto-sync {project_id}: {e}")
+                continue
+        
+        logger.info("Phase 11: Startup auto-sync complete")
+        
+    except Exception as e:
+        logger.error(f"Phase 11: Startup auto-sync failed: {e}")
+    finally:
+        safe_close_connection(conn)
+
+
 def main():
     """Run the MCP server."""
     logger.info("Starting PAS (Scientific Reasoning) MCP Server...")
@@ -9546,8 +9689,18 @@ def main():
     else:
         logger.info("Model pre-warming skipped (lazy loading enabled)")
     
+    # Phase 11: Run startup auto-sync for registered projects
+    auto_sync_enabled = os.getenv("PAS_AUTO_SYNC", "true").lower() == "true"
+    if auto_sync_enabled:
+        try:
+            import asyncio
+            asyncio.run(startup_auto_sync())
+        except Exception as e:
+            logger.warning(f"Phase 11: Startup auto-sync failed (non-fatal): {e}")
+    
     mcp.run()
 
 
 if __name__ == "__main__":
     main()
+
