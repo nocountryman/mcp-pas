@@ -114,9 +114,18 @@ def get_embedding_model():
 
 
 # Preload model at module import if enabled
+# SKIP in subprocesses to avoid GPU OOM from double loading
 if PRELOAD_MODEL:
-    logger.info("Preloading embedding model at startup...")
-    get_embedding_model()
+    import sys
+    # Detect if we're in a multiprocessing subprocess (spawned with spawn/forkserver)
+    is_subprocess = hasattr(sys.modules.get('__main__'), '__spec__') is False or \
+                    getattr(sys.modules.get('__main__', {}), '__name__', '') == '__mp_main__'
+    
+    if not is_subprocess:
+        logger.info("Preloading embedding model at startup...")
+        get_embedding_model()
+    else:
+        logger.debug("Skipping model preload in subprocess")
 
 
 def get_embedding(text: str) -> list[float]:
