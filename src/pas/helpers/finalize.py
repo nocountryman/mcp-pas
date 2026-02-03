@@ -968,9 +968,11 @@ def get_context_summary(session: dict) -> Optional[dict[str, str]]:
     interview = context.get("interview", {})
     
     if interview.get("answer_history"):
+        # v19: Defensive - skip entries without question_id (incomplete interviews)
         return {
-            h["question_id"]: h["answer"] 
-            for h in interview["answer_history"]
+            h.get("question_id", f"unknown_{i}"): h.get("answer", "")
+            for i, h in enumerate(interview["answer_history"])
+            if h.get("question_id")  # Only include if question_id exists
         }
     
     return None
