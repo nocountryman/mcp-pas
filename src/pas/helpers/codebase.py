@@ -639,12 +639,12 @@ async def sync_file_incremental(
             # Upsert file_registry
             cur.execute(
                 """
-                INSERT INTO file_registry (project_id, file_path, file_hash, language, embedding, mtime_ns)
+                INSERT INTO file_registry (project_id, file_path, file_hash, language, content_embedding, mtime_ns)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (project_id, file_path) 
                 DO UPDATE SET file_hash = EXCLUDED.file_hash, 
                               language = EXCLUDED.language,
-                              embedding = EXCLUDED.embedding,
+                              content_embedding = EXCLUDED.content_embedding,
                               mtime_ns = EXCLUDED.mtime_ns
                 RETURNING id
                 """,
