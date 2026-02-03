@@ -3119,8 +3119,10 @@ async def store_expansion(
 
 @mcp.tool()
 async def prepare_critique(
-    node_id: str,
-    critique_mode: str = "standard"  # v31a: 'standard' or 'negative_space'
+    node_id: Optional[str] = None,
+    session_id: Optional[str] = None,  # v19: for mode='sequential' (gap analysis)
+    critique_mode: str = "standard",  # v31a: 'standard', 'negative_space', or 'sequential'
+    top_n: int = 3  # v19: for sequential mode - number of top hypotheses to analyze
 ) -> dict[str, Any]:
     """
     Prepare context for critiquing a thought node. Returns node content and 
@@ -3129,12 +3131,25 @@ async def prepare_critique(
     After calling this, generate a critique and pass it to store_critique().
     
     Args:
-        node_id: The thought node UUID to critique
-        critique_mode: v31a - 'standard' (what's wrong?) or 'negative_space' (what's missing?)
+        node_id: The thought node UUID to critique (required for standard/negative_space)
+        session_id: The session UUID (required for mode='sequential')
+        critique_mode: 'standard' (what's wrong?), 'negative_space' (what's missing?), 
+                       or 'sequential' (gap analysis on top hypotheses)
+        top_n: For sequential mode, number of top candidates to analyze (default 3)
         
     Returns:
         Context dict with node_content, supporting_laws for critique generation
     """
+    # v19: Sequential mode - gap analysis on top hypotheses
+    if critique_mode == "sequential":
+        if not session_id:
+            return {"success": False, "error": "session_id required for mode='sequential'"}
+        return await _prepare_sequential_analysis(session_id, top_n)
+    
+    # Standard/negative_space mode requires node_id
+    if not node_id:
+        return {"success": False, "error": "node_id required for mode='standard' or 'negative_space'"}
+    
     conn = None
     try:
         conn = get_db_connection()
@@ -3312,6 +3327,11 @@ async def store_critique(
         if 'conn' in locals():
             safe_close_connection(conn)
 
+
+# v19: Internal alias for prepare_critique(mode='sequential')
+async def _prepare_sequential_analysis(session_id: str, top_n: int = 5) -> dict[str, Any]:
+    """Internal wrapper for sequential gap analysis mode."""
+    return await prepare_sequential_analysis(session_id, top_n)
 
 # DEPRECATED - replaced by Resource/merged
 # @mcp.tool()
@@ -6565,7 +6585,8 @@ async def record_outcome(
     confidence: float = 1.0,
     notes: Optional[str] = None,
     failure_reason: Optional[str] = None,  # v15b: explicit failure reason for learning
-    keep_open: bool = False
+    keep_open: bool = False,
+    terminal_output: Optional[str] = None  # v19: auto-parse terminal output for RLVR
 ) -> dict[str, Any]:
     """
     Record the outcome of a reasoning session for learning.
@@ -6580,12 +6601,26 @@ async def record_outcome(
         notes: Optional notes about why this outcome
         failure_reason: v15b - Explicit reason for failure (enables semantic learning)
         keep_open: If True, don't auto-complete even on success/failure
+        terminal_output: v19 - Raw terminal output to auto-detect outcome (RLVR)
         
     Returns:
         Confirmation with stats about attributed nodes
     """
+    
+    # v19: Auto-detect outcome from terminal output if provided
+    if terminal_output and outcome == "auto":
+        detected = parse_terminal_output(terminal_output)
+        if detected.get("signal") in ["test_pass", "build_success"]:
+            outcome = "success"
+            confidence = detected.get("confidence", 0.9)
+        elif detected.get("signal") in ["test_fail", "error", "crash"]:
+            outcome = "failure"
+            confidence = detected.get("confidence", 0.9)
+            failure_reason = failure_reason or detected.get("summary", "Auto-detected from terminal")
+        else:
+            outcome = "partial"
+            confidence = 0.5
 
-    # Phase 8: Defer outcome validation until we know the session mode
     # Valid outcomes vary by mode (e.g., research allows 'knowledge_gained')
     
     confidence = max(0.0, min(1.0, confidence))
@@ -6724,7 +6759,8 @@ async def create_handoff(
     context: Optional[str | dict] = None,
     linked_artifacts: Optional[str] = None,
     linked_sessions: Optional[str] = None,
-    user_initiated: bool = False
+    user_initiated: bool = False,
+    upsert: bool = True  # v19: if True, update existing active handoff instead of creating new
 ) -> dict[str, Any]:
     """
     Create a handoff record for session continuity.
@@ -6741,9 +6777,10 @@ async def create_handoff(
         linked_artifacts: Optional comma-separated artifact paths
         linked_sessions: Optional comma-separated related session IDs
         user_initiated: Must be True - handoffs require explicit user request via /handoff
+        upsert: v19 - If True (default), update existing active handoff for project
         
     Returns:
-        Created handoff record with ID
+        Created or updated handoff record with ID
     """
     # v87: User-initiated gate - prevent autonomous agent handoffs
     if not user_initiated:
