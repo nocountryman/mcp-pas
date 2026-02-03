@@ -1085,10 +1085,56 @@ def get_drift_resource(project_id: str) -> str:
         safe_close_connection(conn)
 
 
-# -----------------------------------------------------------------------------
-
 # PARAMETRIC TOOLS (Wave 1 - Phase 19)
 # These consolidate multiple single-purpose tools into parametric versions
+# -----------------------------------------------------------------------------
+
+
+@mcp.resource("pas://primitives/{project_id}")
+def get_primitives_resource(project_id: str) -> str:
+    """Returns all indexed MCP tools and resources for a project.
+    
+    Phase 12: Used for linking rules to code primitives.
+    Each primitive includes name, type, description, file location, and parameters.
+    """
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT primitive_type, name, description, file_path, line_number, 
+                   parameters, uri_pattern
+            FROM mcp_primitives
+            WHERE project_id = %s
+            ORDER BY primitive_type, name
+        """, (project_id,))
+        primitives = cur.fetchall()
+        
+        tools = [p for p in primitives if p['primitive_type'] == 'tool']
+        resources = [p for p in primitives if p['primitive_type'] == 'resource']
+        
+        return json.dumps({
+            "project_id": project_id,
+            "total_primitives": len(primitives),
+            "tools": [{
+                "name": t['name'],
+                "description": (t['description'] or "")[:200],
+                "file": t['file_path'],
+                "line": t['line_number'],
+                "params": t['parameters'] or {}
+            } for t in tools],
+            "resources": [{
+                "name": r['name'],
+                "uri_pattern": r['uri_pattern'],
+                "description": (r['description'] or "")[:200],
+                "file": r['file_path'],
+                "line": r['line_number']
+            } for r in resources]
+        }, indent=2)
+    finally:
+        safe_close_connection(conn)
+
+
 # -----------------------------------------------------------------------------
 
 
