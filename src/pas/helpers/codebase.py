@@ -542,8 +542,57 @@ async def sync_file_incremental(
     from pas.utils import get_embedding, get_db_connection
     
     path = Path(file_path)
+    
+    # Phase 11: Handle file deletions
     if not path.exists():
-        return {"success": False, "error": "File not found"}
+        # File was deleted - remove from DB
+        try:
+            # Compute relative path for DB lookup
+            try:
+                rel_path = str(path.relative_to(project_root))
+            except ValueError:
+                rel_path = str(path)
+            
+            conn = get_db_connection()
+            try:
+                cur = conn.cursor()
+                
+                # Delete file_symbols first (FK constraint)
+                cur.execute("""
+                    DELETE FROM file_symbols 
+                    WHERE file_id IN (
+                        SELECT id FROM file_registry 
+                        WHERE project_id = %s AND file_path = %s
+                    )
+                """, (project_id, rel_path))
+                
+                # Delete symbol_references for this file
+                cur.execute("""
+                    DELETE FROM symbol_references 
+                    WHERE project_id = %s AND (source_file = %s OR target_file = %s)
+                """, (project_id, rel_path, rel_path))
+                
+                # Delete file_registry entry
+                cur.execute("""
+                    DELETE FROM file_registry 
+                    WHERE project_id = %s AND file_path = %s
+                    RETURNING id
+                """, (project_id, rel_path))
+                deleted = cur.fetchone()
+                
+                conn.commit()
+                
+                if deleted:
+                    logger.info(f"Phase 11: Deleted orphan file {rel_path} from DB")
+                    return {"success": True, "action": "deleted", "file": rel_path}
+                else:
+                    return {"success": True, "action": "not_found", "file": rel_path}
+                    
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error(f"sync_file_incremental delete error: {e}")
+            return {"success": False, "error": str(e)}
     
     # Get language
     language = get_language_from_path(file_path)
