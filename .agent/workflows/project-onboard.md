@@ -123,6 +123,26 @@ mcp_pas-server_record_outcome(
 
 ---
 
+### 7. Enable Auto-Sync (Phase 11) 🔄
+
+**REQUIRED for 100% data availability:**
+
+```python
+mcp_pas-server_enable_auto_sync(
+    project_id="my-project",
+    enabled=True
+)
+```
+
+This ensures:
+- **Delta sync on restart** - Catches changes made while server was off
+- **inotify watcher** - Real-time file change detection
+- **`find_references` always current** - No stale data
+
+> **Note**: This persists in DB. Only need to call once per project.
+
+---
+
 ## Constraint Categories
 
 | Category | Examples |

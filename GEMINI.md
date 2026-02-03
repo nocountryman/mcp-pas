@@ -669,3 +669,54 @@ pas://health → returns validation status for all DB queries
 | **Hard** | `pas://health` resource for runtime validation |
 
 > **v103 Change**: Schema verification is now mandatory before writing DB query code.
+
+---
+
+## Rule 18: Enable Auto-Sync for New Projects 🔄 (Phase 11)
+
+**When onboarding a new project, ALWAYS enable auto_sync for 100% data availability.**
+
+### The Problem
+
+`find_references` and other codebase tools return empty/stale data when:
+- Project not synced (`sync_project` never called)
+- Files changed while MCP server was off
+- Files changed but watcher not running
+
+### The Solution: Auto-Sync
+
+```python
+# One-time setup after sync_project
+mcp_pas-server_enable_auto_sync(project_id="your-project", enabled=True)
+```
+
+This persists in the database. On every server restart:
+1. **Delta sync** - Catches changes made while server was off (mtime comparison)
+2. **Start watcher** - inotify for real-time updates
+
+### Current Configuration
+
+| Project | auto_sync |
+|---------|-----------|
+| `mcp-pas` | ✅ Enabled |
+
+### Enforcement
+
+- Add to `/project-onboard` workflow as final step
+- Agent should prompt for enable_auto_sync after first sync_project
+
+### Graph Data Available
+
+The `symbol_references` table stores caller→callee relationships:
+
+| Column | Purpose |
+|--------|---------|
+| `source_symbol` | The calling symbol |
+| `target_symbol` | The called symbol |
+| `relation_type` | `call`, `reference`, `import` |
+| `source_file` / `target_file` | File paths |
+
+**Note**: Phase 25 (RepoGraph Integration) is planned for full graph visualization.
+
+> **Phase 11 Change**: Auto-sync now runs automatically on server startup for enabled projects.
+
