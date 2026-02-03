@@ -4561,6 +4561,16 @@ async def finalize_session(
             quality_gate_enforced, winner_score, quality_gate["gap"]
         )
 
+        # v19: Update session state to 'finalized' when quality gate passes
+        # This enables verification gate in record_outcome
+        if quality_gate["passed"]:
+            cur.execute(
+                "UPDATE reasoning_sessions SET state = 'finalized' WHERE id = %s",
+                (session_id,)
+            )
+            conn.commit()
+            logger.info(f"v19: Session {session_id} state -> 'finalized' (awaiting implementation)")
+
         
         return {
             "success": True,
@@ -6586,7 +6596,8 @@ async def record_outcome(
     notes: Optional[str] = None,
     failure_reason: Optional[str] = None,  # v15b: explicit failure reason for learning
     keep_open: bool = False,
-    terminal_output: Optional[str] = None  # v19: auto-parse terminal output for RLVR
+    terminal_output: Optional[str] = None,  # v19: auto-parse terminal output for RLVR
+    skip_verification_check: bool = False  # v19: bypass verification gate (logged)
 ) -> dict[str, Any]:
     """
     Record the outcome of a reasoning session for learning.
@@ -6596,12 +6607,13 @@ async def record_outcome(
     
     Args:
         session_id: The reasoning session UUID
-        outcome: 'success', 'partial', or 'failure'
+        outcome: 'success', 'partial', 'failure', or 'auto' (detect from terminal_output)
         confidence: How confident is this assessment (0.0-1.0)
         notes: Optional notes about why this outcome
         failure_reason: v15b - Explicit reason for failure (enables semantic learning)
         keep_open: If True, don't auto-complete even on success/failure
         terminal_output: v19 - Raw terminal output to auto-detect outcome (RLVR)
+        skip_verification_check: v19 - Bypass verification gate (use if verified externally)
         
     Returns:
         Confirmation with stats about attributed nodes
@@ -6632,9 +6644,9 @@ async def record_outcome(
         conn.rollback()  # Defensive: ensure clean transaction state
         cur = conn.cursor()
         
-        # Phase 8: Fetch session to get mode for outcome validation
+        # Phase 8: Fetch session to get mode and state for outcome validation
         cur.execute(
-            "SELECT session_mode FROM reasoning_sessions WHERE id = %s",
+            "SELECT session_mode, state FROM reasoning_sessions WHERE id = %s",
             (session_id,)
         )
         session_row = cur.fetchone()
@@ -6642,8 +6654,33 @@ async def record_outcome(
             return {"success": False, "error": "Session not found"}
         
         session_mode = session_row.get("session_mode", "implementation")
+        session_state = session_row.get("state", "active")
         mode_config = MODE_CONFIG.get(session_mode, MODE_CONFIG["implementation"])
         valid_outcomes = mode_config["outcomes"]
+        
+        # v19: Verification gate - block if session is 'finalized' with no terminal_output
+        # This catches the pattern of recording outcome right after finalize_session
+        if session_state == "finalized" and terminal_output is None and not skip_verification_check:
+            # Log the bypass for tracking
+            logger.warning(f"v19 verification gate: session {session_id} in 'finalized' state without terminal_output")
+            return {
+                "success": False,
+                "blocked": True,
+                "error": "Verification gate: Session is 'finalized' but no terminal_output provided.",
+                "explanation": "You just called finalize_session. Run implementation and tests first, "
+                               "then call record_outcome(terminal_output='<paste test output>').",
+                "bypass": "If verified externally: record_outcome(skip_verification_check=True)",
+                "session_state": session_state
+            }
+        
+        # Log if skip was used (for outcome correlation)
+        if skip_verification_check:
+            logger.info(f"v19: skip_verification_check used for session {session_id}")
+            cur.execute("""
+                INSERT INTO tool_calls (session_id, tool_name, call_args)
+                VALUES (%s, 'verification_check_bypass', %s)
+            """, (session_id, json.dumps({"reason": "explicit skip"})))
+            conn.commit()
         
         # v19: Preflight warning for missing terminal_output in implementation mode
         if session_mode == "implementation" and terminal_output is None:
