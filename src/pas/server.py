@@ -6625,6 +6625,8 @@ async def record_outcome(
     
     confidence = max(0.0, min(1.0, confidence))
     
+    preflight_warning = None  # v19: Track missing terminal output
+    
     try:
         conn = get_db_connection()
         conn.rollback()  # Defensive: ensure clean transaction state
@@ -6642,6 +6644,18 @@ async def record_outcome(
         session_mode = session_row.get("session_mode", "implementation")
         mode_config = MODE_CONFIG.get(session_mode, MODE_CONFIG["implementation"])
         valid_outcomes = mode_config["outcomes"]
+        
+        # v19: Preflight warning for missing terminal_output in implementation mode
+        if session_mode == "implementation" and terminal_output is None:
+            preflight_warning = {
+                "type": "MISSING_TERMINAL_OUTPUT",
+                "message": "Implementation session recorded without terminal_output. "
+                           "For RLVR learning, pass terminal_output from verification commands.",
+                "recommendation": "Re-run verification and call record_outcome(terminal_output='<paste output>')",
+                "learning_penalty": True  # Flagged for calibration tracking
+            }
+            # Log for learning - track how often this happens
+            logger.warning(f"v19 RLVR gap: session {session_id} missing terminal_output")
         
         if outcome not in valid_outcomes:
             return {
@@ -6730,11 +6744,13 @@ async def record_outcome(
             "auto_refresh_result": auto_refresh_result,
             "auto_tagged": auto_tagged,  # v34
             "synthesis_warning": synthesis_warning,  # Phase 4
+            "preflight_warning": preflight_warning,  # v19: RLVR data gap
             "message": f"Outcome recorded. {stats['node_count'] or 0} nodes in winning path." + 
                       (" Session auto-completed." if session_completed else "") +
                       (f" Auto-refreshed {auto_refresh_result.get('laws_updated', 0)} law weights." if auto_refresh_result else "") +
                       (f" Auto-tagged: {auto_tagged}" if auto_tagged else "") +
-                      (f" {synthesis_warning['message']}" if synthesis_warning else "")
+                      (f" {synthesis_warning['message']}" if synthesis_warning else "") +
+                      (f" ⚠️ {preflight_warning['message']}" if preflight_warning else "")
         }
         
     except Exception as e:
