@@ -27,8 +27,8 @@ description: Enforce PAS-driven implementation planning for non-trivial changes
 4. store_expansion(h1_text, h1_confidence, h1_scope, h2_text, ...)
 5. prepare_critique(node_id="<top hypothesis>")
 6. store_critique(counterargument, severity_score, major_flaws, minor_flaws)
-7. prepare_sequential_analysis(session_id="...")
-8. store_sequential_analysis(session_id="...", results="[...]")
+7. prepare_critique(session_id="...", mode="sequential")  # Gap analysis
+8. store_critique(... sequential gap results ...)
 9. finalize_session(session_id="...")
    → HARD BLOCK: score < 0.9 = DO NOT PROCEED
    → If quality_gate.passed = false, deepen or expand more hypotheses
@@ -82,8 +82,8 @@ description: Enforce PAS-driven implementation planning for non-trivial changes
 After synthesize_hypotheses() creates hybrid node:
 → MUST call prepare_critique on hybrid node
 → MUST call store_critique on hybrid node
-→ MUST call prepare_sequential_analysis (on hybrid)
-→ MUST call store_sequential_analysis (identify remaining gaps)
+→ MUST call prepare_critique(mode='sequential') for gap analysis
+→ MUST call store_critique with gap analysis results
 → THEN finalize_session
 ```
 

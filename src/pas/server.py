@@ -2078,7 +2078,8 @@ async def start_reasoning_session(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def get_session_status(session_id: str) -> dict[str, Any]:
     """
     Get the current status of a reasoning session.
@@ -2145,7 +2146,8 @@ async def get_session_status(session_id: str) -> dict[str, Any]:
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def search_relevant_laws(query: str, limit: int = 5) -> dict[str, Any]:
     """
     Search for relevant scientific laws using semantic similarity.
@@ -2769,7 +2771,8 @@ async def prepare_expansion(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def store_law_analysis(
     session_id: str,
     law_analyses: str,  # JSON array: [{"law_id": 1, "answers": ["answer1", "answer2"]}]
@@ -3310,7 +3313,8 @@ async def store_critique(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def prepare_sequential_analysis(
     session_id: str,
     top_n: int = 5
@@ -3395,7 +3399,8 @@ Focus on what's MISSING, not what's wrong."""
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def store_sequential_analysis(
     session_id: str,
     results: str  # JSON array: [{"node_id": "...", "gaps": [...], "revisions_needed": [...]}]
@@ -3475,7 +3480,8 @@ async def store_sequential_analysis(
         return {"success": False, "error": str(e)}
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def get_reasoning_tree(session_id: str, max_depth: int = 10) -> dict[str, Any]:
     """
     Get the full reasoning tree for a session.
@@ -3517,7 +3523,8 @@ async def get_reasoning_tree(session_id: str, max_depth: int = 10) -> dict[str, 
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def get_best_path(session_id: str) -> dict[str, Any]:
     """
     Find the highest-scoring reasoning path through the tree.
@@ -3783,7 +3790,8 @@ async def identify_gaps(session_id: str) -> dict[str, Any]:
         safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def get_next_question(session_id: str) -> dict[str, Any]:
     """
     Get the next unanswered question from the interview queue.
@@ -3944,7 +3952,8 @@ async def submit_answer(session_id: str, question_id: str, answer: str) -> dict[
         safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def check_interview_complete(session_id: str) -> dict[str, Any]:
     """
     Check if the interview has gathered enough context to proceed.
@@ -4766,7 +4775,8 @@ async def synthesize_hypotheses(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def infer_file_purpose(
     project_id: str,
     file_path: str,
@@ -4869,7 +4879,8 @@ async def infer_file_purpose(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def store_file_purpose(
     project_id: str,
     file_path: str,
@@ -4949,7 +4960,8 @@ async def store_file_purpose(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def infer_module_purpose(
     project_id: str,
     directory_path: str,
@@ -5059,7 +5071,8 @@ async def infer_module_purpose(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def store_module_purpose(
     project_id: str,
     directory_path: str,
@@ -5146,7 +5159,8 @@ async def store_module_purpose(
 # v43: Project Purpose Awareness Tools
 # =============================================================================
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def infer_project_purpose(
     project_id: str,
     force_refresh: bool = False
@@ -5324,7 +5338,8 @@ async def infer_project_purpose(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def store_project_purpose(
     project_id: str,
     purpose_data: str  # JSON string for universal LLM compatibility
@@ -5566,7 +5581,8 @@ async def analyze_completeness(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def get_purpose_chain(
     project_id: str,
     file_path: str
@@ -5689,7 +5705,8 @@ async def get_purpose_chain(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def get_system_map(
     project_id: str,
     include_weights: bool = True
@@ -5788,7 +5805,8 @@ async def get_system_map(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def infer_schema_intent(
     project_id: str
 ) -> dict[str, Any]:
@@ -5848,7 +5866,8 @@ async def infer_schema_intent(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def store_schema_intent(
     project_id: str,
     intent_json: str
@@ -5910,7 +5929,8 @@ async def store_schema_intent(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def infer_config_assumptions(
     project_id: str,
     config_path: str = "config.yaml"
@@ -6014,7 +6034,8 @@ async def infer_config_assumptions(
         return {"success": False, "error": str(e)}
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def store_config_assumptions(
     project_id: str,
     assumptions_json: str
@@ -6076,7 +6097,8 @@ async def store_config_assumptions(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def query_project_understanding(
     project_id: str
 ) -> dict[str, Any]:
@@ -6216,7 +6238,8 @@ def _build_grounding_context(
     return "\n".join(lines) if lines else "No purpose context available"
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def advance_metacognitive_stage(
     session_id: str,
     target_stage: int = None  # None = advance by 1
@@ -6295,7 +6318,8 @@ async def advance_metacognitive_stage(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def get_metacognitive_status(
     session_id: str
 ) -> dict[str, Any]:
@@ -6342,7 +6366,8 @@ async def get_metacognitive_status(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def get_calibration_stats(
     min_samples: int = 10
 ) -> dict[str, Any]:
@@ -6398,7 +6423,8 @@ async def get_calibration_stats(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def get_self_awareness() -> dict[str, Any]:
     """
     Get PAS self-knowledge: schema, tools, statistics, architecture.
@@ -6448,7 +6474,8 @@ async def get_self_awareness() -> dict[str, Any]:
 # =============================================================================
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def tag_session(
     session_id: str,
     tags: str  # Comma-separated tags for universal LLM compatibility
@@ -6790,7 +6817,8 @@ async def create_handoff(
         safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def update_handoff(
     session_id: str,
     summary: Optional[str] = None,
@@ -7011,7 +7039,8 @@ def _format_handoff_list(handoffs: list) -> str:
 # =============================================================================
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def parse_terminal_output(
     session_id: str,
     terminal_text: str,
@@ -7370,7 +7399,8 @@ async def complete_session(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def explore_alternatives(
     session_id: str
 ) -> dict[str, Any]:
@@ -7440,7 +7470,8 @@ async def explore_alternatives(
             safe_close_connection(conn)
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def resume_session(
     session_id: str
 ) -> dict[str, Any]:
@@ -7525,7 +7556,8 @@ async def resume_session(
 # v25: Conversation Logging Tools
 # =============================================================================
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def search_conversation_log(
     query: str,
     session_id: Optional[str] = None,
@@ -7791,7 +7823,8 @@ async def sync_gemini_constraints(
         return {"success": False, "error": str(e)}
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def store_extracted_constraints(
     project_id: str,
     constraints_json: str
@@ -7827,7 +7860,8 @@ async def store_extracted_constraints(
         return {"success": False, "error": str(e)}
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def detect_constraint_drift(
     project_id: str,
     constraints_json: str,
@@ -8709,7 +8743,8 @@ async def find_references(
 
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def go_to_definition(
     project_id: str,
     file_path: str,
@@ -8994,7 +9029,8 @@ async def validate_plan(
 # =============================================================================
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def get_project_governance(
     project_id: str
 ) -> dict[str, Any]:
@@ -9071,7 +9107,8 @@ async def store_governance_artifact(
         return {"success": False, "error": str(e)}
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def list_artifact_versions(
     project_id: str,
     name: str
@@ -9100,7 +9137,8 @@ async def list_artifact_versions(
         return {"success": False, "error": str(e)}
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def search_artifacts(
     project_id: str,
     query: str | None = None,
@@ -9236,7 +9274,8 @@ async def complete_phase(
         return {"error": str(e)}
 
 
-@mcp.tool()
+# DEPRECATED - replaced by Resource/merged
+# @mcp.tool()
 async def get_phase_context(phase_id: str) -> dict[str, Any]:
     """
     Get full execution context for a phase.

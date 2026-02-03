@@ -19,28 +19,20 @@ mcp_pas-server_create_governance_phase(
 )
 ```
 
-### 2. Add Success Criteria (Optional)
+### 2. Verify and Export
 
 ```python
-mcp_pas-server_add_success_criterion(
-    phase_id="<phase_uuid>",
-    criterion="Tests pass for new functionality"
-)
-```
+# Check governance via Resource
+read_resource("pas-server", "pas://governance/mcp-pas")
 
-### 3. Add Dependencies (If Needed)
-
-```python
-mcp_pas-server_add_phase_dependency(
-    phase_id="<new_phase_uuid>",
-    depends_on_phase_id="<prerequisite_phase_uuid>"
-)
-```
-
-### 4. Confirm
-
-```python
+# Export to markdown
 mcp_pas-server_export_roadmap_to_markdown(project_id="mcp-pas")
+```
+
+### 3. View Status
+
+```bash
+# Or use /roadmap-status workflow
 ```
 
 ---

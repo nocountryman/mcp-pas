@@ -8,36 +8,23 @@ Use this when you want to work on a specific phase from the PAS roadmap.
 
 ## Steps
 
-### 1. Find the Phase
+### 1. View Phase Status
 
 ```python
-# Get all phases for the project
-phases = mcp_pas-server_get_roadmap_phases(project_id="mcp-pas")
-# OR search by name
+# Use Resource to see governance hierarchy
+read_resource("pas-server", "pas://governance/mcp-pas")
+# Shows: phases, active count, artifacts
 ```
 
-### 2. Get Phase Context
+### 2. Get Phase Context and Activate
 
 ```python
-context = mcp_pas-server_get_phase_context(phase_id="<phase_uuid>")
-# Review: description, dependencies, success_criteria, can_activate
-```
-
-### 3. Check Dependencies
-
-If `context.dependencies_met == False`:
-- Review which dependencies are incomplete
-- Either execute those phases first OR get user approval to proceed anyway
-
-### 4. Activate the Phase
-
-```python
+# Activate phase (changes planned → active)
 result = mcp_pas-server_activate_phase(phase_id="<phase_uuid>")
-# Status changes: planned → active
-# Returns: context with next_step guidance
+# Returns: execution context with dependencies and guidance
 ```
 
-### 5. Start PAS Planning
+### 3. Start PAS Planning
 
 Follow the returned `next_step` (typically):
 ```python
@@ -49,21 +36,11 @@ mcp_pas-server_start_reasoning_session(
 
 Then follow `/pas-planning` workflow.
 
-### 6. Execute Implementation Plan
+### 4. Execute Implementation Plan
 
-Work through the implementation plan steps, updating status:
-```python
-mcp_pas-server_update_step_status(step_id="<step_uuid>", status="done")
-```
+Work through the implementation plan steps per the `/pas-planning` workflow.
 
-### 7. Update Success Criteria
-
-Mark each criterion as checked when completed:
-```python
-mcp_pas-server_update_success_criterion(criterion_id="<id>", checked=True)
-```
-
-### 8. Complete the Phase
+### 5. Complete the Phase
 
 ```python
 result = mcp_pas-server_complete_phase(
@@ -72,16 +49,13 @@ result = mcp_pas-server_complete_phase(
 )
 ```
 
-If unchecked criteria remain, the tool will error with the list of incomplete items.
-
 ---
 
 ## Quick Reference
 
-| Tool | Purpose |
-|------|---------|
-| `get_phase_context` | See what's needed |
-| `activate_phase` | Start work |
-| `complete_phase` | Finish work |
-| `update_step_status` | Track plan progress |
-| `update_success_criterion` | Track criteria |
+| Action | Tool/Resource |
+|--------|---------------|
+| View status | `pas://governance/{project_id}` Resource |
+| Activate | `activate_phase` |
+| Complete | `complete_phase` |
+| View artifacts | `pas://artifacts/{project_id}` Resource |
