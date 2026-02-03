@@ -720,3 +720,44 @@ The `symbol_references` table stores caller→callee relationships:
 
 > **Phase 11 Change**: Auto-sync now runs automatically on server startup for enabled projects.
 
+---
+
+## Rule 19: Primitive-Workflow Sync ↔️ (Phase 12)
+
+**When modifying MCP primitives OR workflows, check for cross-updates.**
+
+### The Problem
+
+Changes to primitives and workflows are interdependent:
+- New `@mcp.tool()` may need a workflow update (e.g., add to `/pas-planning`)
+- Workflow changes may assume primitives that don't exist
+- Neither triggers automatic check for the other
+
+### Required Cross-Check
+
+Before finalizing any change that touches:
+
+| You Change... | Also Check... |
+|---------------|---------------|
+| `@mcp.tool()` / `@mcp.resource()` | Related workflows in `.agent/workflows/` |
+| `.agent/workflows/*.md` | Referenced primitives exist |
+| Either | GEMINI.md rule updates needed |
+
+### Checklist
+
+```markdown
+- [ ] If adding MCP tool: Is it documented in relevant workflow?
+- [ ] If modifying workflow: Do referenced tools exist?
+- [ ] Does this change require a new GEMINI.md rule?
+- [ ] Query `pas://primitives/{project_id}` to verify
+```
+
+### Enforcement
+
+| Level | Mechanism |
+|-------|-----------|
+| **Soft** | This rule in GEMINI.md |
+| **Hard** | Preflight check: `primitive_workflow_sync` warning |
+
+> **Phase 12 Change**: Primitives are now indexed in `mcp_primitives` table for cross-reference.
+

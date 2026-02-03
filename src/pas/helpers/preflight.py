@@ -74,7 +74,8 @@ def check_preflight_conditions(
     has_suggested_lookups: bool = False,  # Changed: boolean flag instead of list
     schema_check_required: bool = False,
     has_failure_warnings: bool = False,  # Changed: boolean flag instead of list
-    has_project_id: bool = False  # v42a: Was project_id provided to prepare_expansion?
+    has_project_id: bool = False,  # v42a: Was project_id provided to prepare_expansion?
+    scope_text: str = ""  # Phase 12: Scope text to check for primitives/workflows
 ) -> list[dict]:
     """
     Check if required preflight steps were performed.
@@ -117,6 +118,30 @@ def check_preflight_conditions(
                 "type": "missing_codebase_research",
                 "message": "project_id provided but no codebase research performed",
                 "suggestion": "Call query_codebase(query='<goal keywords>', project_id='...') to find existing related functionality"
+            })
+    
+    # Check 5 (Phase 12): Primitive-workflow sync check
+    if scope_text:
+        scope_lower = scope_text.lower()
+        touches_primitives = any(kw in scope_lower for kw in [
+            "@mcp.tool", "@mcp.resource", "mcp.tool", "mcp.resource",
+            "server.py", "new tool", "new resource", "add tool", "add resource"
+        ])
+        touches_workflows = any(kw in scope_lower for kw in [
+            "workflow", ".agent/workflows", "rule", "gemini.md"
+        ])
+        
+        if touches_primitives or touches_workflows:
+            warnings.append({
+                "type": "primitive_workflow_sync",
+                "message": "Change touches MCP primitives or workflows - check for cross-updates",
+                "check_items": [
+                    "If adding MCP tool: Is it documented in relevant workflow?",
+                    "If modifying workflow: Do referenced tools exist?",
+                    "Does this change require a new GEMINI.md rule?",
+                    "Query pas://primitives/{project_id} to verify"
+                ],
+                "suggestion": "Review Rule 19 in GEMINI.md for primitive-workflow sync requirements"
             })
     
     return warnings

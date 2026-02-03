@@ -569,7 +569,12 @@ def run_preflight_checks(
                     has_suggested_lookups=bool(metadata.get("has_suggested_lookups")),
                     schema_check_required=metadata.get("schema_check_required", False),
                     has_failure_warnings=bool(metadata.get("has_failure_warnings")),
-                    has_project_id=bool(metadata.get("has_project_id"))
+                    has_project_id=bool(metadata.get("has_project_id")),
+                    # Phase 12: Combine goal + scope for primitive/workflow detection
+                    scope_text=" ".join([
+                        metadata.get("goal_text", ""),
+                        *[n.get("declared_scope", "") for n in created_nodes]
+                    ])
                 )
                 
                 if preflight_warnings:
