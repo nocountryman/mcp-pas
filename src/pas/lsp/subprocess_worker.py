@@ -17,31 +17,123 @@ logger = logging.getLogger(__name__)
 # fork inherits parent's locks which causes hangs in MCP subprocess context
 mp_ctx = mp.get_context('spawn')
 
+# v53: Multi-language LSP support
+LANGUAGE_CONFIGS = {
+    "python": {
+        "program": "basedpyright-langserver",
+        "args": ["--stdio"],
+        "client_class": "BasedpyrightClient",
+        "startup_delay": 3,
+    },
+    "csharp": {
+        "program": "omnisharp-lsp",  # Symlink to OmniSharp binary
+        "args": ["-lsp"],  # OmniSharp LSP mode
+        "client_class": "OmniSharpClient",  # v53: Custom client
+        "startup_delay": 5,  # C# projects take longer to analyze
+    }
+}
+
+
+def _create_omnisharp_client():
+    """Factory for OmniSharpClient - deferred import to avoid top-level dependency."""
+    from lsp_client.clients.base import Client, LanguageConfig
+    from lsp_client import lsp_type
+    from typing import override
+    
+    # v53: Import capability mixins for LSP requests
+    # Note: OmniSharp doesn't support call_hierarchy, so we don't include that mixin
+    from lsp_client.capability.request.document_symbol import WithRequestDocumentSymbol
+    from lsp_client.capability.request.reference import WithRequestReferences
+    from lsp_client.capability.request.definition import WithRequestDefinition
+    from lsp_client.capability.request.hover import WithRequestHover
+    
+    class OmniSharpClient(
+        Client,
+        WithRequestDocumentSymbol,
+        WithRequestReferences,
+        WithRequestDefinition,
+        WithRequestHover,
+    ):
+        """LSP client for OmniSharp (C#) with supported capabilities."""
+        
+        @override
+        def check_server_compatibility(self, info) -> None:
+            # OmniSharp should be compatible
+            return
+        
+        @override
+        @classmethod
+        def get_language_config(cls) -> LanguageConfig:
+            return LanguageConfig(
+                kind=lsp_type.LanguageKind.CSharp,
+                suffixes=[".cs"],
+                project_files=[
+                    "*.csproj",
+                    "*.sln",
+                    "Directory.Build.props",
+                ],
+            )
+        
+        @override
+        @classmethod
+        def create_default_servers(cls) -> list:
+            # We provide the server explicitly, so no defaults needed
+            return []
+    
+    return OmniSharpClient
+
+
+
 # Subprocess worker function - runs in separate process
-def _lsp_worker(request_queue: mp.Queue, response_queue: mp.Queue, project_root: str):
-    """Worker process that handles LSP requests."""
+def _lsp_worker(request_queue: mp.Queue, response_queue: mp.Queue, project_root: str, language: str = "python"):
+    """Worker process that handles LSP requests.
+    
+    v53: Now supports multiple languages via LANGUAGE_CONFIGS.
+    """
     import asyncio
+    import os
     
     async def run_worker():
-        from lsp_client import BasedpyrightClient, LocalServer, Position
+        from lsp_client import LocalServer, Position
         
-        # Start client once
+        config = LANGUAGE_CONFIGS.get(language, LANGUAGE_CONFIGS["python"])
+        
+        # v53: Expand ~ in program path
+        program = os.path.expanduser(config["program"])
+        if not os.path.isabs(program):
+            # Check common locations
+            for prefix in ["~/.local/bin/", "/usr/local/bin/", "/usr/bin/"]:
+                check_path = os.path.expanduser(prefix + program)
+                if os.path.exists(check_path):
+                    program = check_path
+                    break
+        
+        # Start language-specific server
         server = LocalServer(
-            program="basedpyright-langserver",
-            args=["--stdio"],
+            program=program,
+            args=config["args"],
             cwd=Path(project_root)
         )
         
         try:
-            async with BasedpyrightClient(
-                server=server,
-                workspace=project_root
-            ) as client:
-                logger.info(f"LSP worker connected, waiting for analysis...")
+            # v53: Use appropriate client based on language
+            if config["client_class"] == "BasedpyrightClient":
+                from lsp_client import BasedpyrightClient
+                client_cm = BasedpyrightClient(server=server, workspace=project_root)
+            elif config["client_class"] == "OmniSharpClient":
+                # v53: Use our custom OmniSharp client
+                OmniSharpClient = _create_omnisharp_client()
+                client_cm = OmniSharpClient(server=server, workspace=project_root)
+            else:
+                from lsp_client import Client
+                client_cm = Client(server=server, workspace=project_root)
+            
+            async with client_cm as client:
+                logger.info(f"LSP worker ({language}) connected, waiting for analysis...")
                 # Wait for LSP to analyze project files
-                await asyncio.sleep(3)
-                logger.info(f"LSP worker ready for {project_root}")
-                response_queue.put({"status": "ready"})
+                await asyncio.sleep(config["startup_delay"])
+                logger.info(f"LSP worker ({language}) ready for {project_root}")
+                response_queue.put({"status": "ready", "language": language})
                 
                 while True:
                     # Check for requests (non-blocking)
@@ -59,7 +151,7 @@ def _lsp_worker(request_queue: mp.Queue, response_queue: mp.Queue, project_root:
                     except Exception as e:
                         response_queue.put({"id": request.get("id"), "error": str(e)})
         except Exception as e:
-            response_queue.put({"status": "error", "error": str(e)})
+            response_queue.put({"status": "error", "error": str(e), "language": language})
     
     asyncio.run(run_worker())
 
@@ -232,10 +324,14 @@ async def handle_request(client: Any, request: dict, project_root: str) -> Any:
 
 
 class LspSubprocess:
-    """Manages LSP subprocess for isolated execution."""
+    """Manages LSP subprocess for isolated execution.
     
-    def __init__(self, project_root: str):
+    v53: Now supports multiple languages via language parameter.
+    """
+    
+    def __init__(self, project_root: str, language: str = "python"):
         self.project_root = Path(project_root).resolve()
+        self.language = language  # v53: Track language
         self._process: Optional[mp.Process] = None
         self._request_queue: Optional[mp.Queue] = None
         self._response_queue: Optional[mp.Queue] = None
@@ -251,9 +347,10 @@ class LspSubprocess:
             self._request_queue = mp_ctx.Queue()
             self._response_queue = mp_ctx.Queue()
             
+            # v53: Pass language to worker
             self._process = mp_ctx.Process(
                 target=_lsp_worker,
-                args=(self._request_queue, self._response_queue, str(self.project_root)),
+                args=(self._request_queue, self._response_queue, str(self.project_root), self.language),
                 daemon=True
             )
             self._process.start()
@@ -437,18 +534,53 @@ class LspSubprocess:
 _subprocess: Optional[LspSubprocess] = None
 
 
-async def get_lsp_subprocess(project_root: str) -> LspSubprocess:
-    """Get or create the LSP subprocess singleton."""
+def detect_project_language(project_root: str) -> str:
+    """Detect project language from file patterns.
+    
+    v53: Auto-detect language for LSP selection.
+    """
+    root = Path(project_root)
+    
+    # Check for C# indicators
+    if list(root.glob("**/*.csproj"))[:1] or list(root.glob("**/*.sln"))[:1]:
+        return "csharp"
+    
+    # Check for Python indicators  
+    if (root / "pyproject.toml").exists() or (root / "setup.py").exists():
+        return "python"
+    if list(root.glob("**/*.py"))[:1]:
+        return "python"
+    
+    # Default to python
+    return "python"
+
+
+async def get_lsp_subprocess(project_root: str, language: str = None) -> LspSubprocess:
+    """Get or create the LSP subprocess singleton.
+    
+    v53: Now supports language param. Auto-detects if not provided.
+    Restarts subprocess if project or language changes.
+    """
     global _subprocess
     
     resolved = Path(project_root).resolve()
     
-    if _subprocess is not None and _subprocess.project_root == resolved and _subprocess._started:
+    # v53: Auto-detect language if not specified
+    if language is None:
+        language = detect_project_language(str(resolved))
+    
+    # Reuse if same project AND same language
+    if (_subprocess is not None 
+        and _subprocess.project_root == resolved 
+        and _subprocess.language == language
+        and _subprocess._started):
         return _subprocess
     
+    # Stop old subprocess if different project or language
     if _subprocess is not None:
         _subprocess.stop()
     
-    _subprocess = LspSubprocess(str(resolved))
+    # v53: Create with language
+    _subprocess = LspSubprocess(str(resolved), language=language)
     await _subprocess.start()
     return _subprocess

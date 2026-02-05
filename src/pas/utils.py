@@ -73,65 +73,50 @@ def safe_close_connection(conn):
 
 
 # =============================================================================
-# Embedding Generation
+# Embedding Generation (Phase 36: External Service Only)
 # =============================================================================
 
-# Lazy-loaded embedding model (singleton)
-_embedding_model = None
-_EMBEDDING_MODEL_NAME = "intfloat/e5-base-v2"  # 768-dim, best quality+speed balance
-
-# Set to True to load model at startup (avoids MCP timeout with GPU)
-# Disabled by default - ROCm causing crashes, using lazy load for now
-PRELOAD_MODEL = os.getenv("PAS_PRELOAD_MODEL", "false").lower() == "true"
-
-
-def get_embedding_model():
-    """Get or initialize the sentence transformer model (singleton)."""
-    global _embedding_model
-    if _embedding_model is None:
-        logger.info(f"Loading embedding model: {_EMBEDDING_MODEL_NAME} (may take 15-30s on GPU, 2-5m on CPU)...")
-        
-        # Disable tqdm progress bars to prevent stdout corruption (MCP protocol violation)
-        os.environ["TQDM_DISABLE"] = "1"
-        
-        # v2026-02-02: Redirect stdout/stderr to suppress "BertModel LOAD REPORT" and other noise
-        import sys
-        from contextlib import redirect_stdout, redirect_stderr
-        
-        with open(os.devnull, 'w') as fnull:
-            with redirect_stdout(fnull), redirect_stderr(fnull):
-                from sentence_transformers import SentenceTransformer
-                _embedding_model = SentenceTransformer(_EMBEDDING_MODEL_NAME)
-        
-        # Log device info
-        try:
-            import torch
-            device = "cuda/ROCm" if torch.cuda.is_available() else "CPU"
-            logger.info(f"Embedding model loaded on {device}")
-        except ImportError:
-            logger.info("Embedding model loaded")
-    return _embedding_model
-
-
-# Preload model at module import if enabled
-# SKIP in subprocesses to avoid GPU OOM from double loading
-if PRELOAD_MODEL:
-    import sys
-    # Detect if we're in a multiprocessing subprocess (spawned with spawn/forkserver)
-    is_subprocess = hasattr(sys.modules.get('__main__'), '__spec__') is False or \
-                    getattr(sys.modules.get('__main__', {}), '__name__', '') == '__mp_main__'
-    
-    if not is_subprocess:
-        logger.info("Preloading embedding model at startup...")
-        get_embedding_model()
-    else:
-        logger.debug("Skipping model preload in subprocess")
+# External embedding service is now REQUIRED (Phase 36)
+# No more embedded model fallback - saves ~1GB RAM
+EMBEDDING_URL = os.getenv("PAS_EMBEDDING_URL", "http://127.0.0.1:5020")
 
 
 def get_embedding(text: str) -> list[float]:
-    """Generate a 768-dim embedding for the given text."""
-    model = get_embedding_model()
-    return model.encode(text).tolist()
+    """Generate embedding using external service.
+    
+    Phase 36: External service is now REQUIRED. No embedded model fallback.
+    This saves ~1GB RAM and ensures consistent 1024-dim embeddings.
+    
+    Raises:
+        RuntimeError: If external embedding service is unavailable
+    """
+    import httpx
+    try:
+        resp = httpx.post(
+            f"{EMBEDDING_URL}/embed",
+            json={"text": text},
+            timeout=60.0
+        )
+        resp.raise_for_status()
+        return resp.json()["embedding"]
+    except Exception as e:
+        raise RuntimeError(
+            f"Embedding service unavailable at {EMBEDDING_URL}: {e}. "
+            "Start the embedding service with: systemctl --user start embedding-service"
+        )
+
+
+async def get_embedding_async(text: str) -> list[float]:
+    """Async version of get_embedding for use in async contexts."""
+    from pas.helpers.external_services import get_embedding as get_embedding_external
+    try:
+        return await get_embedding_external(text)
+    except Exception as e:
+        raise RuntimeError(
+            f"Embedding service unavailable at {EMBEDDING_URL}: {e}. "
+            "Start the embedding service with: systemctl --user start embedding-service"
+        )
+
 
 
 # =============================================================================

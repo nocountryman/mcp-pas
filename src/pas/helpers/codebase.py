@@ -31,6 +31,7 @@ LANGUAGE_MAP = {
     ".hpp": "cpp",
     ".rb": "ruby",
     ".php": "php",
+    ".cs": "csharp",  # v53: C# support
 }
 
 # Extensions to skip during indexing
@@ -189,6 +190,29 @@ def extract_symbols(content: str, language: str) -> list[dict]:
                 if name_node:
                     symbols.append({
                         'type': 'function',
+                        'name': name_node.text.decode(),
+                        'line_start': node.start_point[0] + 1,
+                        'line_end': node.end_point[0] + 1,
+                        'signature': content[node.start_byte:node.end_byte].split('\n')[0][:200],
+                    })
+            
+            # v53: C# method and class extraction
+            elif node_type == 'method_declaration':
+                name_node = node.child_by_field_name('name')
+                if name_node:
+                    symbols.append({
+                        'type': 'method',
+                        'name': name_node.text.decode(),
+                        'line_start': node.start_point[0] + 1,
+                        'line_end': node.end_point[0] + 1,
+                        'signature': content[node.start_byte:node.end_byte].split('\n')[0][:300],
+                    })
+            
+            elif node_type == 'class_declaration':
+                name_node = node.child_by_field_name('name')
+                if name_node:
+                    symbols.append({
+                        'type': 'class',
                         'name': name_node.text.decode(),
                         'line_start': node.start_point[0] + 1,
                         'line_end': node.end_point[0] + 1,
@@ -614,7 +638,8 @@ async def sync_file_incremental(
         # Extract symbols (LSP-first)
         symbols = []
         lsp_used = False
-        if lsp_pool and language == "python":
+        # v53: Enable LSP extraction for Python and C#
+        if lsp_pool and language in ("python", "csharp"):
             try:
                 symbols = await extract_symbols_lsp(file_path, lsp_pool)
                 if symbols:
@@ -677,7 +702,8 @@ async def sync_file_incremental(
                 )
             
             # Index references via LSP if requested
-            if include_references and lsp_pool and language == "python":
+            # v53: Enable for Python and C#
+            if include_references and lsp_pool and language in ("python", "csharp"):
                 for sym in symbols:
                     try:
                         line = sym.get('line_start', 1) - 1  # LSP is 0-indexed
@@ -705,7 +731,8 @@ async def sync_file_incremental(
                         logger.debug(f"Reference indexing failed for {sym['name']}: {e}")
             
             # Index call hierarchy via LSP if requested
-            if include_call_hierarchy and lsp_pool and language == "python":
+            # v53: Enable for Python and C#
+            if include_call_hierarchy and lsp_pool and language in ("python", "csharp"):
                 for sym in symbols:
                     if sym.get('type') in ('function', 'method'):
                         try:

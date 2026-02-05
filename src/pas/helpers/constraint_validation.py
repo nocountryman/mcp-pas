@@ -40,7 +40,7 @@ def get_active_constraints(
         constraint_type: Optional filter by type ('philosophy', 'environment', 'quality')
     
     Returns:
-        List of constraint dicts with key, data, enforcement_level, type
+        List of constraint dicts with key, data, enforcement_level, type, psychological_weight
     """
     conn = get_db_connection()
     cur = conn.cursor()
@@ -54,7 +54,7 @@ def get_active_constraints(
     project_uuid = row["id"]
     
     query = """
-        SELECT constraint_key, constraint_data, enforcement_level, constraint_type, source
+        SELECT constraint_key, constraint_data, enforcement_level, constraint_type, source, psychological_weight
         FROM project_constraints
         WHERE project_id = %s AND valid_to IS NULL
     """
@@ -68,6 +68,7 @@ def get_active_constraints(
     
     cur.execute(query, params)
     return [dict(row) for row in cur.fetchall()]
+
 
 
 def validate_hypothesis(hypothesis: str, project_id: str) -> dict[str, Any]:
@@ -159,7 +160,10 @@ def get_constraint_summary(project_id: str) -> dict[str, Any]:
     Get a summary of active constraints for display in prepare_expansion.
     
     Returns constraints formatted with enforcement icons for surfacing.
+    Uses build_constraint_section from prompt_templates for consistent formatting.
     """
+    from pas.helpers.prompt_templates import build_constraint_section
+    
     constraints = get_active_constraints(project_id)
     
     ENFORCEMENT_ICONS = {
@@ -173,19 +177,20 @@ def get_constraint_summary(project_id: str) -> dict[str, Any]:
             "key": c["constraint_key"],
             "value": c["constraint_data"],
             "enforcement": c["enforcement_level"],
+            "enforcement_level": c["enforcement_level"],  # For build_constraint_section
+            "constraint_key": c["constraint_key"],  # For build_constraint_section
+            "constraint_data": c["constraint_data"],  # For build_constraint_section
             "icon": ENFORCEMENT_ICONS.get(c["enforcement_level"], ""),
-            "type": c["constraint_type"]
+            "type": c["constraint_type"],
+            "psychological_weight": c.get("psychological_weight")
         }
         for c in constraints
         if c["enforcement_level"] != "hidden"
     ]
     
-    # Build constraint prompt for hypothesis generation
+    # Build constraint prompt using new template helper
     if visible_constraints:
-        lines = ["🔒 ACTIVE CONSTRAINTS:"]
-        for c in visible_constraints:
-            lines.append(f"  {c['icon']} {c['key']}: {c['value']} ({c['enforcement'].upper()})")
-        constraint_prompt = "\n".join(lines)
+        constraint_prompt = build_constraint_section(visible_constraints, "🔒 ACTIVE CONSTRAINTS")
     else:
         constraint_prompt = None
     
